@@ -48,6 +48,7 @@ tolerances:
     max_fid_degradation: 2.0
 
 budget:
+  max_experiments: 10
   max_iterations: 15
   max_node_retries: 3
   timeout_seconds_per_eval: 300

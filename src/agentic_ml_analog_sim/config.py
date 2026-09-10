@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ReferenceDesignConfig(BaseModel):
@@ -86,13 +86,18 @@ class TolerancesConfig(BaseModel):
     solver_accuracy: SolverAccuracyTolerance = Field(default_factory=SolverAccuracyTolerance)
 
 
-class BudgetConfig(BaseModel):
-    """Execution and evaluation resource budget."""
+class ExperimentLimitsConfig(BaseModel):
+    """Execution and evaluation resource limits."""
     model_config = ConfigDict(extra="forbid")
 
-    max_iterations: int = Field(default=15, gt=0)
-    max_node_retries: int = Field(default=3, gt=0)
+    max_experiments: int = Field(default=10, gt=0, description="Maximal number of completed candidate experiments")
+    max_iterations: int = Field(default=10, gt=0, description="Maximal loop iterations")
+    max_node_retries: int = Field(default=3, gt=0, description="Maximal retry attempts for rejected proposals")
     timeout_seconds_per_eval: int = Field(default=300, gt=0)
+
+
+# Backward-compatibility alias for Phase 0
+BudgetConfig = ExperimentLimitsConfig
 
 
 class SimulationConfig(BaseModel):
@@ -105,7 +110,23 @@ class SimulationConfig(BaseModel):
     noise_models: List[str]
     sparsity_configs: SparsityConfigs
     tolerances: TolerancesConfig
-    budget: BudgetConfig
+    experiment_limits: Optional[ExperimentLimitsConfig] = None
+    budget: Optional[ExperimentLimitsConfig] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_limits(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Synchronize experiment_limits and budget fields
+            if "experiment_limits" in data and "budget" not in data:
+                data["budget"] = data["experiment_limits"]
+            elif "budget" in data and "experiment_limits" not in data:
+                data["experiment_limits"] = data["budget"]
+            elif "experiment_limits" not in data and "budget" not in data:
+                default_limits = ExperimentLimitsConfig().model_dump()
+                data["experiment_limits"] = default_limits
+                data["budget"] = default_limits
+        return data
 
 
 def load_simulation_config(path: Union[str, Path]) -> SimulationConfig:
