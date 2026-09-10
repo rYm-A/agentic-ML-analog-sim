@@ -192,9 +192,14 @@ class ResultDatabase:
         finally:
             conn.close()
 
-    def get_proposals(self, status: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
-        """Retrieve proposals optionally filtered by status, ordered by newest iteration."""
-        return self.query_proposals(status=status, limit=limit)
+    def get_proposals(
+        self,
+        status: Optional[str] = None,
+        limit: int = 100,
+        is_reference: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve proposals optionally filtered by status and reference flag."""
+        return self.query_proposals(status=status, limit=limit, is_reference=is_reference)
 
     def query_proposals(
         self,

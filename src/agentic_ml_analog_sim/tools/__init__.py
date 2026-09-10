@@ -8,6 +8,7 @@ from agentic_ml_analog_sim.tools.result_db_tool import (
     insert_proposal,
     query_proposals,
 )
+from agentic_ml_analog_sim.tools.plot_tool import PlotTool
 
 try:
     from agentic_ml_analog_sim.tools.un0_context_tool import (
@@ -21,6 +22,7 @@ except ImportError:
 
 __all__ = [
     "ResultDBTool",
+    "PlotTool",
     "query_proposals",
     "get_pareto_front",
     "get_reference_result",
