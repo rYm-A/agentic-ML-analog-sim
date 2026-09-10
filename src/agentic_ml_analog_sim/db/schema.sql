@@ -21,6 +21,13 @@ CREATE TABLE IF NOT EXISTS proposals (
     pareto_optimal BOOLEAN DEFAULT 0,
     selection_reason TEXT,
     phase_1_prompt TEXT,
+    rewrite_solver_status TEXT DEFAULT 'PENDING',
+    rewrite_noise_status TEXT DEFAULT 'PENDING',
+    rewrite_compiler_status TEXT DEFAULT 'PENDING',
+    compilation_status TEXT DEFAULT 'PENDING',
+    simulation_status TEXT DEFAULT 'PENDING',
+    error_stage TEXT,
+    error_message TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -35,11 +42,28 @@ CREATE TABLE IF NOT EXISTS comments (
     FOREIGN KEY(candidate_id) REFERENCES proposals(candidate_id) ON DELETE CASCADE
 );
 
--- Indexes on status, solver+noise_model, candidate_id
+CREATE TABLE IF NOT EXISTS token_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id TEXT,
+    phase TEXT NOT NULL,
+    node_name TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_tokens INTEGER DEFAULT 0,
+    completion_tokens INTEGER DEFAULT 0,
+    total_tokens INTEGER DEFAULT 0,
+    cost_usd REAL DEFAULT 0.0,
+    duration_seconds REAL DEFAULT 0.0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(candidate_id) REFERENCES proposals(candidate_id) ON DELETE SET NULL
+);
+
+-- Indexes on status, solver+noise_model, candidate_id, token_usage
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
 CREATE INDEX IF NOT EXISTS idx_proposals_solver_noise ON proposals(solver, noise_model);
 CREATE INDEX IF NOT EXISTS idx_proposals_candidate_id ON proposals(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_comments_candidate_id ON comments(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_token_usage_phase ON token_usage(phase);
+CREATE INDEX IF NOT EXISTS idx_token_usage_candidate ON token_usage(candidate_id);
 
 -- Trigger to update updated_at timestamp automatically on proposal modification
 CREATE TRIGGER IF NOT EXISTS trg_proposals_updated_at

@@ -64,6 +64,10 @@ class ResultDBTool(ChiaTool):
         self.mcp.add_tool(self.get_reference_result, name=f"{self.name}_get_reference_result")
         self.mcp.add_tool(self.insert_proposal, name=f"{self.name}_insert_proposal")
         self.mcp.add_tool(self.add_comment, name=f"{self.name}_add_comment")
+        self.mcp.add_tool(self.get_execution_statistics, name=f"{self.name}_get_execution_statistics")
+        self.mcp.add_tool(self.get_token_usage_summary, name=f"{self.name}_get_token_usage_summary")
+        self.mcp.add_tool(self.record_token_usage, name=f"{self.name}_record_token_usage")
+        self.mcp.add_tool(self.get_completed_experiments_count, name=f"{self.name}_get_completed_experiments_count")
 
     def query_proposals(self, status: Optional[str] = None, limit: int = 20) -> str:
         """Query simulation candidate proposals from the database, optionally filtered by status.
@@ -226,6 +230,81 @@ class ResultDBTool(ChiaTool):
             })
         except Exception as e:
             return json.dumps({"status": "ERROR", "message": f"Error adding comment: {e}"})
+
+    def get_execution_statistics(self) -> str:
+        """Retrieve aggregated counts and breakdowns of succeeded vs failed compilations,
+        simulations, and code rewrites across all candidate experiments.
+
+        Returns:
+            JSON string containing compilation, simulation, and rewrite statistics.
+        """
+        try:
+            stats = self.db.get_execution_statistics()
+            return json.dumps({"status": "SUCCESS", "statistics": stats}, indent=2)
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error retrieving execution statistics: {e}"})
+
+    def get_token_usage_summary(self, phase: Optional[str] = None) -> str:
+        """Retrieve total tokens consumed and estimated costs across all LLM calls,
+        optionally filtered by phase ('phase_0', 'phase_1', 'phase_2').
+
+        Returns:
+            JSON string containing overall totals and breakdowns by phase, model, and node.
+        """
+        try:
+            summary = self.db.get_token_usage_summary(phase=phase)
+            return json.dumps({"status": "SUCCESS", "token_usage": summary}, indent=2)
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error retrieving token summary: {e}"})
+
+    def record_token_usage(
+        self,
+        phase: str,
+        node_name: str,
+        model: str,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+        cost_usd: float = 0.0,
+        candidate_id: Optional[str] = None,
+        duration_seconds: float = 0.0,
+    ) -> str:
+        """Record token counts and estimated cost for an LLM execution turn.
+
+        Returns:
+            JSON string confirming recorded token usage with row id.
+        """
+        try:
+            row_id = self.db.record_token_usage(
+                phase=phase,
+                node_name=node_name,
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                cost_usd=cost_usd,
+                candidate_id=candidate_id,
+                duration_seconds=duration_seconds,
+            )
+            return json.dumps({
+                "status": "SUCCESS",
+                "token_usage_id": row_id,
+                "message": f"Token usage recorded successfully (id={row_id}).",
+            })
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error recording token usage: {e}"})
+
+    def get_completed_experiments_count(self) -> str:
+        """Retrieve the number of completed or failed candidate experiments.
+
+        Returns:
+            JSON string with completed_experiments_count.
+        """
+        try:
+            count = self.db.get_completed_experiments_count()
+            return json.dumps({"status": "SUCCESS", "completed_experiments_count": count})
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error getting completed experiments count: {e}"})
 
 
 # Direct helper functions for local/test execution without requiring tool server instantiation

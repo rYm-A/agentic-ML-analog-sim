@@ -53,7 +53,7 @@ class ResultDatabase:
         return conn
 
     def init_db(self) -> None:
-        """Initialize database schema from schema.sql."""
+        """Initialize database schema from schema.sql with idempotent migrations."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if not SCHEMA_PATH.is_file():
             raise FileNotFoundError(f"Schema file not found at {SCHEMA_PATH}")
@@ -65,6 +65,23 @@ class ResultDatabase:
         try:
             conn.executescript(schema_sql)
             conn.execute("PRAGMA journal_mode = WAL;")
+
+            # Ensure idempotent column additions for existing Phase 0 databases
+            cur = conn.execute("PRAGMA table_info(proposals);")
+            existing_cols = {row["name"] for row in cur.fetchall()}
+            new_columns = [
+                ("rewrite_solver_status", "TEXT DEFAULT 'PENDING'"),
+                ("rewrite_noise_status", "TEXT DEFAULT 'PENDING'"),
+                ("rewrite_compiler_status", "TEXT DEFAULT 'PENDING'"),
+                ("compilation_status", "TEXT DEFAULT 'PENDING'"),
+                ("simulation_status", "TEXT DEFAULT 'PENDING'"),
+                ("error_stage", "TEXT"),
+                ("error_message", "TEXT"),
+            ]
+            for col_name, col_type in new_columns:
+                if col_name not in existing_cols:
+                    conn.execute(f"ALTER TABLE proposals ADD COLUMN {col_name} {col_type};")
+
             conn.commit()
         finally:
             conn.close()
@@ -423,6 +440,13 @@ class ResultDatabase:
             "solver_params",
             "noise_params",
             "sparsity_config",
+            "rewrite_solver_status",
+            "rewrite_noise_status",
+            "rewrite_compiler_status",
+            "compilation_status",
+            "simulation_status",
+            "error_stage",
+            "error_message",
         }
 
         update_cols = ["status = ?"]
@@ -461,3 +485,263 @@ class ResultDatabase:
     ) -> Dict[str, Any]:
         """Alias for mark_proposal_status for seamless node integration."""
         return self.mark_proposal_status(candidate_id, new_status, **kwargs)
+
+    def record_token_usage(
+        self,
+        phase: str,
+        node_name: str,
+        model: str,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+        cost_usd: float = 0.0,
+        candidate_id: Optional[str] = None,
+        duration_seconds: float = 0.0,
+    ) -> int:
+        """Record token counts and estimated cost for an LLM execution.
+
+        Returns:
+            Inserted token_usage row id.
+        """
+        conn = self._get_connection()
+        try:
+            if total_tokens == 0 and (prompt_tokens > 0 or completion_tokens > 0):
+                total_tokens = prompt_tokens + completion_tokens
+
+            cur = conn.execute(
+                """
+                INSERT INTO token_usage (
+                    candidate_id, phase, node_name, model,
+                    prompt_tokens, completion_tokens, total_tokens,
+                    cost_usd, duration_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candidate_id,
+                    phase,
+                    node_name,
+                    model,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    cost_usd,
+                    duration_seconds,
+                ),
+            )
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+    def get_token_usage_summary(self, phase: Optional[str] = None) -> Dict[str, Any]:
+        """Aggregate total tokens and cost across phases, nodes, and models."""
+        conn = self._get_connection()
+        try:
+            where_clause = "WHERE phase = ?" if phase else ""
+            params = (phase,) if phase else ()
+
+            cur = conn.execute(
+                f"""
+                SELECT 
+                    COALESCE(SUM(prompt_tokens), 0) AS total_prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS total_completion_tokens,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(cost_usd), 0.0) AS total_cost_usd,
+                    COUNT(*) AS total_calls
+                FROM token_usage
+                {where_clause}
+                """,
+                params,
+            )
+            overall = dict(cur.fetchone())
+
+            # Breakdown by phase
+            cur = conn.execute(
+                """
+                SELECT phase, 
+                       SUM(prompt_tokens) AS prompt_tokens,
+                       SUM(completion_tokens) AS completion_tokens,
+                       SUM(total_tokens) AS total_tokens,
+                       SUM(cost_usd) AS cost_usd,
+                       COUNT(*) AS num_calls
+                FROM token_usage
+                GROUP BY phase
+                """
+            )
+            by_phase = {row["phase"]: dict(row) for row in cur.fetchall()}
+
+            # Breakdown by model
+            cur = conn.execute(
+                """
+                SELECT model, 
+                       SUM(prompt_tokens) AS prompt_tokens,
+                       SUM(completion_tokens) AS completion_tokens,
+                       SUM(total_tokens) AS total_tokens,
+                       SUM(cost_usd) AS cost_usd,
+                       COUNT(*) AS num_calls
+                FROM token_usage
+                GROUP BY model
+                """
+            )
+            by_model = {row["model"]: dict(row) for row in cur.fetchall()}
+
+            # Breakdown by node
+            cur = conn.execute(
+                """
+                SELECT node_name, phase,
+                       SUM(prompt_tokens) AS prompt_tokens,
+                       SUM(completion_tokens) AS completion_tokens,
+                       SUM(total_tokens) AS total_tokens,
+                       SUM(cost_usd) AS cost_usd,
+                       COUNT(*) AS num_calls
+                FROM token_usage
+                GROUP BY node_name, phase
+                """
+            )
+            by_node = {f"{row['phase']}.{row['node_name']}": dict(row) for row in cur.fetchall()}
+
+            return {
+                "overall": overall,
+                "by_phase": by_phase,
+                "by_model": by_model,
+                "by_node": by_node,
+            }
+        finally:
+            conn.close()
+
+    def get_completed_experiments_count(self) -> int:
+        """Count evaluated candidate experiments (completed or failed, non-reference)."""
+        conn = self._get_connection()
+        try:
+            cur = conn.execute(
+                """
+                SELECT COUNT(*) FROM proposals
+                WHERE is_reference = 0
+                  AND status IN ('COMPLETED', 'FAILED')
+                """
+            )
+            return cur.fetchone()[0]
+        finally:
+            conn.close()
+
+    def update_execution_status(
+        self,
+        candidate_id: str,
+        rewrite_solver_status: Optional[str] = None,
+        rewrite_noise_status: Optional[str] = None,
+        rewrite_compiler_status: Optional[str] = None,
+        compilation_status: Optional[str] = None,
+        simulation_status: Optional[str] = None,
+        error_stage: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Update granular compilation, simulation, and rewrite statuses."""
+        updates: Dict[str, Any] = {}
+        if rewrite_solver_status is not None:
+            updates["rewrite_solver_status"] = rewrite_solver_status
+        if rewrite_noise_status is not None:
+            updates["rewrite_noise_status"] = rewrite_noise_status
+        if rewrite_compiler_status is not None:
+            updates["rewrite_compiler_status"] = rewrite_compiler_status
+        if compilation_status is not None:
+            updates["compilation_status"] = compilation_status
+        if simulation_status is not None:
+            updates["simulation_status"] = simulation_status
+        if error_stage is not None:
+            updates["error_stage"] = error_stage
+        if error_message is not None:
+            updates["error_message"] = error_message
+
+        if not updates:
+            return self.get_proposal(candidate_id)
+
+        conn = self._get_connection()
+        try:
+            set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
+            values = list(updates.values()) + [candidate_id]
+            cur = conn.execute(f"UPDATE proposals SET {set_clause} WHERE candidate_id = ?", values)
+            if cur.rowcount == 0:
+                raise KeyError(f"Proposal '{candidate_id}' not found.")
+            conn.commit()
+            return self.get_proposal(candidate_id)
+        finally:
+            conn.close()
+
+    def get_execution_statistics(self) -> Dict[str, Any]:
+        """Return breakdown by candidate and in total of succeeded vs failed compilations,
+        simulations, and rewrites.
+        """
+        conn = self._get_connection()
+        try:
+            cur = conn.execute("SELECT * FROM proposals WHERE is_reference = 0")
+            proposals = [dict(row) for row in cur.fetchall()]
+
+            stats: Dict[str, Dict[str, List[str]]] = {
+                "compilations": {"succeeded": [], "failed": [], "pending": []},
+                "simulations": {"succeeded": [], "failed": [], "pending": []},
+                "rewrites_solver": {"succeeded": [], "failed": [], "pending": []},
+                "rewrites_noise": {"succeeded": [], "failed": [], "pending": []},
+                "rewrites_compiler": {"succeeded": [], "failed": [], "pending": []},
+            }
+
+            for p in proposals:
+                cid = p["candidate_id"]
+                # Compilation
+                c_stat = (p.get("compilation_status") or "PENDING").upper()
+                if c_stat == "SUCCESS":
+                    stats["compilations"]["succeeded"].append(cid)
+                elif c_stat == "FAILED":
+                    stats["compilations"]["failed"].append(cid)
+                else:
+                    stats["compilations"]["pending"].append(cid)
+
+                # Simulation
+                s_stat = (p.get("simulation_status") or "PENDING").upper()
+                if s_stat == "SUCCESS":
+                    stats["simulations"]["succeeded"].append(cid)
+                elif s_stat == "FAILED":
+                    stats["simulations"]["failed"].append(cid)
+                else:
+                    stats["simulations"]["pending"].append(cid)
+
+                # Rewrites
+                rw_s = (p.get("rewrite_solver_status") or "PENDING").upper()
+                if rw_s == "SUCCESS":
+                    stats["rewrites_solver"]["succeeded"].append(cid)
+                elif rw_s == "FAILED":
+                    stats["rewrites_solver"]["failed"].append(cid)
+                else:
+                    stats["rewrites_solver"]["pending"].append(cid)
+
+                rw_n = (p.get("rewrite_noise_status") or "PENDING").upper()
+                if rw_n == "SUCCESS":
+                    stats["rewrites_noise"]["succeeded"].append(cid)
+                elif rw_n == "FAILED":
+                    stats["rewrites_noise"]["failed"].append(cid)
+                else:
+                    stats["rewrites_noise"]["pending"].append(cid)
+
+                rw_c = (p.get("rewrite_compiler_status") or "PENDING").upper()
+                if rw_c == "SUCCESS":
+                    stats["rewrites_compiler"]["succeeded"].append(cid)
+                elif rw_c == "FAILED":
+                    stats["rewrites_compiler"]["failed"].append(cid)
+                else:
+                    stats["rewrites_compiler"]["pending"].append(cid)
+
+            return {
+                "total_candidates": len(proposals),
+                "compilations_succeeded_count": len(stats["compilations"]["succeeded"]),
+                "compilations_failed_count": len(stats["compilations"]["failed"]),
+                "simulations_succeeded_count": len(stats["simulations"]["succeeded"]),
+                "simulations_failed_count": len(stats["simulations"]["failed"]),
+                "rewrites_solver_succeeded_count": len(stats["rewrites_solver"]["succeeded"]),
+                "rewrites_solver_failed_count": len(stats["rewrites_solver"]["failed"]),
+                "rewrites_noise_succeeded_count": len(stats["rewrites_noise"]["succeeded"]),
+                "rewrites_noise_failed_count": len(stats["rewrites_noise"]["failed"]),
+                "rewrites_compiler_succeeded_count": len(stats["rewrites_compiler"]["succeeded"]),
+                "rewrites_compiler_failed_count": len(stats["rewrites_compiler"]["failed"]),
+                "details": stats,
+            }
+        finally:
+            conn.close()
