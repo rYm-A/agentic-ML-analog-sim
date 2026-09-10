@@ -1,0 +1,31 @@
+# Default Bare-Metal Native macOS on Apple Silicon Cluster Configuration
+cluster_name: "agentic-ml-analog-sim-mac"
+
+provider:
+  head_ip: ${THIS_MACHINE}
+
+auth:
+  ssh_user: ${USER}
+  ssh_private_key: "~/.ssh/id_ed25519"
+
+head_env_commands:
+  - "source ~/.zshrc && conda activate chia_env"
+
+head_setup_commands:
+  - "source ~/.zshrc && conda activate chia_env"
+
+head_start_ray_commands:
+  - "source ~/.zshrc && conda activate chia_env && ray stop"
+  - "source ~/.zshrc && conda activate chia_env && ray start --head --port=6379 --node-ip-address=${THIS_MACHINE} --resources='{\"antigravity_creds\": 1, \"metal_gpu\": 1, \"sqlite_db\": 1, \"python_worker\": 4}' --include-dashboard=False"
+
+available_node_types:
+  local_worker:
+    resources: {"antigravity_creds": 1, "sqlite_db": 1}
+    num_workers: 1
+    compatible_ips: ["${THIS_MACHINE}"]
+    worker_env_commands:
+      - "source ~/.zshrc && conda activate chia_env"
+
+worker_start_ray_commands:
+  - "ray stop"
+  - "ray start --address=$RAY_HEAD_IP:6379 --dashboard-agent-listen-port=0"
