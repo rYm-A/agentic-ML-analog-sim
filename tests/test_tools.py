@@ -10,9 +10,10 @@ from agentic_ml_analog_sim.tools import (
     ResultDBTool,
     Un0Context,
     Un0ContextTool,
+    resolve_un0_root,
 )
 
-REPO_ROOT = Path("/Users/chia/ChiaWorkspace/Un-0")
+REPO_ROOT = resolve_un0_root()
 
 
 # ============================================================================

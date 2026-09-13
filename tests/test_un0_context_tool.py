@@ -4,12 +4,14 @@ import pytest
 from pathlib import Path
 
 from agentic_ml_analog_sim.tools.un0_context_tool import (
+    DEFAULT_UN0_ROOT,
     Un0Context,
     Un0ContextTool,
     create_un0_mcp_server,
+    resolve_un0_root,
 )
 
-REPO_ROOT = Path("/Users/chia/ChiaWorkspace/Un-0")
+REPO_ROOT = resolve_un0_root()
 
 
 @pytest.fixture
@@ -137,3 +139,29 @@ def test_un0_context_tool_delegation(un0_tool):
 def test_create_un0_mcp_server():
     server = create_un0_mcp_server(repo_root=REPO_ROOT)
     assert server.name == "un0_context"
+
+
+def test_dynamic_root_resolution():
+    """Test dynamic resolution order: explicit, submodule, sibling, and fallback."""
+    # 1. Explicit argument
+    explicit = resolve_un0_root("/tmp")
+    assert explicit == Path("/tmp").resolve()
+
+    # 2. Default resolution (no argument passed)
+    resolved = resolve_un0_root()
+    assert resolved.is_dir()
+    assert (resolved / "un0").is_dir() or (resolved / "pyproject.toml").is_file()
+
+    # 3. Un0Context default init without explicit repo_root
+    ctx_default = Un0Context()
+    assert ctx_default.repo_root.is_dir()
+    mods = ctx_default.un0_list_modules()
+    assert len(mods) >= 5
+
+    # 4. Un0ContextTool default init without explicit repo_root
+    tool_default = Un0ContextTool(name="un0_dyn_test", auto_start=False)
+    assert tool_default.context.repo_root.is_dir()
+
+    # 5. create_un0_mcp_server default init without explicit repo_root
+    server_default = create_un0_mcp_server()
+    assert server_default.name == "un0_context"

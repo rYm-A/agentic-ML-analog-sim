@@ -16,3 +16,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["Un-0", "submodules", ".git", ".pytest_cache"]

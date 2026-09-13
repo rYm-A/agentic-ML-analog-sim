@@ -37,8 +37,69 @@ except ImportError:  # pragma: no cover
 
 from mcp.server.fastmcp import FastMCP
 
-DEFAULT_UN0_ROOT = Path("/Users/chia/ChiaWorkspace/Un-0")
 logger = logging.getLogger(__name__)
+
+FALLBACK_UN0_ROOT = Path("/Users/chia/ChiaWorkspace/Un-0")
+
+
+def resolve_un0_root(repo_root: Optional[Union[str, Path]] = None) -> Path:
+    """Dynamically resolve the root directory of the Un-0 repository.
+
+    Search order:
+    1. Explicit argument passed to Un0Context(repo_root=...)
+    2. Submodule directory inside agentic-ML-analog-sim/Un-0 (or submodules/Un-0)
+    3. Sibling directory ../Un-0 relative to agentic-ML-analog-sim or CWD
+    4. Default fallback.
+
+    Args:
+        repo_root: Optional explicit path provided by caller.
+
+    Returns:
+        Resolved absolute Path to the Un-0 repository root.
+    """
+    # 1. Explicit argument passed
+    if repo_root is not None:
+        return Path(repo_root).resolve()
+
+    # Determine package / workspace root for agentic-ML-analog-sim
+    current_file = Path(__file__).resolve()
+    # Path hierarchy: .../agentic-ML-analog-sim/src/agentic_ml_analog_sim/tools/un0_context_tool.py
+    pkg_root = current_file.parents[3] if len(current_file.parents) > 3 else current_file.parent
+
+    # 2. Submodule directory inside agentic-ML-analog-sim/Un-0 or submodules/Un-0
+    submodule_candidates = [
+        pkg_root / "Un-0",
+        pkg_root / "submodules" / "Un-0",
+        Path.cwd() / "Un-0",
+        Path.cwd() / "submodules" / "Un-0",
+    ]
+    for cand in submodule_candidates:
+        if cand.is_dir() and ((cand / "un0").is_dir() or (cand / "pyproject.toml").is_file()):
+            return cand.resolve()
+
+    # 3. Sibling directory ../Un-0
+    sibling_candidates = [
+        pkg_root.parent / "Un-0",
+        Path.cwd().parent / "Un-0",
+        Path.cwd() / ".." / "Un-0",
+    ]
+    for cand in sibling_candidates:
+        if cand.is_dir() and ((cand / "un0").is_dir() or (cand / "pyproject.toml").is_file()):
+            return cand.resolve()
+
+    # Any candidate that exists as a directory
+    for cand in submodule_candidates + sibling_candidates:
+        if cand.is_dir():
+            return cand.resolve()
+
+    # 4. Default fallback
+    if FALLBACK_UN0_ROOT.is_dir():
+        return FALLBACK_UN0_ROOT.resolve()
+
+    return (pkg_root / "Un-0").resolve()
+
+
+DEFAULT_UN0_ROOT = resolve_un0_root()
 
 
 class Un0Context:
@@ -48,13 +109,14 @@ class Un0Context:
     modules, and architecture parameters.
     """
 
-    def __init__(self, repo_root: Union[str, Path] = DEFAULT_UN0_ROOT) -> None:
+    def __init__(self, repo_root: Optional[Union[str, Path]] = None) -> None:
         """Initialize with path to Un-0 repository root.
 
         Args:
-            repo_root: Absolute or relative path to the Un-0 repository.
+            repo_root: Optional absolute or relative path to the Un-0 repository.
+                       If None, dynamically resolves via submodule, sibling, or fallback.
         """
-        self.repo_root = Path(repo_root).resolve()
+        self.repo_root = resolve_un0_root(repo_root)
         if not self.repo_root.is_dir():
             raise FileNotFoundError(f"Un-0 repository not found at {self.repo_root}")
 
@@ -418,7 +480,7 @@ class Un0ContextTool(ChiaTool):
     def __init__(
         self,
         name: str = "un0_context",
-        repo_root: Union[str, Path] = DEFAULT_UN0_ROOT,
+        repo_root: Optional[Union[str, Path]] = None,
         task_options: Optional[Dict[str, Any]] = None,
         auto_start: Optional[bool] = None,
         logging_level: int = logging.INFO,
@@ -427,7 +489,7 @@ class Un0ContextTool(ChiaTool):
 
         Args:
             name: Tool name for logging and MCP endpoint routing.
-            repo_root: Path to the Un-0 repository.
+            repo_root: Optional path to the Un-0 repository (defaults to dynamic resolution).
             task_options: Optional Ray task placement and resource options.
             auto_start: If True, deploy server actor immediately via Ray.
                         If False, defer deployment. If None, auto-start only if
@@ -435,7 +497,7 @@ class Un0ContextTool(ChiaTool):
             logging_level: Logging level for tool logger.
         """
         super().__init__(name, task_options=task_options, logging_level=logging_level)
-        self.context = Un0Context(repo_root=Path(repo_root))
+        self.context = Un0Context(repo_root=repo_root)
 
         # Register tools with FastMCP instance
         self.mcp.add_tool(self.un0_read_file, name="un0_read_file")
@@ -486,13 +548,13 @@ class Un0ContextTool(ChiaTool):
 
 
 def create_un0_mcp_server(
-    repo_root: Union[str, Path] = DEFAULT_UN0_ROOT,
+    repo_root: Optional[Union[str, Path]] = None,
     server_name: str = "un0_context",
 ) -> FastMCP:
     """Create and configure a standalone FastMCP server for Un-0 tools.
 
     Args:
-        repo_root: Path to the Un-0 repository.
+        repo_root: Optional path to the Un-0 repository (defaults to dynamic resolution).
         server_name: MCP server name.
 
     Returns:

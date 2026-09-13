@@ -18,9 +18,18 @@ from typing import Any, Literal, Optional, Union
 from agentic_ml_analog_sim.config import SimulationConfig, load_simulation_config
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.mock.mock_llm import MockAntigravityLLM
-from agentic_ml_analog_sim.nodes.node1_check_reference import check_reference_data
-from agentic_ml_analog_sim.nodes.node2_propose_candidate import propose_candidate
-from agentic_ml_analog_sim.nodes.node3_validate_proposal import validate_proposal
+from agentic_ml_analog_sim.nodes.node1_phase0_check_reference import (
+    check_reference_data,
+    node1_phase0_check_reference,
+)
+from agentic_ml_analog_sim.nodes.node2_phase0_propose_candidate import (
+    node2_phase0_propose_candidate,
+    propose_candidate,
+)
+from agentic_ml_analog_sim.nodes.node3_phase0_validate_proposal import (
+    node3_phase0_validate_proposal,
+    validate_proposal,
+)
 
 logger = logging.getLogger("agentic_ml_analog_sim.phase_0")
 
@@ -125,10 +134,13 @@ def run_phase_0(
         except Exception as e:
             logger.debug("Could not bind ResultDBTool: %s", e)
 
-        repo_root = Path(un0_dir) if un0_dir is not None else Path("/Users/chia/ChiaWorkspace/Un-0")
+        from agentic_ml_analog_sim.tools.un0_context_tool import (
+            Un0ContextTool,
+            resolve_un0_root,
+        )
+        repo_root = resolve_un0_root(un0_dir)
         if repo_root.exists() and repo_root.is_dir():
             try:
-                from agentic_ml_analog_sim.tools.un0_context_tool import Un0ContextTool
                 tools.append(Un0ContextTool(repo_root=repo_root, auto_start=False))
             except Exception as e:
                 logger.debug("Could not bind Un0ContextTool for %s: %s", repo_root, e)
