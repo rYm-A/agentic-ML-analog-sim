@@ -52,3 +52,29 @@ budget:
   max_iterations: 15
   max_node_retries: 3
   timeout_seconds_per_eval: 300
+
+counter_limits:
+  max_counter_1_compilation: 3
+  max_counter_2_rewrite: 3
+  max_counter_3_debug_gate: 3
+  max_counter_4_debug_loop: 5
+
+agent_efforts:
+  node2_phase0_propose_candidate:
+    model: "gemini-2.5-pro"
+    effort: "high"
+  node1_phase1_solver_rewriter:
+    model: "gemini-2.5-pro"
+    effort: "high"
+  node2_phase1_noise_rewriter:
+    model: "gemini-2.5-pro"
+    effort: "high"
+  node3_phase1_compiler_rewriter:
+    model: "gemini-2.5-pro"
+    effort: "high"
+  node8_phase1_diagnostic_proposal:
+    model: "gemini-2.5-flash"
+    effort: "medium"
+  node2_phase2_generate_final_report:
+    model: "gemini-2.5-flash"
+    effort: "medium"

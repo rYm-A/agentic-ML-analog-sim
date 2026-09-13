@@ -93,7 +93,7 @@ def _find_reference_entry(db: Any, config: Any) -> Any:
 
 
 @ChiaFunction()
-def check_reference_data(db: Any, config: Any) -> bool:
+def node1_phase0_check_reference(db: Any, config: Any) -> bool:
     """Programmatically verify whether the reference design evaluation is complete in DB.
 
     Queries `db` for the reference design specified in `config.reference_design`.
@@ -151,3 +151,9 @@ def check_reference_data(db: Any, config: Any) -> bool:
         latency_ms,
     )
     return True
+
+
+# Backward compatibility aliases
+check_reference_data = node1_phase0_check_reference
+node1_check_reference = node1_phase0_check_reference
+

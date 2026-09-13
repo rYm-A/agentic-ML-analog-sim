@@ -18,8 +18,12 @@ from typing import Any, Dict, Literal, Optional, Union
 from agentic_ml_analog_sim.config import SimulationConfig, load_simulation_config
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.mock.mock_llm import MockAntigravityLLM
-from agentic_ml_analog_sim.nodes.phase2_check_experiment_limit import phase2_check_experiment_limit
-from agentic_ml_analog_sim.nodes.phase2_generate_final_report import phase2_generate_final_report
+from agentic_ml_analog_sim.nodes import (
+    node1_phase2_check_experiment_limit,
+    node2_phase2_generate_final_report,
+    phase2_check_experiment_limit,
+    phase2_generate_final_report,
+)
 from agentic_ml_analog_sim.reporting.interactive_session import InteractiveReportSession
 
 logger = logging.getLogger("agentic_ml_analog_sim.phase_2")

@@ -100,6 +100,48 @@ class ExperimentLimitsConfig(BaseModel):
 BudgetConfig = ExperimentLimitsConfig
 
 
+class CounterLimitsConfig(BaseModel):
+    """Counter limits for compilation, rewrite, and debugging loops."""
+    model_config = ConfigDict(extra="forbid")
+
+    max_counter_1_compilation: int = Field(default=3, gt=0)
+    max_counter_2_rewrite: int = Field(default=3, gt=0)
+    max_counter_3_debug_gate: int = Field(default=3, gt=0)
+    max_counter_4_debug_loop: int = Field(default=5, gt=0)
+
+
+class AgentModelConfig(BaseModel):
+    """Configuration for LLM model and reasoning effort for an agentic node."""
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = "gemini-2.5-flash"
+    effort: str = Field(default="medium", pattern="^(low|medium|high|max)$")
+
+
+class AgentEffortsConfig(BaseModel):
+    """LLM model and effort configurations for agentic nodes across phases."""
+    model_config = ConfigDict(extra="forbid")
+
+    node2_phase0_propose_candidate: AgentModelConfig = Field(
+        default_factory=lambda: AgentModelConfig(model="gemini-2.5-pro", effort="high")
+    )
+    node1_phase1_solver_rewriter: AgentModelConfig = Field(
+        default_factory=lambda: AgentModelConfig(model="gemini-2.5-pro", effort="high")
+    )
+    node2_phase1_noise_rewriter: AgentModelConfig = Field(
+        default_factory=lambda: AgentModelConfig(model="gemini-2.5-pro", effort="high")
+    )
+    node3_phase1_compiler_rewriter: AgentModelConfig = Field(
+        default_factory=lambda: AgentModelConfig(model="gemini-2.5-pro", effort="high")
+    )
+    node8_phase1_diagnostic_proposal: AgentModelConfig = Field(
+        default_factory=lambda: AgentModelConfig(model="gemini-2.5-flash", effort="medium")
+    )
+    node2_phase2_generate_final_report: AgentModelConfig = Field(
+        default_factory=lambda: AgentModelConfig(model="gemini-2.5-flash", effort="medium")
+    )
+
+
 class SimulationConfig(BaseModel):
     """Top-level simulation configuration model."""
     model_config = ConfigDict(extra="forbid")
@@ -112,6 +154,8 @@ class SimulationConfig(BaseModel):
     tolerances: TolerancesConfig
     experiment_limits: Optional[ExperimentLimitsConfig] = None
     budget: Optional[ExperimentLimitsConfig] = None
+    counter_limits: CounterLimitsConfig = Field(default_factory=CounterLimitsConfig)
+    agent_efforts: AgentEffortsConfig = Field(default_factory=AgentEffortsConfig)
 
     @model_validator(mode="before")
     @classmethod
@@ -126,6 +170,47 @@ class SimulationConfig(BaseModel):
                 default_limits = ExperimentLimitsConfig().model_dump()
                 data["experiment_limits"] = default_limits
                 data["budget"] = default_limits
+
+            # Extract or fallback counter_limits
+            if "counter_limits" not in data:
+                for src_key in ("budget", "experiment_limits"):
+                    src_val = data.get(src_key)
+                    if isinstance(src_val, dict) and "counter_limits" in src_val:
+                        data["counter_limits"] = src_val.pop("counter_limits")
+                        break
+
+            max_retries = None
+            for key in ("budget", "experiment_limits"):
+                val = data.get(key)
+                if isinstance(val, dict) and "max_node_retries" in val:
+                    max_retries = val["max_node_retries"]
+                    break
+                elif hasattr(val, "max_node_retries"):
+                    max_retries = val.max_node_retries
+                    break
+
+            if "counter_limits" not in data or data["counter_limits"] is None:
+                default_counters = {
+                    "max_counter_1_compilation": max_retries if max_retries is not None else 3,
+                    "max_counter_2_rewrite": max_retries if max_retries is not None else 3,
+                    "max_counter_3_debug_gate": max_retries if max_retries is not None else 3,
+                    "max_counter_4_debug_loop": 5,
+                }
+                data["counter_limits"] = default_counters
+            elif isinstance(data["counter_limits"], dict):
+                fallback_retry = max_retries if max_retries is not None else 3
+                data["counter_limits"].setdefault("max_counter_1_compilation", fallback_retry)
+                data["counter_limits"].setdefault("max_counter_2_rewrite", fallback_retry)
+                data["counter_limits"].setdefault("max_counter_3_debug_gate", fallback_retry)
+                data["counter_limits"].setdefault("max_counter_4_debug_loop", 5)
+
+                # Fallback experiment_limits / budget max_node_retries from counter_limits if not explicitly set
+                c2 = data["counter_limits"].get("max_counter_2_rewrite")
+                if c2 is not None and max_retries is None:
+                    if isinstance(data.get("experiment_limits"), dict):
+                        data["experiment_limits"]["max_node_retries"] = c2
+                    if isinstance(data.get("budget"), dict):
+                        data["budget"]["max_node_retries"] = c2
         return data
 
 

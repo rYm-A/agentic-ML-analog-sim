@@ -90,6 +90,12 @@ def test_case_b_populated_reference_yields_proceed_to_phase_1_candidate(temp_env
     assert cand["status"] == "PENDING"
     assert cand["solver"] == "euler"
 
+    # Verify token usage recorded
+    summary = db.get_token_usage_summary(phase="phase_0")
+    assert summary["overall"]["total_calls"] >= 1
+    assert summary["overall"]["total_tokens"] > 0
+    assert "phase_0.node2_phase0_propose_candidate" in summary["by_node"]
+
 
 def test_case_c_cyclic_duplicates_yields_terminated_max_cycles(temp_env):
     """Case C: Cyclic duplicates from Mock LLM -> yields TERMINATED_MAX_CYCLES."""

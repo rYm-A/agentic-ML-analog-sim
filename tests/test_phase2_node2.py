@@ -6,7 +6,7 @@ import pytest
 from agentic_ml_analog_sim.config import load_simulation_config
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.mock.mock_llm import MockAntigravityLLM
-from agentic_ml_analog_sim.nodes.phase2_generate_final_report import (
+from agentic_ml_analog_sim.nodes.node2_phase2_generate_final_report import (
     phase2_generate_final_report,
     _find_pdflatex,
 )

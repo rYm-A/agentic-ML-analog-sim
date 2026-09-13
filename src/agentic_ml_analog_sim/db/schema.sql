@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     sparsity_config TEXT DEFAULT '{}',
     solver_params TEXT,
     noise_params TEXT,
-    status TEXT CHECK(status IN ('PENDING', 'EVALUATING', 'COMPLETED', 'FAILED', 'REJECTED')),
+    status TEXT CHECK(status IN ('PENDING', 'EVALUATING', 'COMPLETED', 'FAILED', 'REJECTED', 'QUARANTINED')),
     is_reference BOOLEAN DEFAULT 0,
     is_active_evaluation BOOLEAN DEFAULT 0,
     accuracy_fid REAL,
@@ -28,6 +28,12 @@ CREATE TABLE IF NOT EXISTS proposals (
     simulation_status TEXT DEFAULT 'PENDING',
     error_stage TEXT,
     error_message TEXT,
+    is_debug BOOLEAN DEFAULT 0,
+    debug_parent_id TEXT,
+    counter_1_compilation INT DEFAULT 0,
+    counter_2_rewrite INT DEFAULT 0,
+    counter_3_debug_gate INT DEFAULT 0,
+    counter_4_debug_loop INT DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

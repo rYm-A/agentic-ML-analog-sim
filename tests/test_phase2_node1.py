@@ -5,7 +5,7 @@ import pytest
 
 from agentic_ml_analog_sim.config import load_simulation_config
 from agentic_ml_analog_sim.db.database import ResultDatabase
-from agentic_ml_analog_sim.nodes.phase2_check_experiment_limit import phase2_check_experiment_limit
+from agentic_ml_analog_sim.nodes.node1_phase2_check_experiment_limit import phase2_check_experiment_limit
 
 
 @pytest.fixture

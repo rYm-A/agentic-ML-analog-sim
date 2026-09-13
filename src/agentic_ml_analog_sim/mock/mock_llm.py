@@ -126,6 +126,7 @@ class MockAntigravityLLM(AntigravityLLM):
         invalid_proposal: dict[str, Any] | None = None,
         model: str = "mock-antigravity",
         system_message: str = "",
+        effort: str = "medium",
         **kwargs: Any,
     ):
         """Initialize MockAntigravityLLM with configurable behavior.
@@ -146,8 +147,17 @@ class MockAntigravityLLM(AntigravityLLM):
             invalid_proposal: Specific invalid proposal to return.
             model: Model identifier.
             system_message: System instructions.
+            effort: Reasoning effort level ('low', 'medium', 'high', 'max').
             **kwargs: Extra arguments passed to AntigravityLLM.__init__.
         """
+        # Parse effort from extra_cli_args if present and not explicitly overridden
+        extra_cli_args = kwargs.get("extra_cli_args")
+        if extra_cli_args and "--effort" in extra_cli_args:
+            idx = extra_cli_args.index("--effort")
+            if idx + 1 < len(extra_cli_args):
+                effort = extra_cli_args[idx + 1]
+        self.effort = effort
+
         # Ensure model is not None to avoid AntigravityLLM warning
         kwargs["model"] = model
         kwargs["system_message"] = system_message
@@ -229,11 +239,19 @@ class MockAntigravityLLM(AntigravityLLM):
         proposal_dict = self._get_next_proposal_dict()
         result_json = json.dumps(proposal_dict, indent=2)
 
+        usage_data = {
+            "prompt_tokens": 120,
+            "candidates_tokens": 85,
+            "completion_tokens": 85,
+            "total_tokens": 205,
+        }
         entry = {
             "call_index": self.call_count,
             "user_message": user_message,
             "tools": [getattr(t, "name", str(t)) for t in (tool_list or [])],
             "response": proposal_dict,
+            "effort": self.effort,
+            "usage": usage_data,
         }
         self.history.append(entry)
 
@@ -244,5 +262,6 @@ class MockAntigravityLLM(AntigravityLLM):
             stream_result=result_json,
             success=True,
             conversation_id=f"mock-conv-{self.call_count}",
-            usage={"prompt_tokens": 120, "candidates_tokens": 85, "total_tokens": 205},
+            usage=usage_data,
+            diagnostics=f"effort={self.effort}",
         )

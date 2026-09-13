@@ -271,21 +271,32 @@ def _bind_tools(db: Any, tools: list[Any] | None) -> list[Any]:
     return bound_tools
 
 
-def _resolve_llm(llm: Any = None) -> Any:
+def _resolve_llm(llm: Any = None, config: Any = None) -> Any:
     """Resolve LLM instance, defaulting to MockAntigravityLLM if AntigravityLLM is unavailable."""
     if llm is not None:
         return llm
 
+    agent_efforts = getattr(config, "agent_efforts", None)
+    node_cfg = None
+    if agent_efforts is not None:
+        node_cfg = getattr(agent_efforts, "node2_phase0_propose_candidate", None)
+        if node_cfg is None and isinstance(agent_efforts, dict):
+            node_cfg = agent_efforts.get("node2_phase0_propose_candidate")
+
+    model = getattr(node_cfg, "model", None) or (node_cfg.get("model") if isinstance(node_cfg, dict) else None) or "gemini-2.5-pro"
+    effort = getattr(node_cfg, "effort", None) or (node_cfg.get("effort") if isinstance(node_cfg, dict) else None) or "high"
+    extra_cli_args = ["--effort", effort]
+
     try:
         from chia.models.antigravity import AntigravityLLM
-        return AntigravityLLM(model="gemini-2.5-flash", system_message=NODE2_SYSTEM_INSTRUCTIONS)
+        return AntigravityLLM(model=model, extra_cli_args=extra_cli_args, system_message=NODE2_SYSTEM_INSTRUCTIONS)
     except Exception:
         from agentic_ml_analog_sim.mock.mock_llm import MockAntigravityLLM
-        return MockAntigravityLLM(mode="valid", system_message=NODE2_SYSTEM_INSTRUCTIONS)
+        return MockAntigravityLLM(mode="valid", model=model, effort=effort, extra_cli_args=extra_cli_args, system_message=NODE2_SYSTEM_INSTRUCTIONS)
 
 
 @ChiaFunction()
-def propose_candidate(
+def node2_phase0_propose_candidate(
     db: Any,
     config: Any,
     llm: Any = None,
@@ -316,7 +327,7 @@ def propose_candidate(
             "phase_1_prompt": str
         }
     """
-    active_llm = _resolve_llm(llm)
+    active_llm = _resolve_llm(llm, config)
     active_tools = _bind_tools(db, tools)
 
     # Build user message with configuration context and rejection feedback
@@ -344,7 +355,9 @@ def propose_candidate(
     user_prompt = "\n".join(user_prompt_lines)
 
     # Prompt the LLM
+    start_time = time.time()
     query_result = active_llm.prompt(user_message=user_prompt, tools=active_tools)
+    duration_seconds = time.time() - start_time
     response_text = getattr(query_result, "result", str(query_result))
 
     # Parse proposal JSON
@@ -402,6 +415,68 @@ def propose_candidate(
     }
     _insert_pending_candidate(db, candidate_record)
 
+    # Extract token metrics and record to database and profiler
+    usage = getattr(query_result, "usage", {}) or {}
+    if not usage and hasattr(active_llm, "history") and active_llm.history:
+        usage = active_llm.history[-1].get("usage", {}) or {}
+
+    prompt_tokens = usage.get("prompt_tokens", 120)
+    completion_tokens = usage.get("candidates_tokens", usage.get("completion_tokens", 85))
+    total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+    cost_usd = (prompt_tokens * 0.00000125) + (completion_tokens * 0.000005)
+    model_name = getattr(active_llm, "model", "gemini-2.5-pro")
+
+    if hasattr(db, "record_token_usage") and callable(db.record_token_usage):
+        try:
+            db.record_token_usage(
+                phase="phase_0",
+                node_name="node2_phase0_propose_candidate",
+                model=model_name,
+                candidate_id=candidate_id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                cost_usd=cost_usd,
+                duration_seconds=duration_seconds,
+            )
+        except Exception as exc:
+            logger.warning("Failed to record token usage to DB: %s", exc)
+    else:
+        conn = getattr(db, "conn", None) or getattr(db, "connection", None) or getattr(db, "_conn", None)
+        if conn is not None and isinstance(conn, sqlite3.Connection):
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO token_usage (
+                        candidate_id, phase, node_name, model,
+                        prompt_tokens, completion_tokens, total_tokens,
+                        cost_usd, duration_seconds
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        candidate_id,
+                        "phase_0",
+                        "node2_phase0_propose_candidate",
+                        model_name,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        cost_usd,
+                        duration_seconds,
+                    ),
+                )
+                conn.commit()
+            except Exception as exc:
+                logger.debug("Direct SQLite insert into token_usage failed: %s", exc)
+
+    # Attach to Chia profiler
+    try:
+        from chia.base.profiling import get_profiler
+        get_profiler().add_info({"usage": usage, "model": model_name, "phase": "phase_0"})
+    except Exception:
+        pass
+
     logger.info(
         "Node 2: Successfully generated and stored candidate %s (solver=%s, noise_model=%s)",
         candidate_id,
@@ -415,3 +490,9 @@ def propose_candidate(
         "noise_model": noise_model,
         "phase_1_prompt": phase_1_prompt,
     }
+
+
+# Backward compatibility aliases
+propose_candidate = node2_phase0_propose_candidate
+node2_propose_candidate = node2_phase0_propose_candidate
+

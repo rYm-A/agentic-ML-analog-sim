@@ -50,17 +50,28 @@ def _get_val(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
-def _resolve_llm(llm: Any = None) -> Any:
-    """Resolve single mid-effort LLM instance (default: gemini-2.5-flash)."""
+def _resolve_llm(llm: Any = None, config: Any = None) -> Any:
+    """Resolve single LLM instance configured by agent_efforts (default: gemini-2.5-flash, medium)."""
     if llm is not None:
         return llm
 
+    agent_efforts = getattr(config, "agent_efforts", None)
+    node_cfg = None
+    if agent_efforts is not None:
+        node_cfg = getattr(agent_efforts, "node2_phase2_generate_final_report", None)
+        if node_cfg is None and isinstance(agent_efforts, dict):
+            node_cfg = agent_efforts.get("node2_phase2_generate_final_report")
+
+    model = getattr(node_cfg, "model", None) or (node_cfg.get("model") if isinstance(node_cfg, dict) else None) or "gemini-2.5-flash"
+    effort = getattr(node_cfg, "effort", None) or (node_cfg.get("effort") if isinstance(node_cfg, dict) else None) or "medium"
+    extra_cli_args = ["--effort", effort]
+
     try:
         from chia.models.antigravity import AntigravityLLM
-        return AntigravityLLM(model="gemini-2.5-flash", system_message=NODE2_REPORT_SYSTEM_INSTRUCTIONS)
+        return AntigravityLLM(model=model, extra_cli_args=extra_cli_args, system_message=NODE2_REPORT_SYSTEM_INSTRUCTIONS)
     except Exception:
         from agentic_ml_analog_sim.mock.mock_llm import MockAntigravityLLM
-        return MockAntigravityLLM(mode="valid", system_message=NODE2_REPORT_SYSTEM_INSTRUCTIONS)
+        return MockAntigravityLLM(mode="valid", model=model, effort=effort, extra_cli_args=extra_cli_args, system_message=NODE2_REPORT_SYSTEM_INSTRUCTIONS)
 
 
 def _find_pdflatex() -> Optional[str]:
@@ -414,7 +425,7 @@ The autonomous co-design framework successfully demonstrated that physical oscil
 
 
 @ChiaFunction()
-def phase2_generate_final_report(
+def node2_phase2_generate_final_report(
     db: Any,
     config: Any,
     output_dir: Union[str, Path] = "reports",
@@ -466,8 +477,8 @@ def phase2_generate_final_report(
     ref_proposal = db.get_reference_proposal() if hasattr(db, "get_reference_proposal") else None
     completed_candidates = db.get_proposals(is_reference=False, limit=100) if hasattr(db, "get_proposals") else []
 
-    # 3. Prompt single mid-effort LLM to draft technical synthesis
-    active_llm = _resolve_llm(llm)
+    # 3. Prompt single LLM to draft technical synthesis
+    active_llm = _resolve_llm(llm, config)
     prompt_payload = {
         "experiment_name": _get_val(config, "experiment_name", "un0_analog_ml"),
         "reference_baseline": ref_proposal,
@@ -560,6 +571,7 @@ def phase2_generate_final_report(
             "pareto_candidates_count": len(pareto_front),
             "compilations_succeeded": exec_stats.get("compilations_succeeded_count", 0),
             "simulations_succeeded": exec_stats.get("simulations_succeeded_count", 0),
+            "token_usage_summary": db.get_token_usage_summary() if hasattr(db, "get_token_usage_summary") else {},
         },
         "token_usage": {
             "prompt_tokens": prompt_tokens,
@@ -570,3 +582,8 @@ def phase2_generate_final_report(
         },
         "message": "Report generated successfully." if pdf_compiled else "LaTeX report generated.",
     }
+
+
+# Backward compatibility alias
+phase2_generate_final_report = node2_phase2_generate_final_report
+

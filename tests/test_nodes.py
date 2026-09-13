@@ -4,7 +4,7 @@ import json
 import sqlite3
 import pytest
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from agentic_ml_analog_sim.mock import MockAntigravityLLM
 from agentic_ml_analog_sim.nodes import (
@@ -98,11 +98,65 @@ def test_db():
         );
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE token_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id TEXT,
+            phase TEXT NOT NULL,
+            node_name TEXT NOT NULL,
+            model TEXT NOT NULL,
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd REAL NOT NULL DEFAULT 0.0,
+            duration_seconds REAL DEFAULT 0.0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(candidate_id) REFERENCES proposals(candidate_id)
+        );
+        """
+    )
     conn.commit()
 
     class MockResultDB:
         def __init__(self, connection):
             self.conn = connection
+
+        def record_token_usage(
+            self,
+            phase: str,
+            node_name: str,
+            model: str,
+            prompt_tokens: int = 0,
+            completion_tokens: int = 0,
+            total_tokens: int = 0,
+            cost_usd: float = 0.0,
+            candidate_id: Optional[str] = None,
+            duration_seconds: float = 0.0,
+        ) -> int:
+            cur = self.conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO token_usage (
+                    candidate_id, phase, node_name, model,
+                    prompt_tokens, completion_tokens, total_tokens,
+                    cost_usd, duration_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candidate_id,
+                    phase,
+                    node_name,
+                    model,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    cost_usd,
+                    duration_seconds,
+                ),
+            )
+            self.conn.commit()
+            return cur.lastrowid
 
     return MockResultDB(conn)
 
@@ -231,6 +285,16 @@ def test_node2_propose_candidate(test_db, config):
     assert row["status"] == "PENDING"
     assert row["solver"] == "euler"
     assert row["noise_model"] == "L0_static_mismatch"
+
+    # Verify that token usage was recorded in token_usage table
+    cursor.execute("SELECT * FROM token_usage WHERE candidate_id = ?", (result["candidate_id"],))
+    t_row = cursor.fetchone()
+    assert t_row is not None
+    assert t_row["phase"] == "phase_0"
+    assert t_row["node_name"] == "node2_phase0_propose_candidate"
+    assert t_row["total_tokens"] > 0
+    assert t_row["prompt_tokens"] > 0
+    assert t_row["completion_tokens"] > 0
 
 
 def test_node2_propose_candidate_with_rejection_feedback(test_db, config):
@@ -516,3 +580,9 @@ def test_integration_with_actual_db_and_config(tmp_path):
     assert is_valid is True
     assert reason == "VALID"
     assert cycle == 0
+
+    # 5. Verify token usage recorded
+    summary = db.get_token_usage_summary(phase="phase_0")
+    assert summary["overall"]["total_calls"] >= 1
+    assert summary["overall"]["total_tokens"] > 0
+    assert "phase_0.node2_phase0_propose_candidate" in summary["by_node"]

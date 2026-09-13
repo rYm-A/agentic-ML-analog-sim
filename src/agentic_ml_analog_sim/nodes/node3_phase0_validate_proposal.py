@@ -403,7 +403,7 @@ def _check_duplicate(candidate_id: str, proposal: dict[str, Any], db: Any) -> tu
 
 
 @ChiaFunction()
-def validate_proposal(
+def node3_phase0_validate_proposal(
     candidate_id: str,
     db: Any,
     config: Any,
@@ -496,3 +496,9 @@ def _handle_rejection(
         _add_comment(db, candidate_id, phase="phase_0", agent_name="node3_validate_proposal", comment=comment)
         logger.info("Node 3: %s", comment)
         return (False, reason, next_cycle)
+
+
+# Backward compatibility aliases
+validate_proposal = node3_phase0_validate_proposal
+node3_validate_proposal = node3_phase0_validate_proposal
+

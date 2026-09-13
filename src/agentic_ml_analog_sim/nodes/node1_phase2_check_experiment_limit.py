@@ -79,7 +79,7 @@ def _get_completed_count(db: Any) -> int:
 
 
 @ChiaFunction()
-def phase2_check_experiment_limit(
+def node1_phase2_check_experiment_limit(
     db: Any,
     config: Any,
     current_iteration: Optional[int] = None,
@@ -160,3 +160,8 @@ def phase2_check_experiment_limit(
         "candidate_info": candidate_info,
         "reason": reason,
     }
+
+
+# Backward compatibility alias
+phase2_check_experiment_limit = node1_phase2_check_experiment_limit
+

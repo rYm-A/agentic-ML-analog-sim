@@ -17,7 +17,10 @@ def temp_db():
 
 
 def test_init_db_and_reference_lifecycle(temp_db):
-    cfg = load_simulation_config("config/simulation_config.yaml")
+    config_path = Path("config/simulation_config.yaml")
+    if not config_path.is_file():
+        config_path = Path(__file__).parent.parent / "config" / "simulation_config.yaml"
+    cfg = load_simulation_config(config_path)
     assert not temp_db.has_complete_reference(cfg)
 
     # Insert pending reference
@@ -146,3 +149,93 @@ def test_comments(temp_db):
     assert len(comments) == 1
     assert comments[0]["agent_name"] == "Analyst"
     assert comments[0]["comment"] == "Promising candidate."
+
+
+def test_create_debug_candidate(temp_db):
+    debugee_id = temp_db.insert_proposal(
+        solver="rk4",
+        noise_model="L1_thermal",
+        solver_params={"num_steps": 20},
+        status="FAILED",
+    )
+
+    debug_id = temp_db.create_debug_candidate(
+        debugee_id=debugee_id,
+        deactivated_rewrites=["rewrite_solver_rk4"],
+        solver="euler",
+    )
+
+    debug_cand = temp_db.get_proposal(debug_id)
+    assert debug_cand is not None
+    assert debug_cand["is_debug"] == 1
+    assert debug_cand["debug_parent_id"] == debugee_id
+    assert debug_cand["solver"] == "euler"
+    assert debug_cand["noise_model"] == "L1_thermal"
+    assert debug_cand["status"] == "PENDING"
+    assert "rewrite_solver_rk4" in debug_cand["selection_reason"]
+
+    active_debug = temp_db.get_active_debug_candidate()
+    assert active_debug is not None
+    assert active_debug["candidate_id"] == debug_id
+
+
+def test_quarantine_and_reactivation(temp_db):
+    cand_id = temp_db.insert_proposal(solver="rk4", noise_model="none", status="FAILED")
+
+    quarantined = temp_db.quarantine_candidate(cand_id)
+    assert quarantined["status"] == "QUARANTINED"
+
+    fetched = temp_db.get_quarantined_candidate(cand_id)
+    assert fetched is not None
+    assert fetched["candidate_id"] == cand_id
+
+    latest_q = temp_db.get_quarantined_candidate()
+    assert latest_q is not None
+    assert latest_q["candidate_id"] == cand_id
+
+    reactivated = temp_db.reactivate_candidate(cand_id, new_status="PENDING")
+    assert reactivated["status"] == "PENDING"
+    assert temp_db.get_quarantined_candidate(cand_id) is None
+
+
+def test_update_counters(temp_db):
+    cand_id = temp_db.insert_proposal(solver="rk4", noise_model="none")
+
+    updated = temp_db.update_counters(
+        candidate_id=cand_id,
+        counter_1_compilation=1,
+        counter_2_rewrite=2,
+        counter_3_debug_gate=3,
+        counter_4_debug_loop=4,
+    )
+
+    assert updated["counter_1_compilation"] == 1
+    assert updated["counter_2_rewrite"] == 2
+    assert updated["counter_3_debug_gate"] == 3
+    assert updated["counter_4_debug_loop"] == 4
+
+
+def test_reset_counters(temp_db):
+    cand_id = temp_db.insert_proposal(solver="rk4", noise_model="none")
+
+    temp_db.update_counters(
+        candidate_id=cand_id,
+        counter_1_compilation=5,
+        counter_2_rewrite=4,
+        counter_3_debug_gate=3,
+        counter_4_debug_loop=2,
+    )
+
+    reset_cand = temp_db.reset_counters(cand_id)
+    assert reset_cand["counter_1_compilation"] == 0
+    assert reset_cand["counter_2_rewrite"] == 0
+    assert reset_cand["counter_3_debug_gate"] == 0
+    assert reset_cand["counter_4_debug_loop"] == 0
+
+    # Also check reactivation resets counter 4
+    temp_db.quarantine_candidate(cand_id)
+    temp_db.update_counters(cand_id, counter_4_debug_loop=4)
+    reactivated = temp_db.reactivate_candidate(cand_id, new_status="PENDING")
+    assert reactivated["counter_4_debug_loop"] == 0
+
+
