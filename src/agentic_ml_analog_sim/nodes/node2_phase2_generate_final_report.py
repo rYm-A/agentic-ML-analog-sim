@@ -101,8 +101,8 @@ def compile_latex(tex_file: Union[str, Path], output_dir: Union[str, Path]) -> b
 
     Runs twice to resolve cross-references and figure numbers.
     """
-    tex_path = Path(tex_file)
-    out_dir = Path(output_dir)
+    tex_path = Path(tex_file).resolve()
+    out_dir = Path(output_dir).resolve()
     pdflatex_bin = _find_pdflatex()
 
     if not pdflatex_bin:
