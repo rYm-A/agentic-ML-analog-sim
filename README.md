@@ -1,306 +1,360 @@
 # Agentic Hardware/Software Co-Design Loop for Analog ML Accelerator Simulation
 
-An agentic AI framework powered by [Chia](https://github.com/ucb-bar/chia) and Ray for co-designing and evaluating analog machine learning accelerators executing physical neural network models (e.g. continuous-time oscillatory neural networks and memristive crossbar dynamics based on the Un-0 modular baseline).
+An autonomous agentic AI framework powered by [Chia](https://github.com/ucb-bar/chia) and Ray for co-designing and evaluating analog machine learning accelerators executing physical neural network models (continuous-time oscillatory neural networks and memristive crossbar dynamics based on the Un-0 modular baseline).
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Architecture (Phase 0)](#architecture-phase-0)
-  - [Co-Design Loop Concept](#co-design-loop-concept)
-  - [Resource & Node Roles](#resource--node-roles)
-- [Cluster Configurations](#cluster-configurations)
+- [Agentic Loop Architecture (Phases 0 – 2)](#agentic-loop-architecture-phases-0--2)
+  - [Phase 0: Candidate Exploration & Gatekeeping](#phase-0-candidate-exploration--gatekeeping)
+  - [Phase 1: Code Rewriting, Simulation & Verification](#phase-1-code-rewriting-simulation--verification)
+  - [Phase 2: Experiment Auditing, Reporting & Consultation](#phase-2-experiment-auditing-reporting--consultation)
+- [Configuration Guide: `simulation_config.yaml`](#configuration-guide-simulation_configyaml)
+  - [Reference Design (`reference_design`)](#reference-design-reference_design)
+  - [Solvers & Discretization Steps (`solvers`)](#solvers--discretization-steps-solvers)
+  - [Hardware Noise Models (`noise_models`)](#hardware-noise-models-noise_models)
+  - [Coupling Matrix Sparsity (`sparsity_configs`)](#coupling-matrix-sparsity-sparsity_configs)
+  - [Numerical Tolerances (`tolerances`)](#numerical-tolerances-tolerances)
+  - [Campaign Budget vs. Internal Counter Limits](#campaign-budget-vs-internal-counter-limits)
+  - [Agent Model & Effort Allocation (`agent_efforts`)](#agent-model--effort-allocation-agent_efforts)
+- [Un-0 Co-Design Engine Integration](#un-0-co-design-engine-integration)
+- [Token & Resource Auditing](#token--resource-auditing)
+- [Cluster Execution Architecture](#cluster-execution-architecture)
   - [Bare-Metal Native macOS (Apple Silicon)](#bare-metal-native-macos-apple-silicon)
   - [Cloud Burst Profile (GCP + Tailnet)](#cloud-burst-profile-gcp--tailnet)
-  - [Profile Comparison](#profile-comparison)
-- [Bare Worker Execution Model](#bare-worker-execution-model)
-  - [Why Bare-Metal on Apple Silicon?](#why-bare-metal-on-apple-silicon)
-  - [Execution Flow](#execution-flow)
-- [Installation & Setup](#installation--setup)
-  - [Prerequisites](#prerequisites)
-  - [Environment Configuration](#environment-configuration)
-  - [Package Installation](#package-installation)
-- [Cluster Operations](#cluster-operations)
-  - [Verifying Cluster Configuration](#verifying-cluster-configuration)
-  - [Starting the Bare-Metal Cluster](#starting-the-bare-metal-cluster)
-  - [Stopping the Cluster](#stopping-the-cluster)
-  - [Bursting to Cloud (Phase 2)](#bursting-to-cloud-phase-2)
+- [Installation & Quickstart](#installation--quickstart)
+- [Running the Loop](#running-the-loop)
 - [Testing](#testing)
-- [Roadmap](#roadmap)
 
 ---
 
 ## Overview
 
-Deploying neural networks directly onto analog silicon substrates enables ultra-low-latency and high-energy-efficiency inference by leveraging intrinsic circuit physics (e.g., oscillator phase locking, non-volatile conductance states). However, analog hardware introduces non-idealities such as thermal noise, phase jitter, device mismatch, non-linear I-V characteristics, and line resistance.
+Deploying neural networks directly onto analog silicon substrates enables ultra-low-latency and high-energy-efficiency inference by leveraging intrinsic circuit physics (e.g., Kuramoto oscillator phase locking, non-volatile memristive conductance states). However, analog hardware introduces non-idealities such as device mismatch, thermal noise, phase jitter, non-linear I-V characteristics, and line resistance.
 
-This repository implements an **agentic hardware/software co-design loop** that couples:
-1. **Agentic Reasoning Swarm**: LLM agents (powered by Antigravity / Gemini / Claude via Model Context Protocol tools) that formulate circuit topologies, parameter search spaces, noise tolerance budgets, and quantization/mapping strategies.
-2. **Multi-Fidelity Simulation Hierarchy**:
-   - *Fidelity 0 (Analytical / Behavioral)*: Fast ODE and transfer-function solvers.
-   - *Fidelity 1 (Phenomenological Noise)*: Dynamic models injecting thermal noise, phase-noise PSDs, and device variations.
-   - *Fidelity 2 (Circuit / SPICE / GPU Batched)*: High-throughput batch inference simulations on GPU clusters.
-3. **Hardware-Noise Calibration**: Automated parameter tuning bridging simulated physical dynamics with silicon measurements.
+This repository implements an autonomous **agentic hardware/software co-design loop** that searches the multi-objective Pareto frontier across three primary dimensions:
+1. **Numerical Solver Discretization**: Evaluating low-order vs. high-order ODE solvers (`euler`, `rk4`, `euler_backward`, `parareal`, `par_ode`) across variable step counts ($dt = T / N$).
+2. **Coupling Matrix Sparsity**: Evaluating crossbar interconnect pruning ratios (from dense $0\%$ up to $80\%$ pruned) to reduce analog MAC energy and physical routing area.
+3. **Hardware Noise Robustness**: Simulating circuit non-idealities across multi-fidelity noise tiers (L0 static mismatch, L1 parameter noise, L2 interface noise, and L3 correlated drift).
 
 ---
 
-## Architecture (Phase 0)
+## Agentic Loop Architecture (Phases 0 – 2)
 
-Phase 0 establishes the packaging, cluster configurations, and bare-metal native execution runtime for local development on Apple Silicon, alongside cloud burst specifications for GPU acceleration.
-
-### Co-Design Loop Concept
+The autonomous loop is organized into three synchronized phases governed by SQLite telemetry and standardized node contracts:
 
 ```
-  +-----------------------------------------------------------------+
-  |                       Ray Cluster Head                          |
-  |             (Local Orchestrator / Apple Silicon)                |
-  +-------------------------------+---------------------------------+
-                                  |
-            +---------------------+---------------------+
-            |                                           |
-            v                                           v
-  +-----------------------+                   +-----------------------+
-  |    Local Bare Worker  |                   |  Cloud GPU Pool (P2)  |
-  |  (Apple Silicon Host) |                   | (GCP g2-standard-8)   |
-  |  - ODE Simulation     |                   | - Batched Circuit Sim |
-  |  - SQLite Telemetry   |                   | - PyTorch CUDA Models |
-  |  - Agent Credentials  |                   | - Tailscale Mesh      |
-  +-----------------------+                   +-----------------------+
++----------------------------------------------------------------------------------------------------+
+|                                      PHASE 0: CANDIDATE EXPLORATION                                |
+|                                                                                                    |
+|  [Node 1: Check Reference] ---> [Node 2: Propose Candidate (LLM)] ---> [Node 3: Validate Proposal]   |
+|         | (missing reference)                       ^                              | (passed)      |
+|         v                                           +------ (retry if rejected) <--+               |
+|  Route Reference to Phase 1                                                        v               |
++-----------------------------------------------------------------------------+----------------------+
+                                                                              |
++-----------------------------------------------------------------------------v----------------------+
+|                                 PHASE 1: REWRITE, COMPILE & SIMULATE                               |
+|                                                                                                    |
+|  [Node 0: Gate & Debug] ---> [Node 1: Solver Rewriter] ---> [Node 2: Noise Rewriter]               |
+|           ^                                                                |                       |
+|           |                                                                v                       |
+|           |                 [Node 4: Compilation Runner] <--- [Node 3: Compiler Rewriter]          |
+|           |                                |                                                       |
+|           |                                v                                                       |
+|           |                 [Node 5: Verify Correctness] (Counter 1 check)                         |
+|           |                                |                                                       |
+|           |                                v                                                       |
+|           |                 [Node 6: Simulate & Profile (MPS/CUDA)]                                |
+|           |                                |                                                       |
+|           |                                v                                                       |
+|  [Node 8: Diagnostic] <--- [Node 7: Evaluation Gate] ---> [Passed]                                |
+|  (Reruns / Debug Mode)      (Counter 2 & 4 checks)           |                                     |
+|           |                            |                     |                                     |
+|           v                            v (max cycles hit)    |                                     |
+|  [Node 9: Error Handler & SQLite Live Snapshot]              |                                     |
++--------------------------------------------------------------|-------------------------------------+
+                                                               |
++--------------------------------------------------------------v-------------------------------------+
+|                                 PHASE 2: AUDITING & REPORTING                                      |
+|                                                                                                    |
+|  [Node 1: Check Limits] ---> (Target reached?) ---> [Node 2: Generate Final LaTeX/PDF Report]      |
+|         | (continue loop)                                    |                                     |
+|         v                                                    v                                     |
+|  Return to Phase 0                                   [Interactive Consultant Session REPL]        |
++----------------------------------------------------------------------------------------------------+
 ```
 
-### Resource & Node Roles
+### Phase 0: Candidate Exploration & Gatekeeping
+- **Node 1 (`node1_phase0_check_reference`)**: Checks SQLite database for the baseline golden reference design. If missing, routes reference parameters to Phase 1 to establish baseline accuracy and latency.
+- **Node 2 (`node2_phase0_propose_candidate`)**: LLM agent (Gemini 2.5 Pro with high reasoning effort) queries past evaluations and Pareto frontier, proposing novel combinations of solver, steps, noise model, and sparsity ratio.
+- **Node 3 (`node3_phase0_validate_proposal`)**: Gatekeeper validating proposals against allowed solver steps, noise models, and sparsity ratios; enforces uniqueness against duplicate proposals.
 
-Ray resources are tagged to enforce strict scheduling constraints:
+### Phase 1: Code Rewriting, Simulation & Verification
+- **Node 0 (`node0_phase1_gate`)**: Enforces debug mode isolation invariants and guards against invalid debug requests (Counter 3).
+- **Nodes 1–3 (`node1_phase1_solver_rewriter`, `node2_phase1_noise_rewriter`, `node3_phase1_compiler_rewriter`)**: Agents rewriting solver registries, noise parameters, and model compilation definitions.
+- **Node 4 (`node4_phase1_compilation_runner`)**: Programmatically compiles the model using the Un-0 AOT compiler (`un0.compiler.compile_model`).
+- **Node 5 (`node5_phase1_verify_correctness`)**: Verifies numerical stability and outputs between compiled and eager models against tolerances; manages Counter 1.
+- **Node 6 (`node6_phase1_simulate_profile`)**: Executes batch inference simulation on hardware (Metal/MPS or CUDA), profiling latency, peak memory, FID, and relative error.
+- **Node 7 (`node7_phase1_evaluation_gate`)**: Checks relative error and FID degradation against `tolerances.solver_accuracy`. Marks successful designs `COMPLETED` and updates the Pareto frontier; manages Counters 2 and 4.
+- **Node 8 (`node8_phase1_diagnostic_proposal`)**: Formulates targeted corrective rewrites or requests isolated Debug Mode when candidates fail.
+- **Node 9 (`node9_phase1_error_handler`)**: Standardized stop handler executed when any retry counter is exhausted. Performs graceful termination, updates proposal status to `FAILED`, and generates an atomic SQLite live snapshot (`snapshots/<candidate_id>_error_snapshot.db`).
 
-| Resource Tag | Default Capacity | Purpose |
-| :--- | :---: | :--- |
-| `antigravity_creds` | `1` | Permits agentic reasoning and LLM API calls via MCP tools |
-| `metal_gpu` | `1` | Allocates Apple Silicon GPU (Metal/MPS) for local acceleration |
-| `sqlite_db` | `1` | Serializes state tracking, metrics, and trial history |
-| `python_worker` | `4` | Parallel CPU workers for simulation and task execution |
-| `nvidia_gpu` | `1` (Cloud) | NVIDIA L4 Tensor Core GPU slots on GCP worker instances |
-| `sim_worker` | `1` (Cloud) | GPU simulation batch runners in Phase 2 |
+### Phase 2: Experiment Auditing, Reporting & Consultation
+- **Node 1 (`node1_phase2_check_experiment_limit`)**: Checks completed experiment counts against `budget.max_experiments` and loop iterations against `budget.max_iterations`.
+- **Node 2 (`node2_phase2_generate_final_report`)**: Compiles publication-grade Pareto frontier plots, generates a LaTeX report with candidate comparison tables and swarm token audits, and compiles the final PDF artifact.
+- **Interactive Consultant**: A CLI REPL (`InteractiveReportSession`) backed by an LLM to answer technical questions and analyze Pareto trade-offs from the generated report.
 
 ---
 
-## Cluster Configurations
+## Configuration Guide: `simulation_config.yaml`
 
-The repository provides three cluster configuration profiles in YAML:
+All simulation parameters, campaign budgets, tolerances, and agent models are centralized in [`config/simulation_config.yaml`](file:///Users/chia/ChiaWorkspace/agentic-ML-analog-sim/config/simulation_config.yaml).
+
+```yaml
+experiment_name: "un0_kuramoto_analog_acceleration"
+
+# 1. Baseline Reference Design
+reference_design:
+  name: "cifar10/n1024"
+  family: "cifar10"
+  n_oscillators: 1024
+  n_conditional_oscillators: 8
+  solver: "rk4"
+  num_steps: 25
+  integration_time: 1.0
+  precision: "fp32"
+  noise_model: "none"
+  sparsity_ratio: 0.0
+
+# 2. Solvers Exploration Grid
+solvers:
+  euler:
+    steps: [1, 2, 5, 10]
+  rk4:
+    steps: [5, 10, 15, 25]
+  euler_backward:
+    steps: [2, 5, 10]
+  parareal:
+    steps: [10, 20]
+  par_ode:
+    steps: [10, 25]
+
+# 3. Hardware Noise Models
+noise_models:
+  - "L0_static_mismatch"
+  - "L1_stochastic_parameter_noise"
+  - "L2_functional_interface"
+  - "L3_correlated_drift"
+
+# 4. Sparsity Configurations
+sparsity_configs:
+  dense:
+    sparsity_ratio: 0.0
+  threshold_pruned:
+    allowed_sparsity_ratios: [0.2, 0.4, 0.6, 0.8]
+  degree_bounded:
+    max_degree: [64, 128, 256]
+
+# 5. Numerical Tolerances
+tolerances:
+  compile_check:
+    rtol: 1e-4
+    atol: 1e-4
+  solver_accuracy:
+    rtol: 5e-2
+    atol: 5e-2
+    max_fid_degradation: 2.0
+
+# 6. Campaign Budget
+budget:
+  max_experiments: 10
+  max_iterations: 15
+  max_node_retries: 3
+  timeout_seconds_per_eval: 300
+
+# 7. Internal Phase 1 Counter Limits
+counter_limits:
+  max_counter_1_compilation: 3
+  max_counter_2_rewrite: 3
+  max_counter_3_debug_gate: 3
+  max_counter_4_debug_loop: 5
+
+# 8. Agent Reasoning Effort
+agent_efforts:
+  node2_phase0_propose_candidate:
+    model: "gemini-2.5-pro"
+    effort: "high"
+  node1_phase1_solver_rewriter:
+    model: "gemini-2.5-pro"
+    effort: "high"
+  node2_phase1_noise_rewriter:
+    model: "gemini-2.5-pro"
+    effort: "high"
+  node3_phase1_compiler_rewriter:
+    model: "gemini-2.5-pro"
+    effort: "high"
+  node8_phase1_diagnostic_proposal:
+    model: "gemini-2.5-flash"
+    effort: "medium"
+  node2_phase2_generate_final_report:
+    model: "gemini-2.5-flash"
+    effort: "medium"
+```
+
+### Reference Design (`reference_design`)
+The golden ground truth baseline. It is strictly dense (`sparsity_ratio: 0.0`), noise-free (`noise_model: "none"`), and integrated using high-precision 4th-order Runge-Kutta with 25 steps ($\Delta t = 0.04$). All candidate accuracy degradation, relative errors, and speedup multipliers ($1.00\times$) are measured relative to this design.
+
+### Solvers & Discretization Steps (`solvers`)
+Defines the numerical ODE algorithms available to candidate proposals. For each solver, `steps` specifies the allowed integration step grid. The step size is computed as $\Delta t = \text{integration\_time} / \text{num\_steps}$. Lower steps reduce simulation and MAC operation counts at the expense of truncation error.
+
+### Hardware Noise Models (`noise_models`)
+The physical noise ladder representing silicon non-idealities:
+- **`L0_static_mismatch`**: Time-invariant spatial threshold variation across crossbar cells.
+- **`L1_stochastic_parameter_noise`**: Dynamic thermal noise and white parameter fluctuations.
+- **`L2_functional_interface`**: ADC/DAC quantization and driver line parasitics.
+- **`L3_correlated_drift`**: Temperature drift and low-frequency $1/f$ phase noise.
+
+### Coupling Matrix Sparsity (`sparsity_configs`)
+Governs analog crossbar array connectivity:
+- **`dense`**: Unpruned matrix ($0\%$ sparsity).
+- **`threshold_pruned`**: Explores pruned coupling weights ($|K_{ij}| < \tau$) at ratios `[0.2, 0.4, 0.6, 0.8]`.
+- **`degree_bounded`**: Constrains oscillator fan-in degrees to `[64, 128, 256]`.
+
+### Numerical Tolerances (`tolerances`)
+- **`compile_check`**: Strict tolerance (`rtol=1e-4`, `atol=1e-4`) enforced in Node 5 when comparing compiled AOT model forward passes against eager Un-0 models.
+- **`solver_accuracy`**: Accuracy criteria enforced in Node 7:
+  - `rtol = 0.05` ($5\%$ maximum relative state trajectory error vs. reference).
+  - `max_fid_degradation = 2.0` (maximum permissible FID degradation).
+
+### Campaign Budget vs. Internal Counter Limits
+The configuration separates macro campaign bounds from micro execution retry bounds:
+
+| Section | Parameter | Governs | Destination Upon Exceedance |
+| :--- | :--- | :--- | :--- |
+| **`budget`** | `max_experiments` (10) | Total completed candidate experiments | Phase 2 Final Report Generation |
+| **`budget`** | `max_iterations` (15) | Hard ceiling on outer exploration cycles | Phase 2 Final Report Generation |
+| **`budget`** | `max_node_retries` (3) | Phase 0 candidate rejection retries | Halt Phase 0 (`MAX_CYCLES_EXCEEDED`) |
+| **`counter_limits`** | `max_counter_1_compilation` (3) | Compilation / ODE numerical checks (Node 5) | `node9_phase1_error_handler` |
+| **`counter_limits`** | `max_counter_2_rewrite` (3) | Out-of-tolerance candidate rewrites (Node 7) | `node9_phase1_error_handler` |
+| **`counter_limits`** | `max_counter_3_debug_gate` (3) | Invalid debug mode requests (Node 0) | `node9_phase1_error_handler` |
+| **`counter_limits`** | `max_counter_4_debug_loop` (5) | Debug isolation iterations (Node 7) | `node9_phase1_error_handler` |
+
+*Note: Bidirectional fallbacks ensure that if `counter_limits` is omitted from older configuration files, Counters 1–3 default automatically to `budget.max_node_retries`.*
+
+### Agent Model & Effort Allocation (`agent_efforts`)
+Configures the LLM backend and reasoning effort tier for each agentic node:
+- **Proposer & Rewriters** (`node2_phase0`, `node1_phase1`, `node2_phase1`, `node3_phase1`): Use `gemini-2.5-pro` with `high` reasoning effort (`--effort high`) for complex architectural parameter selection and code rewriting.
+- **Diagnostics & Reporting** (`node8_phase1`, `node2_phase2`): Use `gemini-2.5-flash` with `medium` reasoning effort (`--effort medium`) for fast root-cause analysis and report summarization.
+
+---
+
+## Un-0 Co-Design Engine Integration
+
+The physical analog simulation baseline is provided by the `Un-0` project, integrated as a **Git submodule** (`Un-0/`) and installed in editable mode:
+- **Modular Solvers** (`un0/solver/`): Pluggable numerical ODE integrators registered in `SOLVER_REGISTRY`.
+- **Multi-Fidelity Noise** (`un0/noise/`): Hardware noise models implementing the physical noise ladder.
+- **AOT Compiler Integration** (`un0/compiler/`): Dynamic AOT model compilation via `compile_model(eager_model)`.
+- **Dynamic Root Discovery**: [`resolve_un0_root()`](file:///Users/chia/ChiaWorkspace/agentic-ML-analog-sim/src/agentic_ml_analog_sim/tools/un0_context_tool.py#L25) resolves submodule and sibling directory paths dynamically, avoiding hardcoded filesystem paths.
+
+---
+
+## Token & Resource Auditing
+
+In accordance with swarm-wide auditing guidelines, every LLM invocation across all phases extracts usage metrics (`prompt_tokens`, `completion_tokens`, `total_tokens`, `cost_usd`, and `duration_seconds`).
+1. **Persistent SQLite Telemetry**: Stored in the `token_usage` table in `ResultDatabase`.
+2. **Ray Profiler Registration**: Attached to the Chia profiling system via `get_profiler().add_info()`.
+3. **Report Audit Table**: Automatically tabulated and rendered into the final LaTeX and PDF report.
+
+---
+
+## Cluster Execution Architecture
 
 ### Bare-Metal Native macOS (Apple Silicon)
-
-- **Default profile**: [`cluster.yaml`](file:///Users/chia/ChiaWorkspace/agentic-ML-analog-sim/cluster.yaml)
-- **Dedicated bare alias**: [`cluster.bare.yaml`](file:///Users/chia/ChiaWorkspace/agentic-ML-analog-sim/cluster.bare.yaml)
-
-Configured for macOS (aarch64) without container virtualization:
-- **Head IP**: `${THIS_MACHINE}` (auto-expanded from environment)
-- **SSH Authentication**: User `${USER}`, key `~/.ssh/id_ed25519`
-- **Environment**: Automatically activates `conda activate chia_env` via `.zshrc`
-- **Ray Head**: Port `6379`, dashboard disabled to minimize overhead
-- **Local Worker**: Runs natively with `antigravity_creds: 1` and `sqlite_db: 1`
+- **Profile**: [`cluster.yaml`](file:///Users/chia/ChiaWorkspace/agentic-ML-analog-sim/cluster.yaml) / [`cluster.bare.yaml`](file:///Users/chia/ChiaWorkspace/agentic-ML-analog-sim/cluster.bare.yaml)
+- **Runtime**: Native macOS `aarch64` within `conda activate chia_env` (no Docker/Colima emulation overhead).
+- **Acceleration**: Direct Apple Silicon Metal/MPS unified memory allocation.
+- **Ray Resources**: Tagged with `antigravity_creds: 1`, `metal_gpu: 1`, `sqlite_db: 1`, and `python_worker: 4`.
 
 ### Cloud Burst Profile (GCP + Tailnet)
-
-- **Cloud profile**: [`cluster.cloud.yaml`](file:///Users/chia/ChiaWorkspace/agentic-ML-analog-sim/cluster.cloud.yaml)
-
-Configured for Phase 2 high-throughput parallel simulation bursts:
-- **Tailnet Overlay**: `tailnet: manage_all: true` automatically installs userspace Tailscale daemons across all nodes and secures inter-node Ray gRPC traffic over WireGuard without exposing public ports.
-- **Compute Provider**: Google Cloud Platform (GCP) Compute Engine
-- **Instance Type**: `g2-standard-8` (8 vCPUs, 32 GB RAM, 1x NVIDIA L4 24GB GPU)
-- **Cost Optimization**: `spot: true` (GCP Spot instances for ~60-80% cost reduction)
-- **Dynamic Node Resolution**: `@sim_gpu_pool:0`, `@sim_gpu_pool:1` dynamically mapped to provisioned VM IPs.
-
-### Profile Comparison
-
-| Feature | `cluster.yaml` / `cluster.bare.yaml` | `cluster.cloud.yaml` |
-| :--- | :--- | :--- |
-| **Target Runtime** | macOS on Apple Silicon (bare-metal) | macOS (Head) + GCP Linux (Workers) |
-| **Virtualization** | None (native bare-metal) | Tailnet overlay mesh + GCP VMs |
-| **Worker Hardware** | Apple Silicon Unified Memory (16 GB) | NVIDIA L4 Tensor Core GPUs (24 GB) |
-| **Networking** | Local host loopback / LAN | Tailscale WireGuard mesh (userspace) |
-| **Phase Target** | Phase 0 & 1 (Development & Fast ODE) | Phase 2 (Large-scale batch sim) |
+- **Profile**: [`cluster.cloud.yaml`](file:///Users/chia/ChiaWorkspace/agentic-ML-analog-sim/cluster.cloud.yaml)
+- **Runtime**: Hybrid macOS head + GCP Linux worker instances (`g2-standard-8` with NVIDIA L4 GPUs).
+- **Networking**: Userspace Tailscale WireGuard mesh securing inter-node Ray gRPC traffic.
 
 ---
 
-## Bare Worker Execution Model
-
-### Why Bare-Metal on Apple Silicon?
-
-Standard Chia workflows typically run workers inside Linux Docker containers. On macOS with Apple Silicon (aarch64), running x86_64 container images requires QEMU/Rosetta 2 emulation (via Colima or Docker Desktop). Previous benchmarking revealed major bottlenecks:
-1. **Emulation Latency**: Severe CPU overhead under QEMU emulation for numerical solvers.
-2. **Fork Latency & Health Checks**: Apple Silicon emulation latency can trip Ray's pipe-based parent-liveness checks, prematurely killing worker processes.
-3. **Bridged Networking Quirks**: Virtual network interfaces (e.g. `col0` vs `eth0`) complicate Ray GCS address binding.
-4. **Hardware Access**: Docker on macOS cannot directly expose Apple Silicon Metal/MPS GPU acceleration to Linux guests.
-
-The **bare-metal execution model** eliminates containers completely:
-- Node definitions in `available_node_types` omit the `docker:` section (`docker: None`).
-- Worker processes run directly in the host's native `chia_env` Conda environment.
-- Access to 16 GB Apple Silicon unified memory and MPS acceleration is direct and unthrottled.
-
-### Execution Flow
-
-```
-1. chia up cluster.yaml
-   └─> SSH to ${THIS_MACHINE}
-   └─> Execute head_env_commands ("source ~/.zshrc && conda activate chia_env")
-   └─> Execute head_start_ray_commands (starts Ray GCS with local resource tags)
-   └─> Query node assignments
-   └─> Launch local_worker (executes directly in native shell)
-```
-
----
-
-## Installation & Setup
+## Installation & Quickstart
 
 ### Prerequisites
+- macOS (Apple Silicon recommended) with Python 3.10+
+- Conda / Miniconda
 
-1. **Operating System**: macOS (Apple Silicon recommended)
-2. **Conda**: Miniconda or Anaconda with Python 3.10+
-3. **SSH Access**: Local SSH server enabled (`System Settings > General > Sharing > Remote Login`) and SSH key generated:
-   ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
-   cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
-   chmod 600 ~/.ssh/authorized_keys
-   ```
-
-### Environment Configuration
-
-Export the required environment variables in your `~/.zshrc`:
-
+### Setup
 ```bash
-# Local development
-export THIS_MACHINE=$(ipconfig getifaddr en0 || ipconfig getifaddr en1 || echo "127.0.0.1")
-export USER=$(whoami)
+# 1. Clone repository with submodules
+git clone --recurse-submodules <repo-url>
+cd agentic-ML-analog-sim
 
-# Cloud burst (Phase 2 - GCP & Tailscale)
-export GCP_PROJECT="your-gcp-project-id"
-export TS_AUTHKEY="tskey-auth-your-reusable-tailscale-key"
-```
-
-Activate the Conda environment:
-
-```bash
+# 2. Activate conda environment
 conda activate chia_env
-```
 
-### Package Installation
-
-Install `agentic-ml-analog-sim` in editable mode:
-
-```bash
-cd /Users/chia/ChiaWorkspace/agentic-ML-analog-sim
-python -m pip install -e .
-```
-
-Verify the installation:
-
-```bash
-python -c "import agentic_ml_analog_sim; print(agentic_ml_analog_sim.__name__, agentic_ml_analog_sim.__version__)"
+# 3. Install packages in editable mode
+pip install -e .
+pip install -e Un-0
 ```
 
 ---
 
-## Cluster Operations
+## Running the Loop
 
-### Verifying Cluster Configuration
+### Running Individual Phases via Python API
 
-Verify that `cluster.yaml` parses cleanly into a Chia `ClusterConfig`:
+```python
+from agentic_ml_analog_sim.config import load_simulation_config
+from agentic_ml_analog_sim.db.database import ResultDatabase
+from agentic_ml_analog_sim.phase_0 import run_phase_0
+from agentic_ml_analog_sim.phase_1 import run_phase_1
+from agentic_ml_analog_sim.phase_2 import run_phase_2
 
-```bash
-python -c "from chia.cluster.config import load_config; cfg = load_config('cluster.yaml'); print('Cluster name:', cfg.cluster_name)"
+# 1. Load centralized configuration
+config = load_simulation_config("config/simulation_config.yaml")
+db = ResultDatabase("results.db")
+
+# 2. Execute Phase 0 (Candidate Exploration)
+p0_result = run_phase_0(config_path=config, db_path=db)
+print(f"Phase 0 Action: {p0_result.action}, Candidate: {p0_result.candidate_id}")
+
+# 3. Execute Phase 1 (Rewrite, Compile & Simulate)
+p1_result = run_phase_1(candidate_id=p0_result.candidate_id, config_path=config, db_path=db)
+print(f"Phase 1 Status: {p1_result['status']}")
+
+# 4. Execute Phase 2 (Audit & Final Report)
+p2_result = run_phase_2(config_path=config, db_path=db, compile_pdf=True)
+print(f"Phase 2 Report Generated: {p2_result.pdf_path}")
 ```
 
-Expected output:
-```
-Cluster name: agentic-ml-analog-sim-mac
-```
-
-### Starting the Bare-Metal Cluster
-
-Bring up the cluster using Chia:
+### Starting the Bare-Metal Ray Cluster
 
 ```bash
 chia up cluster.yaml
 ```
 
-Or start the Ray head directly:
-
-```bash
-source ~/.zshrc && conda activate chia_env && \
-ray start --head --port=6379 --node-ip-address=${THIS_MACHINE} \
-  --resources='{"antigravity_creds": 1, "metal_gpu": 1, "sqlite_db": 1, "python_worker": 4}' \
-  --include-dashboard=False
-```
-
-Check cluster status:
-
-```bash
-ray status
-```
-
-### Stopping the Cluster
-
-Tear down the cluster cleanly:
-
-```bash
-chia down cluster.yaml
-```
-
-Or via Ray:
-
-```bash
-ray stop
-```
-
-### Bursting to Cloud (Phase 2)
-
-When transitioning to large-scale GPU simulation runs:
-
-1. Authenticate with Google Cloud Application Default Credentials:
-   ```bash
-   gcloud auth application-default login
-   gcloud auth application-default set-quota-project $GCP_PROJECT
-   ```
-2. Launch the hybrid cloud cluster:
-   ```bash
-   chia up cluster.cloud.yaml
-   ```
-3. After simulation completion, tear down all cloud VMs:
-   ```bash
-   chia down cluster.cloud.yaml
-   ```
-
 ---
 
 ## Testing
 
-Run the test suite using `pytest`:
+Run the full pytest regression suite across all unit, pipeline, and cross-phase integration tests:
 
 ```bash
 pytest tests/ -v
 ```
 
-Tests verify:
-- Syntax and schema validation for `cluster.yaml` and `cluster.bare.yaml`.
-- Resource and node configuration integrity for `local_worker`.
-- GCP and Tailnet configuration parsing for `cluster.cloud.yaml`.
-- Cloud node placeholder resolution (`@sim_gpu_pool:N`).
-
----
-
-## Roadmap
-
-- [x] **Phase 0: Environment & Cluster Foundation**
-  - Packaging (`pyproject.toml`) and source layout.
-  - Native Apple Silicon bare-metal execution profile (`cluster.yaml`, `cluster.bare.yaml`).
-  - Phase 2 GPU cloud burst profile (`cluster.cloud.yaml`).
-  - Unit test suite for configuration verification.
-- [ ] **Phase 1: Simulation Engine & Noise Modeling**
-  - Implement continuous-time dynamical system ODE solvers for Un-0 modular physical model.
-  - Integrate phenomenological hardware noise models (thermal, phase noise, device mismatch).
-  - Expose simulation routines as Chia/MCP tools.
-- [ ] **Phase 2: Agentic Co-Design Swarm & Multi-Fidelity Calibration**
-  - Deploy autonomous co-design loop with LLM reasoning agents.
-  - High-throughput parallel GPU batching on GCP cluster.
-  - Automated pareto-optimal exploration of accuracy vs energy/noise trade-offs.
+The test suite covers:
+- Cluster configuration syntax and resource tags.
+- Simulation configuration schema validation, fallbacks, and limits synchronization.
+- Phase 0 candidate generation, deduplication, and validation.
+- Phase 1 rewriters, compiler execution, and `node9_phase1_error_handler` stop conditions.
+- Phase 2 limit checks, LaTeX/PDF report generation, and interactive consultant sessions.
+- End-to-end cross-phase token and dollar cost tracking (`test_e2e_token_monitoring.py`).
