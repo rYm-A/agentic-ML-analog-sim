@@ -129,10 +129,10 @@ def run_phase_0(
         # 3. Setup Tools in direct local mode (avoiding unwanted background Ray actor starts)
         tools: list[Any] = []
         try:
-            from agentic_ml_analog_sim.tools.result_db_tool import ResultDBTool
-            tools.append(ResultDBTool(db=database, deploy=False))
+            from agentic_ml_analog_sim.tools.result_db_tool import ResultDBReadOnlyTool
+            tools.append(ResultDBReadOnlyTool(db=database, deploy=False))
         except Exception as e:
-            logger.debug("Could not bind ResultDBTool: %s", e)
+            logger.debug("Could not bind ResultDBReadOnlyTool: %s", e)
 
         from agentic_ml_analog_sim.tools.un0_context_tool import (
             Un0ContextTool,

@@ -20,7 +20,7 @@ from agentic_ml_analog_sim.config import (
     load_simulation_config,
 )
 from agentic_ml_analog_sim.db import ResultDatabase
-from agentic_ml_analog_sim.tools import ResultDBTool
+from agentic_ml_analog_sim.tools import ResultDBReadOnlyTool, ResultDBReadTool, ResultDBTool
 from agentic_ml_analog_sim.phase_2 import Phase2Result, run_phase_2
 
 __version__ = "0.1.0"
@@ -41,6 +41,9 @@ __all__ = [
     "load_simulation_config",
     "ResultDatabase",
     "ResultDBTool",
+    "ResultDBReadOnlyTool",
+    "ResultDBReadTool",
     "Phase2Result",
     "run_phase_2",
 ]
+

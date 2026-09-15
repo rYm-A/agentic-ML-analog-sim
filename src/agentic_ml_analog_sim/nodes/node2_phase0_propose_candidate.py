@@ -23,6 +23,18 @@ Un-0 is a physical oscillatory neural network (Kuramoto dynamics) mapped to anal
 REDUCE SIMULATION LATENCY WHILE PRESERVING INFERENCE ACCURACY.
 Explore combinations of numerical solvers, physical hardware noise models, and coupling sparsity.
 
+### Database Access (Read-Only MCP Tool):
+You are equipped with the `result_db_read` MCP tool which provides JUST READ access to the simulator's database.
+You CANNOT and MUST NOT perform write/mutation operations via this tool; candidate insertion is handled safely by programmatic validation.
+
+Available Read-Only MCP Tools:
+- `read_prior_proposals(status=None, limit=50)`: Reads all candidate proposals that have already been made in the database, including solver, noise model, parameters, sparsity, evaluation metrics (latency_ms, accuracy_fid, relative_error), status, and cross-phase comments.
+- `get_candidate_history_summary(limit=50)`: Concise summary of all parameter configurations already explored.
+- `get_pareto_front()`: Current Pareto-optimal frontier of completed evaluations (latency vs accuracy).
+- `get_reference_result()`: Baseline reference simulation result.
+- `get_active_evaluations()`: Candidate(s) currently being evaluated in the active loop.
+- `get_proposal_comments(candidate_id)`: Cross-phase commentary notes for a candidate row.
+
 ### Hardware Noise Modeling Skill Integration (L0-L5 Ladder):
 Based on the physical-neural-network-hardware-noise-modeling literature:
 - L0 (Deterministic Static Mismatch): Fixed perturbation on coupling weights delta_K = sigma * z, where z ~ N(0, 1). Models fabrication and programming variation. Fast to compute in digital simulation.
@@ -37,11 +49,12 @@ Based on the physical-neural-network-hardware-noise-modeling literature:
 - Verify that configuration tolerances (compile_check rtol/atol >= 1e-4, solver_accuracy rtol/atol >= 0.05) are mathematically attainable.
 
 ### Candidate Proposal Guidelines:
-1. Query prior proposals and Pareto front from the Result DB tool.
-2. If the database is empty or contains only reference data, propose a fast baseline (e.g. Euler with 5 or 10 steps, L0 static mismatch sigma=0.01, 40% sparsity).
-3. If prior evaluations exist, balance exploration of new parameters with exploitation near the Pareto frontier.
-4. If a prior proposal was rejected, avoid repeating the rejected parameter configuration.
-5. Provide a clear rationale explaining expected latency reduction and accuracy impact.
+1. QUERY PRIOR PROPOSALS: Call `read_prior_proposals` or `get_candidate_history_summary` to inspect all proposals that have already been made.
+2. AVOID REPEATED PROPOSALS: Never propose a combination of (solver, num_steps, noise_model, sparsity_config) that has already been proposed or evaluated in the database. Node 3 will automatically REJECT duplicate proposals.
+3. If the database has no non-reference proposals, propose a fast baseline (e.g. Euler with 5 or 10 steps, L0 static mismatch sigma=0.01, 40% sparsity).
+4. If prior evaluations exist, balance exploration of new parameters with exploitation near the Pareto frontier.
+5. If a prior proposal was rejected, avoid repeating the rejected parameter configuration.
+6. Provide a clear rationale explaining expected latency reduction and accuracy impact.
 
 ### Response Format:
 Respond with a valid JSON object matching this schema:
@@ -250,25 +263,46 @@ def _insert_pending_candidate(db: Any, record: dict[str, Any]) -> None:
 
 
 def _bind_tools(db: Any, tools: list[Any] | None) -> list[Any]:
-    """Bind ResultDBTool and Un0ContextTool if available and not already provided."""
-    bound_tools: list[Any] = list(tools) if tools is not None else []
-    tool_names = {getattr(t, "name", str(t)) for t in bound_tools}
+    """Bind ResultDBReadOnlyTool and Un0ContextTool to provide Node 2 with read-only database inspection."""
+    from agentic_ml_analog_sim.tools.result_db_tool import ResultDBReadOnlyTool, ResultDBTool
 
-    if "ResultDBTool" not in tool_names and "result_db" not in tool_names:
+    bound_tools: list[Any] = []
+    has_db_read = False
+    has_un0 = False
+
+    if tools is not None:
+        for t in tools:
+            # If a writable ResultDBTool was provided, ensure Node 2 only gets read-only access
+            if isinstance(t, ResultDBTool):
+                if getattr(t, "read_only", False):
+                    bound_tools.append(t)
+                else:
+                    read_tool = ResultDBReadOnlyTool(db=getattr(t, "db", db), deploy=False)
+                    bound_tools.append(read_tool)
+                has_db_read = True
+            else:
+                bound_tools.append(t)
+                t_name = getattr(t, "name", str(t))
+                if "result_db" in t_name or "db" in t_name:
+                    has_db_read = True
+                if "un0" in t_name:
+                    has_un0 = True
+
+    if not has_db_read:
         try:
-            from agentic_ml_analog_sim.tools.result_db_tool import ResultDBTool
-            bound_tools.append(ResultDBTool(db=db))
-        except Exception:
-            pass
+            bound_tools.append(ResultDBReadOnlyTool(db=db, deploy=False))
+        except Exception as e:
+            logger.debug("Could not bind ResultDBReadOnlyTool: %s", e)
 
-    if "Un0ContextTool" not in tool_names and "un0_context" not in tool_names:
+    if not has_un0:
         try:
             from agentic_ml_analog_sim.tools.un0_context_tool import Un0ContextTool
-            bound_tools.append(Un0ContextTool())
-        except Exception:
-            pass
+            bound_tools.append(Un0ContextTool(auto_start=False))
+        except Exception as e:
+            logger.debug("Could not bind Un0ContextTool: %s", e)
 
     return bound_tools
+
 
 
 def _resolve_llm(llm: Any = None, config: Any = None) -> Any:
@@ -343,6 +377,9 @@ def node2_phase0_propose_candidate(
         "Please propose the next simulation design candidate for Un-0 analog ML accelerator.",
         f"Exploration configuration: {json.dumps(config_summary, default=str)}",
         f"Current iteration: {iteration}",
+        "IMPORTANT: You have read-only access to the database via the result_db_read MCP tool.",
+        "Use read_prior_proposals or get_candidate_history_summary to inspect all proposals already made in the database.",
+        "DO NOT propose a combination of solver, step count, noise model, and sparsity configuration that already exists.",
     ]
 
     if prior_rejection_reason:

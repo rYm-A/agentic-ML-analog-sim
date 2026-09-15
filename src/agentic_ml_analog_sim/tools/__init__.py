@@ -1,12 +1,18 @@
 """Tools module for analog ML accelerator simulation loop."""
 
 from agentic_ml_analog_sim.tools.result_db_tool import (
+    ResultDBReadOnlyTool,
+    ResultDBReadTool,
     ResultDBTool,
     add_comment,
+    get_active_evaluations,
+    get_candidate_history_summary,
     get_pareto_front,
+    get_proposal_comments,
     get_reference_result,
     insert_proposal,
     query_proposals,
+    read_prior_proposals,
 )
 from agentic_ml_analog_sim.tools.plot_tool import PlotTool
 
@@ -30,11 +36,18 @@ except ImportError:
 
 __all__ = [
     "ResultDBTool",
+    "ResultDBReadOnlyTool",
+    "ResultDBReadTool",
     "PlotTool",
     "query_proposals",
+    "read_prior_proposals",
+    "get_candidate_history_summary",
+    "get_active_evaluations",
+    "get_proposal_comments",
     "get_pareto_front",
     "get_reference_result",
     "insert_proposal",
     "add_comment",
     *_un0_exports,
 ]
+

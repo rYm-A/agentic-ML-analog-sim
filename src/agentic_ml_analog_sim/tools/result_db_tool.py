@@ -23,6 +23,7 @@ class ResultDBTool(ChiaTool):
         task_options: Optional[Dict[str, Any]] = None,
         logging_level: int = logging.INFO,
         deploy: Optional[bool] = None,
+        read_only: bool = False,
     ):
         """Initialize ResultDBTool with database connection and register MCP tools.
 
@@ -33,9 +34,11 @@ class ResultDBTool(ChiaTool):
             logging_level: Python logging level.
             deploy: If True, deploy Ray actor. If False, run in local direct mode.
                     If None, auto-deploy only if Ray is already initialized.
+            read_only: If True, register ONLY read-only methods and block mutations.
         """
         super().__init__(name, task_options=task_options, logging_level=logging_level)
-        self.setup(db=db)
+        self.read_only = read_only
+        self.setup(db=db, read_only=read_only)
 
         should_deploy = deploy if deploy is not None else ray.is_initialized()
         if should_deploy:
@@ -43,12 +46,21 @@ class ResultDBTool(ChiaTool):
                 super().__post_init__()
             except Exception as e:
                 self.logger.warning(
-                    f"ResultDBTool: Ray deployment skipped or failed ({e}). "
+                    f"{self.__class__.__name__}: Ray deployment skipped or failed ({e}). "
                     "Operating in direct local execution mode."
                 )
 
-    def setup(self, db: Optional[Union[ResultDatabase, str, Path]] = None) -> None:
+        if not getattr(self, "hostname", None):
+            self.hostname = "localhost"
+            self.port = getattr(self, "port", None) or 8000
+
+    def setup(
+        self,
+        db: Optional[Union[ResultDatabase, str, Path]] = None,
+        read_only: bool = False,
+    ) -> None:
         """Register MCP tool methods and configure the database instance."""
+        self.read_only = read_only
         if isinstance(db, ResultDatabase):
             self.db = db
         elif isinstance(db, (str, Path)):
@@ -58,16 +70,229 @@ class ResultDBTool(ChiaTool):
         else:
             raise TypeError(f"Invalid type for db: {type(db)}")
 
-        # Register methods with FastMCP
+        # Register read-only MCP tool methods (accessible in both read_only and read-write modes)
+        self.mcp.add_tool(self.read_prior_proposals, name=f"{self.name}_read_prior_proposals")
+        self.mcp.add_tool(self.get_candidate_history_summary, name=f"{self.name}_get_candidate_history_summary")
+        self.mcp.add_tool(self.get_active_evaluations, name=f"{self.name}_get_active_evaluations")
         self.mcp.add_tool(self.query_proposals, name=f"{self.name}_query_proposals")
         self.mcp.add_tool(self.get_pareto_front, name=f"{self.name}_get_pareto_front")
         self.mcp.add_tool(self.get_reference_result, name=f"{self.name}_get_reference_result")
-        self.mcp.add_tool(self.insert_proposal, name=f"{self.name}_insert_proposal")
-        self.mcp.add_tool(self.add_comment, name=f"{self.name}_add_comment")
+        self.mcp.add_tool(self.get_proposal_comments, name=f"{self.name}_get_proposal_comments")
         self.mcp.add_tool(self.get_execution_statistics, name=f"{self.name}_get_execution_statistics")
         self.mcp.add_tool(self.get_token_usage_summary, name=f"{self.name}_get_token_usage_summary")
-        self.mcp.add_tool(self.record_token_usage, name=f"{self.name}_record_token_usage")
         self.mcp.add_tool(self.get_completed_experiments_count, name=f"{self.name}_get_completed_experiments_count")
+
+        # Register mutation tools ONLY when NOT in read_only mode
+        if not self.read_only:
+            self.mcp.add_tool(self.insert_proposal, name=f"{self.name}_insert_proposal")
+            self.mcp.add_tool(self.add_comment, name=f"{self.name}_add_comment")
+            self.mcp.add_tool(self.record_token_usage, name=f"{self.name}_record_token_usage")
+
+    def read_prior_proposals(self, status: Optional[str] = None, limit: int = 50) -> str:
+        """Read simulation candidate proposals that have already been made from the database.
+
+        Use this tool before generating a proposal to inspect previously explored combinations
+        of solver, noise model, parameters, and sparsity configuration to avoid generating repeated proposals.
+
+        Args:
+            status: Optional status filter ('PENDING', 'EVALUATING', 'COMPLETED', 'FAILED', 'REJECTED').
+                    If None, returns proposals across all statuses.
+            limit: Maximum number of proposals to retrieve (default: 50).
+
+        Returns:
+            JSON string containing all existing proposals, their configurations, parameters,
+            evaluation metrics (latency_ms, accuracy_fid, relative_error), status, and comments.
+        """
+        try:
+            proposals = self.db.get_proposals(status=status, limit=limit)
+            if not proposals:
+                filter_str = f" with status='{status}'" if status else ""
+                return json.dumps({
+                    "status": "EMPTY",
+                    "proposals": [],
+                    "count": 0,
+                    "message": f"No proposals found in database{filter_str}. The database has no prior proposals.",
+                })
+
+            enriched_proposals = []
+            for p in proposals:
+                item = dict(p)
+                for json_col in ("solver_params", "noise_params", "sparsity_config"):
+                    if isinstance(item.get(json_col), str):
+                        try:
+                            item[json_col] = json.loads(item[json_col])
+                        except Exception:
+                            pass
+                cand_id = item.get("candidate_id")
+                if cand_id and hasattr(self.db, "get_comments"):
+                    try:
+                        item["comments"] = self.db.get_comments(cand_id)
+                    except Exception:
+                        item["comments"] = []
+                enriched_proposals.append(item)
+
+            return json.dumps(
+                {
+                    "status": "SUCCESS",
+                    "count": len(enriched_proposals),
+                    "proposals": enriched_proposals,
+                    "guidance": (
+                        "Inspect the configurations above. Do NOT propose combinations of "
+                        "(solver, num_steps, noise_model, sparsity_config) that already appear above."
+                    ),
+                },
+                indent=2,
+                default=str,
+            )
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error reading prior proposals: {e}"})
+
+    def get_candidate_history_summary(self, limit: int = 50) -> str:
+        """Retrieve a concise high-level summary of all candidate configurations already proposed.
+
+        Specifically designed for Node 2 to quickly verify parameter sets already explored
+        to avoid generating repeated proposals.
+
+        Args:
+            limit: Maximum number of recent candidates to summarize (default: 50).
+
+        Returns:
+            JSON string with a list of explored configurations (solver, num_steps, noise_model,
+            sparsity_ratio, status, latency_ms, accuracy_fid).
+        """
+        try:
+            proposals = self.db.get_proposals(limit=limit)
+            if not proposals:
+                return json.dumps({
+                    "status": "EMPTY",
+                    "total_explored": 0,
+                    "configurations": [],
+                    "message": "No candidates have been proposed yet.",
+                })
+
+            configs = []
+            for p in proposals:
+                s_params = p.get("solver_params") or {}
+                if isinstance(s_params, str):
+                    try:
+                        s_params = json.loads(s_params)
+                    except Exception:
+                        s_params = {}
+                n_params = p.get("noise_params") or {}
+                if isinstance(n_params, str):
+                    try:
+                        n_params = json.loads(n_params)
+                    except Exception:
+                        n_params = {}
+                sp_cfg = p.get("sparsity_config") or {}
+                if isinstance(sp_cfg, str):
+                    try:
+                        sp_cfg = json.loads(sp_cfg)
+                    except Exception:
+                        sp_cfg = {}
+
+                configs.append({
+                    "candidate_id": p.get("candidate_id"),
+                    "solver": p.get("solver"),
+                    "num_steps": s_params.get("num_steps") or s_params.get("steps"),
+                    "noise_model": p.get("noise_model"),
+                    "noise_sigma": n_params.get("sigma"),
+                    "sparsity_ratio": sp_cfg.get("sparsity_ratio", 0.0),
+                    "status": p.get("status"),
+                    "is_reference": bool(p.get("is_reference")),
+                    "is_active_evaluation": bool(p.get("is_active_evaluation")),
+                    "latency_ms": p.get("latency_ms"),
+                    "accuracy_fid": p.get("accuracy_fid"),
+                    "relative_error": p.get("relative_error"),
+                })
+
+            return json.dumps(
+                {
+                    "status": "SUCCESS",
+                    "total_explored": len(configs),
+                    "configurations": configs,
+                    "guidance": (
+                        "Select a candidate design that differs in solver, step count, "
+                        "noise model, or sparsity ratio from all entries listed above."
+                    ),
+                },
+                indent=2,
+                default=str,
+            )
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error summarizing candidate history: {e}"})
+
+    def get_active_evaluations(self) -> str:
+        """Identify which candidate(s) is/are being evaluated in the actual loop.
+
+        Per prompts/phase-0.md: 'There is also a way to identify which of the
+        candidate(s) is/are being evaluated in the actual loop.'
+
+        Returns:
+            JSON string listing proposals where is_active_evaluation=1 or status='EVALUATING'.
+        """
+        try:
+            conn = self.db._get_connection() if hasattr(self.db, "_get_connection") else None
+            if conn is not None:
+                try:
+                    cur = conn.execute(
+                        """
+                        SELECT candidate_id, iteration, solver, noise_model, status,
+                               is_active_evaluation, created_at, updated_at
+                        FROM proposals
+                        WHERE is_active_evaluation = 1 OR status = 'EVALUATING'
+                        ORDER BY updated_at DESC
+                        """
+                    )
+                    rows = [dict(r) for r in cur.fetchall()]
+                    return json.dumps({
+                        "status": "SUCCESS",
+                        "active_evaluations_count": len(rows),
+                        "active_proposals": rows,
+                    }, indent=2, default=str)
+                finally:
+                    conn.close()
+            else:
+                props = self.db.get_proposals(status="EVALUATING")
+                return json.dumps({
+                    "status": "SUCCESS",
+                    "active_evaluations_count": len(props),
+                    "active_proposals": props,
+                }, indent=2, default=str)
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error fetching active evaluations: {e}"})
+
+    def get_proposal_comments(self, candidate_id: str) -> str:
+        """Retrieve cross-phase commentary notes for a specific proposal.
+
+        Per prompts/phase-0.md: 'For each row (i.e., proposal, we can use some comment columns
+        so that the agents present in the different phases of the Chia loop can leave some notes
+        that can be used as interfaces of communication between different phase agents that
+        the individual agents can query asynchronously).'
+
+        Args:
+            candidate_id: ID of the proposal to inspect notes for.
+
+        Returns:
+            JSON string containing list of notes/comments recorded for candidate_id.
+        """
+        try:
+            if hasattr(self.db, "get_comments"):
+                comments = self.db.get_comments(candidate_id=candidate_id)
+                return json.dumps({
+                    "status": "SUCCESS",
+                    "candidate_id": candidate_id,
+                    "count": len(comments),
+                    "comments": comments,
+                }, indent=2, default=str)
+            return json.dumps({
+                "status": "EMPTY",
+                "candidate_id": candidate_id,
+                "comments": [],
+                "message": "Comments not supported by database instance.",
+            })
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error fetching comments: {e}"})
 
     def query_proposals(self, status: Optional[str] = None, limit: int = 20) -> str:
         """Query simulation candidate proposals from the database, optionally filtered by status.
@@ -150,6 +375,8 @@ class ResultDBTool(ChiaTool):
         Returns:
             Status message string indicating success or duplicate detection.
         """
+        if self.read_only:
+            raise PermissionError("ResultDBReadOnlyTool provides read-only access. Insertion of proposals is not permitted.")
         try:
             # Check for duplicate configuration
             if self.db.is_duplicate_proposal(
@@ -208,6 +435,8 @@ class ResultDBTool(ChiaTool):
         Returns:
             Confirmation message string.
         """
+        if self.read_only:
+            raise PermissionError("ResultDBReadOnlyTool provides read-only access. Adding comments is not permitted.")
         try:
             prop = self.db.get_proposal(candidate_id)
             if prop is None:
@@ -274,6 +503,8 @@ class ResultDBTool(ChiaTool):
         Returns:
             JSON string confirming recorded token usage with row id.
         """
+        if self.read_only:
+            raise PermissionError("ResultDBReadOnlyTool provides read-only access. Recording token usage is not permitted.")
         try:
             row_id = self.db.record_token_usage(
                 phase=phase,
@@ -362,3 +593,56 @@ def add_comment(
         comment=comment,
         agent_name=agent_name,
     )
+
+
+class ResultDBReadOnlyTool(ResultDBTool):
+    """Read-only Result Database ChiaTool (FastMCP server) for inspecting prior proposals.
+
+    Provides Node 2 with just read access to the database to inspect existing proposals,
+    profiling metrics, comments, and the Pareto frontier, specifically avoiding repeated proposals.
+    """
+
+    def __init__(
+        self,
+        name: str = "result_db_read",
+        db: Optional[Union[ResultDatabase, str, Path]] = None,
+        task_options: Optional[Dict[str, Any]] = None,
+        logging_level: int = logging.INFO,
+        deploy: Optional[bool] = None,
+    ):
+        super().__init__(
+            name=name,
+            db=db,
+            task_options=task_options,
+            logging_level=logging_level,
+            deploy=deploy,
+            read_only=True,
+        )
+
+
+ResultDBReadTool = ResultDBReadOnlyTool
+
+
+def read_prior_proposals(db: ResultDatabase, status: Optional[str] = None, limit: int = 50) -> str:
+    """Helper function to read prior proposals directly from a ResultDatabase."""
+    tool = ResultDBReadOnlyTool(db=db, deploy=False)
+    return tool.read_prior_proposals(status=status, limit=limit)
+
+
+def get_candidate_history_summary(db: ResultDatabase, limit: int = 50) -> str:
+    """Helper function to summarize candidate history directly from a ResultDatabase."""
+    tool = ResultDBReadOnlyTool(db=db, deploy=False)
+    return tool.get_candidate_history_summary(limit=limit)
+
+
+def get_active_evaluations(db: ResultDatabase) -> str:
+    """Helper function to retrieve active evaluations directly from a ResultDatabase."""
+    tool = ResultDBReadOnlyTool(db=db, deploy=False)
+    return tool.get_active_evaluations()
+
+
+def get_proposal_comments(db: ResultDatabase, candidate_id: str) -> str:
+    """Helper function to retrieve proposal comments directly from a ResultDatabase."""
+    tool = ResultDBReadOnlyTool(db=db, deploy=False)
+    return tool.get_proposal_comments(candidate_id=candidate_id)
+
