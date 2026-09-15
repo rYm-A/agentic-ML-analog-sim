@@ -130,4 +130,5 @@ def test_phase_2_cli(pipeline_db: ResultDatabase, tmp_path: Path):
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     assert proc.returncode == 0
     assert "REPORT_GENERATED" in proc.stdout
-    assert (out_dir / "final_report.tex").exists()
+    cfg = load_simulation_config("config/simulation_config.yaml")
+    assert (out_dir / cfg.experiment_name / "final_report.tex").exists()

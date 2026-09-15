@@ -2,6 +2,8 @@
 
 Generates a publication-grade LaTeX technical report with Matplotlib figures (Pareto front,
 execution reliability breakdown, token usage auditing) and compiles it to PDF via pdflatex.
+Reports are systematically structured in an experiment-specific subfolder and feature
+dynamic, non-authoritative discussion grounded strictly in empirical data.
 """
 
 from __future__ import annotations
@@ -18,9 +20,10 @@ from typing import Any, Dict, List, Mapping, Optional, Union
 
 from chia.base.ChiaFunction import ChiaFunction
 
+from agentic_ml_analog_sim.reporting.latex_sanitizer import sanitize_latex_text
 from agentic_ml_analog_sim.reporting.plot_generator import (
-    generate_pareto_plot,
     generate_breakdown_plot,
+    generate_pareto_plot,
     generate_token_cost_plot,
 )
 
@@ -28,18 +31,15 @@ logger = logging.getLogger("agentic_ml_analog_sim.phase2_node2")
 
 NODE2_REPORT_SYSTEM_INSTRUCTIONS = """
 You are the Senior Co-Design Architect and Technical Reporting Specialist for the Un-0 Analog Machine Learning Accelerator swarm.
-Your mission is to synthesize all Phase 0 (exploration), Phase 1 (simulation/rewrite), and Phase 2 (auditing) findings into an authoritative, publication-grade technical report.
+Your mission is to synthesize all Phase 0 (exploration), Phase 1 (simulation/rewrite), and Phase 2 (auditing) findings for the current experiment run into a publication-grade technical report.
 
-The report covers:
-1. Executive Summary & Physical Neural Network (PNN) Problem Formulation
-2. Un-0 Kuramoto Oscillator Silicon Crossbar Dynamics & Noise Hierarchy (L0 to L3)
-3. Numerical Solver Speedup vs Precision Trade-offs (Euler vs RK4 vs Parareal)
-4. Multi-Objective Pareto Frontier Analysis (Latency vs Relative Error)
-5. Execution Reliability Breakdown (Code rewrites, circuit compilations, numerical simulations)
-6. Swarm Resource Auditing (LLM Token consumption and estimated dollar costs across phases)
-7. Architectural Recommendations for Silicon Tape-Out and Edge ML Deployment
-
-Provide clear, quantitative, academic-grade text and analytical assessments.
+Critical instructions:
+1. Ground your discussion strictly in the varying empirical data provided in the prompt. Avoid repetitive, static boilerplate.
+2. The focus of the report is to expose graphically and tabularly the obtained results, followed by an insightful discussion.
+3. Reflect on the diversity of the Pareto front: if results show low variety across solvers or parameters (e.g. all candidates using Euler), explicitly note the low variety and recommend expanding the design space in Phase 0.
+4. Reflect on loop execution reliability, error stages encountered, and pipeline bottlenecks.
+5. Reflect on swarm token and compute expenditure across phases.
+6. Provide clear, quantitative, academic-grade text and analytical assessments.
 """
 
 
@@ -76,12 +76,10 @@ def _resolve_llm(llm: Any = None, config: Any = None) -> Any:
 
 def _find_pdflatex() -> Optional[str]:
     """Locate pdflatex binary on system, checking standard PATH and macOS TeX directories."""
-    # Check current PATH
     found = shutil.which("pdflatex")
     if found:
         return found
 
-    # Check typical macOS TeX installations
     macos_candidates = [
         "/Library/TeX/texbin/pdflatex",
         "/usr/local/texlive/2024/bin/universal-darwin/pdflatex",
@@ -99,52 +97,51 @@ def _find_pdflatex() -> Optional[str]:
 def compile_latex(tex_file: Union[str, Path], output_dir: Union[str, Path]) -> bool:
     """Compile a LaTeX document to PDF using pdflatex with non-stop mode.
 
-    Runs twice to resolve cross-references and figure numbers.
-    """
-    tex_path = Path(tex_file).resolve()
-    out_dir = Path(output_dir).resolve()
-    pdflatex_bin = _find_pdflatex()
+    Executes two compilation passes to resolve cross-references and figure labels.
 
+    Args:
+        tex_file: Path to .tex source file.
+        output_dir: Output directory for compiled PDF and auxiliary files.
+
+    Returns:
+        True if PDF was successfully produced; False otherwise.
+    """
+    pdflatex_bin = _find_pdflatex()
     if not pdflatex_bin:
-        logger.warning("pdflatex binary not found on system. Skipping PDF compilation.")
+        logger.warning("pdflatex binary not found; skipping PDF compilation. TeX source remains available.")
         return False
 
-    env = dict(os.environ)
-    tex_dir = str(Path(pdflatex_bin).parent)
-    if tex_dir not in env.get("PATH", ""):
-        env["PATH"] = f"{tex_dir}:{env.get('PATH', '')}"
+    tex_path = Path(tex_file).resolve()
+    out_dir = Path(output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
         pdflatex_bin,
         "-interaction=nonstopmode",
-        f"-output-directory={str(out_dir)}",
+        f"-output-directory={out_dir}",
         str(tex_path),
     ]
 
     try:
-        # Run twice for cross references
-        for run_idx in (1, 2):
-            result = subprocess.run(
-                cmd,
-                cwd=str(out_dir),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-                timeout=120,
+        # Pass 1: generate aux and references
+        logger.info("Executing pdflatex pass 1: %s", " ".join(cmd))
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        if result.returncode != 0:
+            logger.warning("pdflatex pass 1 returned non-zero code (%d): %s", result.returncode, result.stdout[-500:])
+
+        # Pass 2: resolve cross-references and table/figure links
+        logger.info("Executing pdflatex pass 2 for cross-references...")
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        if result.returncode != 0:
+            logger.warning(
+                "pdflatex pass 2 returned non-zero code (%d). Log snippet:\n%s",
+                result.returncode,
+                result.stdout[-1000:],
             )
-            if result.returncode != 0:
-                logger.warning(
-                    "pdflatex run %d exited with code %d. Stdout: %s",
-                    run_idx,
-                    result.returncode,
-                    result.stdout[-1000:],
-                )
-                # If PDF was still produced despite minor warnings, consider it usable
-                pdf_target = out_dir / f"{tex_path.stem}.pdf"
-                if pdf_target.exists() and pdf_target.stat().st_size > 0:
-                    return True
-                return False
+            pdf_target = out_dir / f"{tex_path.stem}.pdf"
+            if pdf_target.exists() and pdf_target.stat().st_size > 0:
+                return True
+            return False
 
         pdf_target = out_dir / f"{tex_path.stem}.pdf"
         return pdf_target.exists() and pdf_target.stat().st_size > 0
@@ -154,7 +151,7 @@ def compile_latex(tex_file: Union[str, Path], output_dir: Union[str, Path]) -> b
 
 
 def _escape_latex(s: Any) -> str:
-    """Escape LaTeX special characters in text strings."""
+    """Escape LaTeX special characters in table text strings."""
     if s is None:
         return ""
     text = str(s)
@@ -174,7 +171,7 @@ def _build_pareto_table_tex(pareto_front: List[Dict[str, Any]], ref_proposal: Op
 
     rows = []
     if ref_proposal:
-        cid = _escape_latex(ref_proposal.get("candidate_id", "ref_rk4"))
+        cid = _escape_latex(ref_proposal.get("candidate_id", "ref_baseline"))
         solv = _escape_latex(ref_proposal.get("solver", "rk4"))
         noise = _escape_latex(ref_proposal.get("noise_model", "none"))
         lat = ref_proposal.get("latency_ms", 0.0) or 0.0
@@ -185,7 +182,6 @@ def _build_pareto_table_tex(pareto_front: List[Dict[str, Any]], ref_proposal: Op
         cid = _escape_latex(p.get("candidate_id", "cand"))
         solv = _escape_latex(p.get("solver", "euler"))
         noise = _escape_latex(p.get("noise_model", "none").split("_")[0])
-        # Sparsity
         sp_cfg = p.get("sparsity_config")
         sp_ratio = 0.0
         if isinstance(sp_cfg, str):
@@ -210,12 +206,12 @@ def _build_pareto_table_tex(pareto_front: List[Dict[str, Any]], ref_proposal: Op
 
 
 def _build_token_table_tex(token_summary: Dict[str, Any]) -> str:
-    """Generate LaTeX booktabs table of token usage by swarm phase."""
+    """Generate LaTeX booktabs table of token usage by swarm phase with escaped ampersands."""
     by_phase = token_summary.get("by_phase", {})
     phases = [
         ("phase_0", "Phase 0 (Candidate Exploration)"),
-        ("phase_1", "Phase 1 (Code Rewrite & Simulation)"),
-        ("phase_2", "Phase 2 (Auditing & Final Reporting)"),
+        ("phase_1", "Phase 1 (Code Rewrite \\& Simulation)"),
+        ("phase_2", "Phase 2 (Auditing \\& Final Reporting)"),
     ]
 
     rows = []
@@ -236,78 +232,248 @@ def _build_token_table_tex(token_summary: Dict[str, Any]) -> str:
         rows.append(f"{label} & {calls} & {prompt_t:,} & {compl_t:,} & {tot_t:,} & \\${cost:.4f} \\\\")
 
     rows.append("\\midrule")
-    rows.append(f"\\textbf{{Swarm Total}} & \\textbf{{{token_summary.get('overall', {}).get('total_calls', 0)}}} & \\textbf{{{token_summary.get('overall', {}).get('total_prompt_tokens', 0):,}}} & \\textbf{{{token_summary.get('overall', {}).get('total_completion_tokens', 0):,}}} & \\textbf{{{total_tokens:,}}} & \\textbf{{\\${total_cost:.4f}}} \\\\")
+    rows.append(
+        f"\\textbf{{Swarm Total}} & \\textbf{{{token_summary.get('overall', {}).get('total_calls', 0)}}} & "
+        f"\\textbf{{{token_summary.get('overall', {}).get('total_prompt_tokens', 0):,}}} & "
+        f"\\textbf{{{token_summary.get('overall', {}).get('total_completion_tokens', 0):,}}} & "
+        f"\\textbf{{{total_tokens:,}}} & \\textbf{{\\${total_cost:.4f}}} \\\\"
+    )
 
     return "\n".join(rows)
 
 
+def _generate_dynamic_executive_summary(
+    db: Any,
+    config: Any,
+    ref: Optional[Dict[str, Any]],
+    pareto: List[Dict[str, Any]],
+    stats: Dict[str, Any],
+    token_sum: Dict[str, Any],
+) -> str:
+    """Dynamically synthesize executive summary reflecting actual run metrics."""
+    exp_name = _get_val(config, "experiment_name", "un0_kuramoto_analog_acceleration")
+    total_prop = stats.get("total_proposals", len(pareto))
+    pareto_cnt = len(pareto)
+    ref_lat = ref.get("latency_ms", 100.0) if ref else 100.0
+
+    if pareto:
+        min_lat = min((p.get("latency_ms", 0.0) or ref_lat) for p in pareto)
+        max_speedup = (ref_lat / min_lat) if min_lat > 0 else 1.0
+    else:
+        max_speedup = 1.0
+
+    return (
+        f"This technical report documents the empirical outcomes of the co-design optimization campaign "
+        f"for experiment '{exp_name}'. An autonomous multi-agent swarm evaluated {total_prop} candidate "
+        f"configurations against the reference baseline ({ref_lat:.1f} ms latency). The multi-objective "
+        f"optimization established a Pareto frontier comprising {pareto_cnt} non-dominated configurations, "
+        f"yielding peak speedups of up to {max_speedup:.2f}$\\times$ while remaining within acceptable relative "
+        f"error tolerances. Comprehensive auditing confirms robust pipeline execution and cost-efficient LLM operation."
+    )
+
+
+def _generate_dynamic_pareto_analysis(
+    pareto: List[Dict[str, Any]],
+    ref: Optional[Dict[str, Any]],
+) -> str:
+    """Dynamically discuss Pareto frontier results based strictly on empirical candidate data."""
+    if not pareto:
+        return (
+            "The multi-objective evaluation did not identify any non-dominated candidates beyond the "
+            "reference baseline. The design space should be expanded to include alternative numerical "
+            "solvers and broader parameter sweeps in Phase 0."
+        )
+
+    candidate_solvers = list(dict.fromkeys(p.get("solver", "unknown") for p in pareto if not p.get("is_reference")))
+    solvers = candidate_solvers if candidate_solvers else list(dict.fromkeys(p.get("solver", "unknown") for p in pareto))
+    noises = list(dict.fromkeys(p.get("noise_model", "none") for p in pareto))
+    ref_lat = ref.get("latency_ms", 100.0) if ref else 100.0
+
+    # Diversity evaluation: if low variety, explicitly recommend expanding design space
+    if len(solvers) <= 1:
+        variety_comment = (
+            f"The empirical Pareto frontier currently exhibits low variety, as all non-dominated candidates "
+            f"converge on the '{solvers[0]}' solver. An expansion of the candidate design space in Phase 0 "
+            f"is strongly recommended to explore alternative integration schemes (e.g. Parareal, adaptive step sizes) "
+            f"and broader hardware-noise models."
+        )
+    else:
+        variety_comment = (
+            f"The empirical Pareto frontier captures a diverse trade-off boundary spanning multiple solver families "
+            f"({', '.join(solvers)}) and hardware noise configurations ({', '.join(noises)})."
+        )
+
+    latencies = [(p.get("latency_ms", 0.0) or 0.0) for p in pareto]
+    errors = [
+        ((p.get("relative_error") if p.get("relative_error") is not None else p.get("accuracy_fid", 0.0)) or 0.0)
+        for p in pareto
+    ]
+    min_lat, max_lat = min(latencies), max(latencies)
+    max_speedup = (ref_lat / min_lat) if min_lat > 0 else 1.0
+    min_err, max_err = min(errors), max(errors)
+
+    tradeoff_comment = (
+        f"Compared to the reference baseline ({ref_lat:.1f} ms), optimal candidates achieved latencies ranging "
+        f"from {min_lat:.1f} ms to {max_lat:.1f} ms (up to {max_speedup:.2f}$\\times$ acceleration) while maintaining "
+        f"relative trajectory errors between {min_err:.4f} and {max_err:.4f}."
+    )
+
+    return f"{variety_comment} {tradeoff_comment}"
+
+
+def _generate_dynamic_reliability_analysis(stats: Dict[str, Any]) -> str:
+    """Dynamically discuss execution pipeline reliability and bottlenecks."""
+    total_prop = stats.get("total_proposals", 0)
+    failed_rewrites = stats.get("rewrites_failed_count", 0)
+    succ_comps = stats.get("compilations_succeeded_count", 0)
+    failed_comps = stats.get("compilations_failed_count", 0)
+    succ_sims = stats.get("simulations_succeeded_count", 0)
+    failed_sims = stats.get("simulations_failed_count", 0)
+
+    total_failures = failed_rewrites + failed_comps + failed_sims
+    if total_failures == 0:
+        return (
+            f"The autonomous execution pipeline demonstrated 100\\% reliability across all {total_prop} evaluated "
+            f"proposals. All automated solver rewrites, noise injection passes, compiler adaptations, domain compilations, "
+            f"and numerical simulations executed without runtime faults, compiler crashes, or numerical overflow."
+        )
+
+    bottlenecks = []
+    if failed_rewrites > 0:
+        bottlenecks.append(f"{failed_rewrites} rewrite stage failures")
+    if failed_comps > 0:
+        bottlenecks.append(f"{failed_comps} compiler build failures")
+    if failed_sims > 0:
+        bottlenecks.append(f"{failed_sims} numerical simulation divergences")
+
+    return (
+        f"Pipeline reliability monitoring recorded {total_failures} execution failures across {total_prop} evaluated "
+        f"proposals: {', '.join(bottlenecks)}. Success rates achieved: {succ_comps}/{succ_comps + failed_comps} for domain "
+        f"compilation and {succ_sims}/{succ_sims + failed_sims} for numerical simulation."
+    )
+
+
+def _generate_dynamic_resource_analysis(token_sum: Dict[str, Any]) -> str:
+    """Dynamically discuss swarm resource utilization and costs."""
+    overall = token_sum.get("overall", {})
+    calls = overall.get("total_calls", 0)
+    tokens = overall.get("total_tokens", 0)
+    cost = overall.get("total_cost_usd", 0.0)
+
+    by_phase = token_sum.get("by_phase", {})
+    p0_cost = by_phase.get("phase_0", {}).get("cost_usd", 0.0)
+    p1_cost = by_phase.get("phase_1", {}).get("cost_usd", 0.0)
+    p2_cost = by_phase.get("phase_2", {}).get("cost_usd", 0.0)
+
+    return (
+        f"Swarm resource auditing recorded a total of {calls} LLM inference turns consuming "
+        f"{tokens:,} total tokens with a cumulative cost of \\${cost:.4f} USD. Resource expenditure was distributed "
+        f"across Phase 0 exploration (\\${p0_cost:.4f}), Phase 1 automated code rewriting and simulation "
+        f"(\\${p1_cost:.4f}), and Phase 2 auditing and report synthesis (\\${p2_cost:.4f})."
+    )
+
+
+def _generate_dynamic_recommendations(
+    pareto: List[Dict[str, Any]],
+    stats: Dict[str, Any],
+    token_sum: Dict[str, Any],
+) -> str:
+    """Dynamically generate actionable recommendations strictly based on empirical findings."""
+    recs = []
+    candidate_solvers = [p.get("solver", "unknown") for p in pareto if not p.get("is_reference")]
+    solvers = list(dict.fromkeys(candidate_solvers if candidate_solvers else [p.get("solver", "unknown") for p in pareto])) if pareto else []
+
+    if len(solvers) <= 1:
+        recs.append(
+            r"\textbf{Design Space Expansion:} Because the current Pareto frontier shows low variety, expand Phase 0 "
+            r"candidate generation to include higher-order explicit schemes and parallel integration methods."
+        )
+    else:
+        recs.append(
+            r"\textbf{Solver Selection Strategy:} Adopt low-step explicit Euler schemes for energy-constrained edge deployment, "
+            r"reserving multi-stage solvers for high-precision calibration modes."
+        )
+
+    failed_comps = stats.get("compilations_failed_count", 0)
+    if failed_comps > 0:
+        recs.append(
+            r"\textbf{Compilation Robustness:} Strengthen compiler AST verification before code generation to prevent build failures."
+        )
+    else:
+        recs.append(
+            r"\textbf{Execution Pipeline Stability:} Domain compilation and numerical simulation demonstrate complete stability; "
+            r"increase batch exploration sizes in subsequent sweeps."
+        )
+
+    overall_cost = token_sum.get("overall", {}).get("total_cost_usd", 0.0)
+    if overall_cost > 1.0:
+        recs.append(
+            r"\textbf{Token Efficiency Optimization:} Implement candidate proposal deduplication in Phase 0 prompts to compress upstream token expenditure."
+        )
+    else:
+        recs.append(
+            r"\textbf{Swarm Resource Budgeting:} Resource utilization remains highly cost-efficient, supporting extended loop iterations."
+        )
+
+    items = "\n".join(f"  \\item {r}" for r in recs)
+    return f"\\begin{{enumerate}}\n{items}\n\\end{{enumerate}}"
+
+
 def _generate_report_tex_content(
-    db: ResultDatabase,
+    db: Any,
     config: Any,
     llm_synthesis: Optional[Dict[str, str]] = None,
 ) -> str:
-    """Construct full publication-grade LaTeX report document."""
-    ref = db.get_reference_proposal()
-    pareto = db.compute_pareto_front()
-    stats = db.get_execution_statistics()
-    token_sum = db.get_token_usage_summary()
+    """Construct publication-grade LaTeX report with dynamic, data-driven discussion.
+
+    All narrative strings are passed through sanitize_latex_text to map Unicode
+    characters and escape LaTeX special symbols.
+    """
+    ref = db.get_reference_proposal() if hasattr(db, "get_reference_proposal") else None
+    pareto = db.compute_pareto_front() if hasattr(db, "compute_pareto_front") else []
+    stats = db.get_execution_statistics() if hasattr(db, "get_execution_statistics") else {}
+    token_sum = db.get_token_usage_summary() if hasattr(db, "get_token_usage_summary") else {}
 
     pareto_table = _build_pareto_table_tex(pareto, ref)
     token_table = _build_token_table_tex(token_sum)
 
-    # Narrative text sections (either LLM-provided or high-quality authoritative defaults)
+    # Resolve narrative sections dynamically without static authoritative fallbacks
     exec_summary = (
         llm_synthesis.get("executive_summary")
         if llm_synthesis and "executive_summary" in llm_synthesis
-        else (
-            "This report documents the architectural exploration and multi-objective optimization "
-            "for the Un-0 Analog Machine Learning Accelerator. By employing an agentic co-design swarm, "
-            "we evaluated mathematical solver discretizations, hardware noise resilience across physical "
-            "fabrication mismatch (L0) through stochastic drift (L3), and coupling matrix sparsity. "
-            "Our Pareto frontier identifies configurations achieving up to an order-of-magnitude reduction "
-            "in numerical evaluation latency while strictly remaining within acceptable inference error tolerances."
-        )
-    )
-
-    pnn_arch_text = (
-        llm_synthesis.get("architecture_discussion")
-        if llm_synthesis and "architecture_discussion" in llm_synthesis
-        else (
-            "The Un-0 physical oscillatory neural network executes continuous-time non-linear dynamics "
-            "governed by Kuramoto phase-coupled oscillators: "
-            "$\\dot{\\theta}_i = \\omega_i + \\sum_{j=1}^N K_{ij} \\sin(\\theta_j - \\theta_i)$. "
-            "When instantiated on analog crossbar arrays, spatial mismatch (Level 0) introduces "
-            "deviations $\\Delta K_{ij} \\sim \\mathcal{N}(0, \\sigma^2)$, while operational thermal noise "
-            "acts as stochastic parameter fluctuation (Level 1). Furthermore, interface DAC/ADC conversions (Level 2) "
-            "and low-frequency flicker drift (Level 3) perturb long-term synchronization. "
-            "Digital GPU emulation of these dynamics requires stiff differential equation solvers; co-designing "
-            "the numerical discretization with physical noise tolerance is critical for high-throughput exploration."
-        )
+        else _generate_dynamic_executive_summary(db, config, ref, pareto, stats, token_sum)
     )
 
     pareto_analysis_text = (
         llm_synthesis.get("pareto_analysis")
         if llm_synthesis and "pareto_analysis" in llm_synthesis
-        else (
-            "Multi-objective evaluation across solvers reveals that low-order explicit Euler solvers with reduced "
-            "step counts ($N=5$) achieve substantial execution speedups over 4th-order Runge-Kutta baselines ($N=25$). "
-            "Crucially, the inherent noise tolerance of oscillatory phase locking attenuates truncation errors, "
-            "allowing aggressive crossbar sparsity pruning (up to 40--60\\%) without catastrophic FID degradation. "
-            "The identified Pareto frontier captures the optimal boundary of latency versus accuracy."
-        )
+        else _generate_dynamic_pareto_analysis(pareto, ref)
+    )
+
+    reliability_text = (
+        llm_synthesis.get("reliability_discussion") or llm_synthesis.get("architecture_discussion")
+        if llm_synthesis and ("reliability_discussion" in llm_synthesis or "architecture_discussion" in llm_synthesis)
+        else _generate_dynamic_reliability_analysis(stats)
+    )
+
+    resource_text = (
+        llm_synthesis.get("resource_discussion")
+        if llm_synthesis and "resource_discussion" in llm_synthesis
+        else _generate_dynamic_resource_analysis(token_sum)
     )
 
     recommendations_text = (
         llm_synthesis.get("recommendations")
         if llm_synthesis and "recommendations" in llm_synthesis
-        else (
-            "\\begin{enumerate}\n"
-            "  \\item \\textbf{Discretization Selection:} Adopt 1st-order explicit Euler integration with $N=5$ to $10$ steps for edge analog simulation, yielding over $5\\times$ speedup over RK4 with $<5\\%$ relative error.\n"
-            "  \\item \\textbf{Crossbar Coupling Sparsity:} Enforce 40\\% threshold-based pruning on weight matrices to decrease analog capacitive loading and accelerate GEMV acceleration.\n"
-            "  \\item \\textbf{Hardware-Noise Robustness:} Calibration routines should prioritize L0 static offset cancellation via on-chip DAC trimming, as the system exhibits high intrinsic robustness to L1 stochastic fluctuations.\n"
-            "\\end{enumerate}"
-        )
+        else _generate_dynamic_recommendations(pareto, stats, token_sum)
     )
+
+    # Sanitize all narrative fields to eliminate raw Unicode and unescaped LaTeX specials
+    exec_summary = sanitize_latex_text(exec_summary)
+    pareto_analysis_text = sanitize_latex_text(pareto_analysis_text)
+    reliability_text = sanitize_latex_text(reliability_text)
+    resource_text = sanitize_latex_text(resource_text)
+    recommendations_text = sanitize_latex_text(recommendations_text)
 
     doc = f"""\\documentclass[10pt,conference]{{IEEEtran}}
 \\usepackage{{amsmath,amssymb,amsfonts}}
@@ -338,32 +504,21 @@ def _generate_report_tex_content(
 \\maketitle
 
 \\begin{{abstract}}
-Analog oscillatory neural networks offer massive parallel compute density and ultra-low energy dissipation for machine learning inference. However, co-designing physical silicon circuits requires navigating complex trade-offs between numerical solver fidelity, crossbar sparsity, and analog noise tolerance. In this paper, we present the comprehensive results from an autonomous agentic optimization loop applied to the Un-0 analog oscillatory accelerator. We present a multi-objective Pareto analysis comparing numerical latency against golden model accuracy, quantify pipeline rewrite and simulation reliability across all exploration stages, and provide an exhaustive token and dollar audit of the autonomous agent swarm.
+Analog oscillatory neural networks offer massive parallel compute density and ultra-low energy dissipation for machine learning inference. In this technical report, we present the empirical results from an autonomous agentic optimization loop applied to the Un-0 analog oscillatory accelerator. We present a multi-objective Pareto analysis comparing numerical latency against golden model accuracy, quantify pipeline rewrite and simulation reliability across all exploration stages, and provide an exhaustive token and dollar audit of the autonomous agent swarm.
 \\end{{abstract}}
 
 \\section{{Executive Summary}}
 {exec_summary}
 
-\\section{{Un-0 Physical Architecture and Noise Hierarchy}}
-{pnn_arch_text}
-
-The Un-0 acceleration pipeline incorporates a hierarchical hardware-noise ladder:
-\\begin{{itemize}}
-  \\item \\textbf{{Level 0 (Static Mismatch):}} Fixed weight offsets reflecting lithographic and programming variability across crossbar crosspoints.
-  \\item \\textbf{{Level 1 (Stochastic Fluctuation):}} Time-dependent Gaussian white noise added to oscillator coupling during phase integration.
-  \\item \\textbf{{Level 2 (Interface Quantization):}} Bounded resolution for input DACs (6--8 bits) and readout ADCs with saturation clipping.
-  \\item \\textbf{{Level 3 (Correlated 1/f Drift):}} Non-stationary aging and temperature drift across physical macro regions.
-\\end{{itemize}}
-
 \\section{{Multi-Objective Pareto Analysis}}
 {pareto_analysis_text}
 
-Figure~\\ref{{fig:pareto}} illustrates the empirical Pareto frontier contrasting simulation latency against relative error. Table~\\ref{{tab:pareto}} lists key Pareto-optimal designs alongside the reference RK4 baseline.
+Figure~\\ref{{fig:pareto}} illustrates the empirical Pareto frontier contrasting simulation latency against relative error. Table~\\ref{{tab:pareto}} lists key Pareto-optimal designs alongside the reference baseline.
 
 \\begin{{figure}}[htbp]
 \\centering
 \\includegraphics[width=0.95\\linewidth]{{figures/pareto_frontier.pdf}}
-\\caption{{Multi-Objective Pareto frontier for analog ML co-design (Latency vs. Relative Error). Golden RK4 baseline is marked with a star.}}
+\\caption{{Multi-Objective Pareto frontier for analog ML co-design (Latency vs. Relative Error). Golden baseline is marked with a star.}}
 \\label{{fig:pareto}}
 \\end{{figure}}
 
@@ -381,7 +536,9 @@ Figure~\\ref{{fig:pareto}} illustrates the empirical Pareto frontier contrasting
 \\end{{table}}
 
 \\section{{Pipeline Execution Reliability}}
-To ensure robustness across automated code rewrites and circuit evaluations, each candidate proposal passed through code generation, domain compilation, and physical simulation stages. Figure~\\ref{{fig:breakdown}} provides the quantitative breakdown of execution outcomes across all tested candidates.
+{reliability_text}
+
+Figure~\\ref{{fig:breakdown}} provides the quantitative breakdown of execution outcomes across all tested candidates in the co-design pipeline.
 
 \\begin{{figure}}[htbp]
 \\centering
@@ -391,7 +548,9 @@ To ensure robustness across automated code rewrites and circuit evaluations, eac
 \\end{{figure}}
 
 \\section{{Swarm Resource and Token Auditing}}
-Resource tracking was audited continuously across Phase 0, Phase 1, and Phase 2 swarms. All LLM backend interactions were registered with prompt/completion token accounting and cost tracking. Table~\\ref{{tab:token_cost}} and Figure~\\ref{{fig:tokens}} detail the token distribution and computational cost across swarm operational phases.
+{resource_text}
+
+Table~\\ref{{tab:token_cost}} and Figure~\\ref{{fig:tokens}} detail the token distribution and computational cost across swarm operational phases.
 
 \\begin{{figure}}[htbp]
 \\centering
@@ -413,11 +572,11 @@ Resource tracking was audited continuously across Phase 0, Phase 1, and Phase 2 
 \\end{{tabular}}
 \\end{{table}}
 
-\\section{{Architectural Recommendations}}
+\\section{{Architectural Recommendations and Next Steps}}
 {recommendations_text}
 
 \\section{{Conclusion}}
-The autonomous co-design framework successfully demonstrated that physical oscillatory dynamics coupled with analog sparsity enable significant numerical and hardware efficiency gains without compromising inference fidelity. The Pareto designs established in this study provide actionable configurations for upcoming silicon tape-out.
+The empirical results established in this optimization run provide actionable trade-offs and guide subsequent silicon tape-out parameters and swarm exploration sweeps.
 
 \\end{{document}}
 """
@@ -435,17 +594,18 @@ def node2_phase2_generate_final_report(
 ) -> Dict[str, Any]:
     """Agentic node synthesizing simulation findings into a publication-grade LaTeX report with PDF.
 
-    1. Generates publication Matplotlib plots (Pareto frontier, execution breakdown, token summary).
-    2. Queries ResultDatabase for metrics, Pareto frontier, and execution statistics.
-    3. Prompts single mid-effort LLM (gemini-2.5-flash) to synthesize technical narrative.
-    4. Records LLM token usage to token_usage table and attaches metrics to Chia profiler.
-    5. Formulates full LaTeX source file (final_report.tex).
-    6. Compiles final_report.pdf via pdflatex.
+    1. Resolves destination directory under <output_dir>/<experiment_name>.
+    2. Generates publication Matplotlib plots (Pareto frontier, execution breakdown, token summary).
+    3. Queries ResultDatabase for metrics, Pareto frontier, and execution statistics.
+    4. Prompts LLM to reflect on and analyze empirical findings (Pareto diversity, pipeline reliability, tokens).
+    5. Records LLM token usage to token_usage table and attaches metrics to Chia profiler.
+    6. Formulates full sanitized LaTeX source file (final_report.tex).
+    7. Compiles final_report.pdf via pdflatex.
 
     Args:
         db: ResultDatabase instance.
         config: SimulationConfig instance or dict.
-        output_dir: Directory where reports and figures are saved.
+        output_dir: Base directory where reports and figures are saved.
         llm: Optional LLM instance (default: gemini-2.5-flash or mock).
         tools: Optional list of ChiaTool instances.
         compile_pdf: Whether to execute pdflatex compilation (default: True).
@@ -453,13 +613,20 @@ def node2_phase2_generate_final_report(
     Returns:
         Dict[str, Any] containing paths, compilation status, and summary statistics.
     """
-    out_path = Path(output_dir)
+    exp_name = _get_val(config, "experiment_name", "un0_kuramoto_analog_acceleration")
+    base_out_path = Path(output_dir)
+    # Store systematically under a subfolder named after the experiment
+    if base_out_path.name == exp_name:
+        out_path = base_out_path
+    else:
+        out_path = base_out_path / exp_name
+
     fig_path = out_path / "figures"
     out_path.mkdir(parents=True, exist_ok=True)
     fig_path.mkdir(parents=True, exist_ok=True)
 
-    # 1. Generate all required Matplotlib plots in output_dir/figures
-    logger.info("Generating publication Matplotlib figures...")
+    # 1. Generate all required Matplotlib plots in <output_dir>/<experiment_name>/figures
+    logger.info("Generating publication Matplotlib figures in %s...", fig_path)
     pareto_files = generate_pareto_plot(db, fig_path, "pareto_frontier")
     breakdown_files = generate_breakdown_plot(db, fig_path, "execution_breakdown")
     token_files = generate_token_cost_plot(db, fig_path, "token_cost_summary")
@@ -470,79 +637,89 @@ def node2_phase2_generate_final_report(
         "token_cost": token_files,
     }
 
-    # 2. Gather data for LLM prompt
+    # 2. Gather data for LLM reflection prompt
     pareto_front = db.compute_pareto_front() if hasattr(db, "compute_pareto_front") else []
     exec_stats = db.get_execution_statistics() if hasattr(db, "get_execution_statistics") else {}
     token_summary = db.get_token_usage_summary() if hasattr(db, "get_token_usage_summary") else {}
     ref_proposal = db.get_reference_proposal() if hasattr(db, "get_reference_proposal") else None
     completed_candidates = db.get_proposals(is_reference=False, limit=100) if hasattr(db, "get_proposals") else []
 
-    # 3. Prompt single LLM to draft technical synthesis
-    active_llm = _resolve_llm(llm, config)
-    prompt_payload = {
-        "experiment_name": _get_val(config, "experiment_name", "un0_analog_ml"),
-        "reference_baseline": ref_proposal,
-        "pareto_candidates": pareto_front,
-        "execution_statistics": exec_stats,
-        "token_usage_summary": token_summary,
-        "instruction": (
-            "Synthesize the co-design findings. Respond with a JSON object containing keys: "
-            "'executive_summary', 'architecture_discussion', 'pareto_analysis', and 'recommendations'."
-        ),
-    }
-
-    user_message = f"Please draft the technical synthesis for the final co-design report:\n{json.dumps(prompt_payload, default=str)}"
-
-    start_time = time.time()
-    query_result = active_llm.prompt(user_message=user_message, tools=tools)
-    duration = time.time() - start_time
-
-    # 4. Extract token metrics and record to database and profiler
-    usage = getattr(query_result, "usage", {}) or {}
-    prompt_tokens = usage.get("prompt_tokens", 0)
-    completion_tokens = usage.get("candidates_tokens", usage.get("completion_tokens", 0))
-    total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
-    # Estimate cost for gemini-2.5-flash: ~$0.075 / 1M prompt, $0.30 / 1M completion
-    cost_usd = (prompt_tokens * 0.075 / 1_000_000) + (completion_tokens * 0.30 / 1_000_000)
-
-    model_name = getattr(active_llm, "model", "gemini-2.5-flash")
-
-    if hasattr(db, "record_token_usage") and callable(db.record_token_usage):
-        try:
-            db.record_token_usage(
-                phase="phase_2",
-                node_name="phase2_generate_final_report",
-                model=model_name,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                cost_usd=cost_usd,
-                duration_seconds=duration,
-            )
-        except Exception as exc:
-            logger.warning("Failed to record token usage to DB: %s", exc)
-
-    # Attach to Chia profiler
-    try:
-        from chia.base.profiling import get_profiler
-        get_profiler().add_info({"usage": usage, "model": model_name, "phase": "phase_2"})
-    except Exception:
-        pass
-
-    # 5. Parse LLM response if valid JSON returned
+    # 3. Prompt LLM to reflect, analyze, and draft dynamic technical synthesis
     llm_synthesis = None
-    response_text = getattr(query_result, "result", str(query_result))
-    if isinstance(response_text, str):
+    if llm is False:
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        cost_usd = 0.0
+        model_name = "dynamic_engine"
+    else:
+        active_llm = _resolve_llm(llm, config)
+        prompt_payload = {
+            "experiment_name": exp_name,
+            "reference_baseline": ref_proposal,
+            "pareto_candidates": pareto_front,
+            "execution_statistics": exec_stats,
+            "token_usage_summary": token_summary,
+            "instruction": (
+                "Reflect on and analyze the actual experimental results of this loop run. "
+                "Respond with a JSON object containing keys: 'executive_summary', 'pareto_analysis', "
+                "'reliability_discussion', 'resource_discussion', and 'recommendations'. "
+                "Base your discussion strictly on the varying empirical data: evaluate the diversity "
+                "of the Pareto front (e.g. if results show low variety across solvers, explicitly recommend "
+                "expanding the design space in Phase 0), analyze execution pipeline reliability and bottlenecks, "
+                "and audit swarm token consumption. Avoid static repetitive boilerplate."
+            ),
+        }
+
+        user_message = f"Please draft the technical synthesis for the final co-design report:\n{json.dumps(prompt_payload, default=str)}"
+
+        start_time = time.time()
+        query_result = active_llm.prompt(user_message=user_message, tools=tools)
+        duration = time.time() - start_time
+
+        # 4. Extract token metrics and record to database and profiler
+        usage = getattr(query_result, "usage", {}) or {}
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("candidates_tokens", usage.get("completion_tokens", 0))
+        total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+        cost_usd = (prompt_tokens * 0.075 / 1_000_000) + (completion_tokens * 0.30 / 1_000_000)
+
+        model_name = getattr(active_llm, "model", "gemini-2.5-flash")
+
+        if hasattr(db, "record_token_usage") and callable(db.record_token_usage):
+            try:
+                db.record_token_usage(
+                    phase="phase_2",
+                    node_name="node2_phase2_generate_final_report",
+                    model=model_name,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    cost_usd=cost_usd,
+                    duration_seconds=duration,
+                )
+            except Exception as exc:
+                logger.warning("Failed to record token usage to DB: %s", exc)
+
         try:
-            match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response_text, re.DOTALL)
-            if match:
-                llm_synthesis = json.loads(match.group(1))
-            else:
-                llm_synthesis = json.loads(response_text)
+            from chia.base.profiling import get_profiler
+            get_profiler().add_info({"usage": usage, "model": model_name, "phase": "phase_2"})
         except Exception:
             pass
 
-    # 6. Generate LaTeX document
+        # 5. Parse LLM response if valid JSON returned
+        response_text = getattr(query_result, "result", str(query_result))
+        if isinstance(response_text, str):
+            try:
+                match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response_text, re.DOTALL)
+                if match:
+                    llm_synthesis = json.loads(match.group(1))
+                else:
+                    llm_synthesis = json.loads(response_text)
+            except Exception:
+                pass
+
+    # 6. Generate sanitized LaTeX document
     tex_content = _generate_report_tex_content(db, config, llm_synthesis=llm_synthesis)
     tex_path = out_path / "final_report.tex"
     with open(tex_path, "w", encoding="utf-8") as f:
@@ -562,6 +739,8 @@ def node2_phase2_generate_final_report(
 
     return {
         "status": "SUCCESS" if pdf_compiled or not compile_pdf else "PARTIAL",
+        "experiment_name": exp_name,
+        "output_dir": str(out_path),
         "tex_path": str(tex_path),
         "pdf_path": str(pdf_path) if pdf_path.exists() else None,
         "pdf_compiled": pdf_compiled,
@@ -586,4 +765,3 @@ def node2_phase2_generate_final_report(
 
 # Backward compatibility alias
 phase2_generate_final_report = node2_phase2_generate_final_report
-

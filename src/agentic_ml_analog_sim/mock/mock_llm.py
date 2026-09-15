@@ -48,6 +48,43 @@ DEFAULT_VALID_PROPOSAL: dict[str, Any] = {
     ),
 }
 
+VALID_CANDIDATE_POOL: list[dict[str, Any]] = [
+    DEFAULT_VALID_PROPOSAL,
+    {
+        "candidate_id": "cand_euler_l0_02",
+        "solver": "euler",
+        "num_steps": 10,
+        "solver_params": {"num_steps": 10, "dt": 0.1},
+        "noise_model": "L0_static_mismatch",
+        "noise_params": {"sigma": 0.01},
+        "sparsity_config": {"sparsity_ratio": 0.2},
+        "selection_reason": "Explore Euler with 10 steps and 20% crossbar sparsity",
+        "phase_1_prompt": "Configure Euler solver with num_steps=10 and L0 noise.",
+    },
+    {
+        "candidate_id": "cand_euler_l0_03",
+        "solver": "euler",
+        "num_steps": 2,
+        "solver_params": {"num_steps": 2, "dt": 0.5},
+        "noise_model": "L0_static_mismatch",
+        "noise_params": {"sigma": 0.01},
+        "sparsity_config": {"sparsity_ratio": 0.6},
+        "selection_reason": "Explore 2-step Euler with 60% crossbar sparsity",
+        "phase_1_prompt": "Configure Euler solver with num_steps=2 and L0 noise.",
+    },
+    {
+        "candidate_id": "cand_rk4_l0_01",
+        "solver": "rk4",
+        "num_steps": 5,
+        "solver_params": {"num_steps": 5, "dt": 0.2},
+        "noise_model": "L0_static_mismatch",
+        "noise_params": {"sigma": 0.01},
+        "sparsity_config": {"sparsity_ratio": 0.4},
+        "selection_reason": "Explore RK4 with 5 steps and 40% crossbar sparsity",
+        "phase_1_prompt": "Configure RK4 solver with num_steps=5 and L0 noise.",
+    },
+]
+
 DEFAULT_DUPLICATE_PROPOSAL: dict[str, Any] = {
     "candidate_id": "cand_dup_rk4_ref",
     "solver": "rk4",
@@ -168,6 +205,10 @@ class MockAntigravityLLM(AntigravityLLM):
             self.model = model
             self.system_message = system_message
 
+        # Preserve exact configured model for mocks
+        if model is not None:
+            self.model = model
+
         self.mode = mode
         self._responses = list(responses) if responses is not None else []
         self.custom_proposal = custom_proposal
@@ -196,7 +237,7 @@ class MockAntigravityLLM(AntigravityLLM):
             return None
         return self.history[-1]["user_message"]
 
-    def _get_next_proposal_dict(self) -> dict[str, Any]:
+    def _get_next_proposal_dict(self, tool_list: Optional[List[Any]] = None) -> dict[str, Any]:
         """Resolve proposal dict based on queue or active mode."""
         if self._responses:
             next_item = self._responses.pop(0)
@@ -214,9 +255,34 @@ class MockAntigravityLLM(AntigravityLLM):
                     return {"raw_text": next_item.result}
 
         if self.mode == "valid":
-            # Generate fresh candidate_id per call to avoid accidental duplicates
-            proposal = dict(DEFAULT_VALID_PROPOSAL)
-            proposal["candidate_id"] = f"cand_euler_{self.call_count + 1:03d}"
+            # If tool_list contains a database tool or database instance,
+            # query existing proposals to avoid duplicates like a real LLM agent would
+            db = None
+            if tool_list:
+                for t in tool_list:
+                    if hasattr(t, "db"):
+                        db = t.db
+                        break
+                    elif hasattr(t, "is_duplicate_proposal"):
+                        db = t
+                        break
+
+            if db is not None and hasattr(db, "is_duplicate_proposal"):
+                for candidate in VALID_CANDIDATE_POOL:
+                    cand_copy = dict(candidate)
+                    is_dup = db.is_duplicate_proposal(
+                        solver=cand_copy.get("solver", ""),
+                        noise_model=cand_copy.get("noise_model", ""),
+                        solver_params=cand_copy.get("solver_params", {}),
+                        noise_params=cand_copy.get("noise_params", {}),
+                        sparsity_config=cand_copy.get("sparsity_config", {}),
+                    )
+                    if not is_dup:
+                        return cand_copy
+
+            pool_idx = max(0, self.call_count - 1) % len(VALID_CANDIDATE_POOL)
+            proposal = dict(VALID_CANDIDATE_POOL[pool_idx])
+            proposal["candidate_id"] = f"{proposal['candidate_id']}_{self.call_count:03d}"
             return proposal
         elif self.mode == "duplicate":
             return dict(self.duplicate_proposal)
@@ -236,7 +302,16 @@ class MockAntigravityLLM(AntigravityLLM):
     def _run_antigravity(self, user_message: str, tool_list: list[Any]) -> AntigravityQueryResult:
         """Overrides AntigravityLLM CLI execution with deterministic response."""
         self.call_count += 1
-        proposal_dict = self._get_next_proposal_dict()
+        if not self._responses and ("technical synthesis" in user_message or "final co-design report" in user_message):
+            proposal_dict = {
+                "executive_summary": "Empirical evaluation across all candidates demonstrated accelerated inference latencies with bounded relative error.",
+                "pareto_analysis": "The Pareto frontier reveals that low-order explicit Euler integration delivers substantial latency speedups while preserving stable phase-locking dynamics.",
+                "reliability_discussion": "All candidate proposals progressed through automated solver and noise rewrites, domain compilation, and numerical simulation with high pipeline reliability.",
+                "resource_discussion": "Swarm token consumption and financial expenditure remained well within allocated budgets across all exploration and verification phases.",
+                "recommendations": "1. Prioritize low-step Euler schemes for edge silicon deployment.\n2. Apply crossbar degree-bounding to reduce parasitic capacitance.\n3. Expand the candidate exploration space in subsequent sweeps.",
+            }
+        else:
+            proposal_dict = self._get_next_proposal_dict(tool_list)
         result_json = json.dumps(proposal_dict, indent=2)
 
         usage_data = {
@@ -265,3 +340,9 @@ class MockAntigravityLLM(AntigravityLLM):
             usage=usage_data,
             diagnostics=f"effort={self.effort}",
         )
+
+    def prompt(
+        self, user_message: str, tools: Optional[List[Any]] = None
+    ) -> AntigravityQueryResult:
+        """Execute prompt deterministically in-process without Ray remote dispatch."""
+        return self._run_antigravity(user_message, tools or [])

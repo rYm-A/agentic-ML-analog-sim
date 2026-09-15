@@ -106,15 +106,51 @@ def test_phase2_generate_final_report_tex_and_figures(populated_report_db: Resul
     assert "figures/execution_breakdown.pdf" in tex_text
     assert "figures/token_cost_summary.pdf" in tex_text
 
-    # Verify figures exist on disk
-    assert (out_dir / "figures" / "pareto_frontier.pdf").exists()
-    assert (out_dir / "figures" / "execution_breakdown.pdf").exists()
-    assert (out_dir / "figures" / "token_cost_summary.pdf").exists()
+    # Verify experiment subfolder routing
+    exp_out_dir = Path(res["output_dir"])
+    assert exp_out_dir == out_dir / cfg.experiment_name
+    assert res["experiment_name"] == cfg.experiment_name
+
+    # Verify figures exist on disk in experiment subfolder
+    assert (exp_out_dir / "figures" / "pareto_frontier.pdf").exists()
+    assert (exp_out_dir / "figures" / "execution_breakdown.pdf").exists()
+    assert (exp_out_dir / "figures" / "token_cost_summary.pdf").exists()
 
     # Check token recorded for Phase 2
     summary = populated_report_db.get_token_usage_summary(phase="phase_2")
     assert summary["overall"]["total_calls"] >= 1
     assert summary["overall"]["total_tokens"] > 0
+
+
+def test_phase2_generate_final_report_dynamic_variety_discussion(tmp_path: Path):
+    """Verify that when Pareto frontier contains single solver family, dynamic discussion
+    explicitly identifies low variety and recommends expanding the candidate design space.
+    """
+    db = ResultDatabase(db_path=tmp_path / "variety_test.db")
+    ref_id = db.insert_proposal(solver="rk4", noise_model="none", is_reference=True)
+    db.mark_proposal_status(ref_id, "COMPLETED", latency_ms=100.0, relative_error=0.0)
+
+    # Insert only euler candidates so variety is low
+    c1 = db.insert_proposal(solver="euler", noise_model="none", is_reference=False)
+    db.mark_proposal_status(c1, "COMPLETED", latency_ms=20.0, relative_error=0.02, pareto_optimal=True)
+    c2 = db.insert_proposal(solver="euler", noise_model="none", is_reference=False)
+    db.mark_proposal_status(c2, "COMPLETED", latency_ms=25.0, relative_error=0.015, pareto_optimal=True)
+
+    cfg = load_simulation_config("config/simulation_config.yaml")
+    out_dir = tmp_path / "variety_reports"
+
+    # Run with llm=False to verify dynamic data-driven fallback discussion
+    res = phase2_generate_final_report(
+        db=db,
+        config=cfg,
+        output_dir=out_dir,
+        llm=False,
+        compile_pdf=False,
+    )
+
+    tex_text = Path(res["tex_path"]).read_text(encoding="utf-8")
+    assert "low variety" in tex_text
+    assert "expansion of the candidate design space in Phase 0" in tex_text
 
 
 def test_phase2_generate_final_report_pdf_compilation(populated_report_db: ResultDatabase, tmp_path: Path):
