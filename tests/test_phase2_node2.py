@@ -122,22 +122,22 @@ def test_phase2_generate_final_report_tex_and_figures(populated_report_db: Resul
     assert summary["overall"]["total_tokens"] > 0
 
 
-def test_phase2_generate_final_report_dynamic_variety_discussion(tmp_path: Path):
-    """Verify that when Pareto frontier contains single solver family, dynamic discussion
-    explicitly identifies low variety and recommends expanding the candidate design space.
+def test_phase2_generate_final_report_dynamic_pareto_point_analysis(tmp_path: Path):
+    """Verify that dynamic discussion analyzes Pareto point coordinates, spatial proximity,
+    clustering/overlap, and frontier clarity without rigid solver counting heuristics.
     """
-    db = ResultDatabase(db_path=tmp_path / "variety_test.db")
+    db = ResultDatabase(db_path=tmp_path / "point_analysis_test.db")
     ref_id = db.insert_proposal(solver="rk4", noise_model="none", is_reference=True)
     db.mark_proposal_status(ref_id, "COMPLETED", latency_ms=100.0, relative_error=0.0)
 
-    # Insert only euler candidates so variety is low
+    # Insert two candidates with closely clustered/overlapping performance points (mutually non-dominated)
     c1 = db.insert_proposal(solver="euler", noise_model="none", is_reference=False)
-    db.mark_proposal_status(c1, "COMPLETED", latency_ms=20.0, relative_error=0.02, pareto_optimal=True)
+    db.mark_proposal_status(c1, "COMPLETED", latency_ms=20.0, relative_error=0.0205, pareto_optimal=True)
     c2 = db.insert_proposal(solver="euler", noise_model="none", is_reference=False)
-    db.mark_proposal_status(c2, "COMPLETED", latency_ms=25.0, relative_error=0.015, pareto_optimal=True)
+    db.mark_proposal_status(c2, "COMPLETED", latency_ms=20.4, relative_error=0.0200, pareto_optimal=True)
 
     cfg = load_simulation_config("config/simulation_config.yaml")
-    out_dir = tmp_path / "variety_reports"
+    out_dir = tmp_path / "clustering_reports"
 
     # Run with llm=False to verify dynamic data-driven fallback discussion
     res = phase2_generate_final_report(
@@ -149,8 +149,28 @@ def test_phase2_generate_final_report_dynamic_variety_discussion(tmp_path: Path)
     )
 
     tex_text = Path(res["tex_path"]).read_text(encoding="utf-8")
-    assert "low variety" in tex_text
-    assert "expansion of the candidate design space in Phase 0" in tex_text
+    assert "clustering" in tex_text or "overlapping" in tex_text
+    assert "diminishing dynamical separation" in tex_text or "localized accuracy-latency plateau" in tex_text
+
+    # Now test well-separated, crystal-clear frontier
+    db_clear = ResultDatabase(db_path=tmp_path / "clear_frontier_test.db")
+    ref2 = db_clear.insert_proposal(solver="rk4", noise_model="none", is_reference=True)
+    db_clear.mark_proposal_status(ref2, "COMPLETED", latency_ms=100.0, relative_error=0.0)
+    c_fast = db_clear.insert_proposal(solver="euler", noise_model="none", is_reference=False)
+    db_clear.mark_proposal_status(c_fast, "COMPLETED", latency_ms=12.0, relative_error=0.05, pareto_optimal=True)
+    c_acc = db_clear.insert_proposal(solver="rk4", noise_model="none", is_reference=False)
+    db_clear.mark_proposal_status(c_acc, "COMPLETED", latency_ms=65.0, relative_error=0.005, pareto_optimal=True)
+
+    out_dir_clear = tmp_path / "clear_reports"
+    res_clear = phase2_generate_final_report(
+        db=db_clear,
+        config=cfg,
+        output_dir=out_dir_clear,
+        llm=False,
+        compile_pdf=False,
+    )
+    tex_clear = Path(res_clear["tex_path"]).read_text(encoding="utf-8")
+    assert "crystal-clear, well-separated trade-off boundary" in tex_clear
 
 
 def test_phase2_generate_final_report_pdf_compilation(populated_report_db: ResultDatabase, tmp_path: Path):

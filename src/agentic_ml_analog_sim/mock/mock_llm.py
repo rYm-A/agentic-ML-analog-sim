@@ -305,10 +305,10 @@ class MockAntigravityLLM(AntigravityLLM):
         if not self._responses and ("technical synthesis" in user_message or "final co-design report" in user_message):
             proposal_dict = {
                 "executive_summary": "Empirical evaluation across all candidates demonstrated accelerated inference latencies with bounded relative error.",
-                "pareto_analysis": "The Pareto frontier reveals that low-order explicit Euler integration delivers substantial latency speedups while preserving stable phase-locking dynamics.",
+                "pareto_analysis": "Analysis of the Pareto front points reveals a distinct trade-off structure across numerical latency and error coordinates. Candidate points delineate an empirical boundary where accelerated step formulations achieve throughput improvements while maintaining bounded phase-locking deviations.",
                 "reliability_discussion": "All candidate proposals progressed through automated solver and noise rewrites, domain compilation, and numerical simulation with high pipeline reliability.",
                 "resource_discussion": "Swarm token consumption and financial expenditure remained well within allocated budgets across all exploration and verification phases.",
-                "recommendations": "1. Prioritize low-step Euler schemes for edge silicon deployment.\n2. Apply crossbar degree-bounding to reduce parasitic capacitance.\n3. Expand the candidate exploration space in subsequent sweeps.",
+                "recommendations": "1. Prioritize low-step schemes along the frontier for edge silicon deployment.\n2. Apply crossbar degree-bounding to reduce parasitic capacitance.\n3. Expand candidate exploration across orthogonal dimensions in subsequent sweeps.",
             }
         else:
             proposal_dict = self._get_next_proposal_dict(tool_list)

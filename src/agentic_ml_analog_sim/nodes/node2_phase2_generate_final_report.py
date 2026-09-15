@@ -31,13 +31,17 @@ logger = logging.getLogger("agentic_ml_analog_sim.phase2_node2")
 
 NODE2_REPORT_SYSTEM_INSTRUCTIONS = """
 You are the Senior Co-Design Architect and Technical Reporting Specialist for the Un-0 Analog Machine Learning Accelerator swarm.
-Your mission is to synthesize all Phase 0 (exploration), Phase 1 (simulation/rewrite), and Phase 2 (auditing) findings for the current experiment run into a publication-grade technical report.
+Your mission is to synthesize all Phase 0 (exploration), Phase 1 (simulation/rewrite), and Phase 2 (auditing) findings for the current experiment run into an insightful, publication-grade technical report.
 
 Critical instructions:
-1. Ground your discussion strictly in the varying empirical data provided in the prompt. Avoid repetitive, static boilerplate.
-2. The focus of the report is to expose graphically and tabularly the obtained results, followed by an insightful discussion.
-3. Reflect on the diversity of the Pareto front: if results show low variety across solvers or parameters (e.g. all candidates using Euler), explicitly note the low variety and recommend expanding the design space in Phase 0.
-4. Reflect on loop execution reliability, error stages encountered, and pipeline bottlenecks.
+1. Ground your discussion strictly in the varying empirical data provided in the prompt. Avoid repetitive, static boilerplate and avoid rigid closed heuristics.
+2. The focus of the report is to expose graphically and tabularly the obtained results, followed by an open-ended, data-driven technical discussion.
+3. In the Pareto analysis:
+   - Critically analyze the empirical Pareto front points (latency vs. error / accuracy coordinates).
+   - Evaluate the spatial distribution, spread, and clarity of the Pareto front: examine whether the points form a crystal-clear, well-separated trade-off curve across orders of magnitude, or whether candidate points are tightly clustered, close to one another, or overlapping.
+   - If points are close or overlapping, interpret why this occurs (e.g., whether parameter perturbations yielded diminishing dynamical differentiation, whether numerical accuracy saturated, or whether physical circuit bottlenecks dominated).
+   - If the Pareto front is ambiguous, unclear, or scarce, openly discuss the lack of clarity and what it reveals about the explored parameter regime for this particular run.
+4. Reflect on loop execution reliability, error stages encountered (rewrites, compilations, simulations), and pipeline bottlenecks.
 5. Reflect on swarm token and compute expenditure across phases.
 6. Provide clear, quantitative, academic-grade text and analytical assessments.
 """
@@ -276,49 +280,84 @@ def _generate_dynamic_pareto_analysis(
     pareto: List[Dict[str, Any]],
     ref: Optional[Dict[str, Any]],
 ) -> str:
-    """Dynamically discuss Pareto frontier results based strictly on empirical candidate data."""
+    """Dynamically discuss Pareto frontier results based strictly on empirical candidate points,
+    analyzing point proximity, clustering, overlap, and trade-off boundary clarity.
+    """
     if not pareto:
         return (
             "The multi-objective evaluation did not identify any non-dominated candidates beyond the "
-            "reference baseline. The design space should be expanded to include alternative numerical "
-            "solvers and broader parameter sweeps in Phase 0."
+            "reference baseline. The trade-off surface remains unresolved, suggesting that the initial "
+            "search space was overly constrained or that proposed candidates were strictly dominated."
         )
 
-    candidate_solvers = list(dict.fromkeys(p.get("solver", "unknown") for p in pareto if not p.get("is_reference")))
-    solvers = candidate_solvers if candidate_solvers else list(dict.fromkeys(p.get("solver", "unknown") for p in pareto))
-    noises = list(dict.fromkeys(p.get("noise_model", "none") for p in pareto))
+    cand_points = [p for p in pareto if not p.get("is_reference")]
+    points_to_analyze = cand_points if cand_points else pareto
     ref_lat = ref.get("latency_ms", 100.0) if ref else 100.0
 
-    # Diversity evaluation: if low variety, explicitly recommend expanding design space
-    if len(solvers) <= 1:
-        variety_comment = (
-            f"The empirical Pareto frontier currently exhibits low variety, as all non-dominated candidates "
-            f"converge on the '{solvers[0]}' solver. An expansion of the candidate design space in Phase 0 "
-            f"is strongly recommended to explore alternative integration schemes (e.g. Parareal, adaptive step sizes) "
-            f"and broader hardware-noise models."
-        )
-    else:
-        variety_comment = (
-            f"The empirical Pareto frontier captures a diverse trade-off boundary spanning multiple solver families "
-            f"({', '.join(solvers)}) and hardware noise configurations ({', '.join(noises)})."
-        )
-
-    latencies = [(p.get("latency_ms", 0.0) or 0.0) for p in pareto]
+    latencies = [(p.get("latency_ms", 0.0) or 0.0) for p in points_to_analyze]
     errors = [
         ((p.get("relative_error") if p.get("relative_error") is not None else p.get("accuracy_fid", 0.0)) or 0.0)
-        for p in pareto
+        for p in points_to_analyze
     ]
+
     min_lat, max_lat = min(latencies), max(latencies)
     max_speedup = (ref_lat / min_lat) if min_lat > 0 else 1.0
     min_err, max_err = min(errors), max(errors)
+    n_points = len(points_to_analyze)
 
-    tradeoff_comment = (
-        f"Compared to the reference baseline ({ref_lat:.1f} ms), optimal candidates achieved latencies ranging "
-        f"from {min_lat:.1f} ms to {max_lat:.1f} ms (up to {max_speedup:.2f}$\\times$ acceleration) while maintaining "
-        f"relative trajectory errors between {min_err:.4f} and {max_err:.4f}."
+    # Spatial proximity analysis of Pareto points in (latency, error) objective space
+    lat_span = max(max_lat - min_lat, 1e-6)
+    err_span = max(max_err - min_err, 1e-6)
+    overlapping_or_close_pairs = []
+
+    for i in range(n_points):
+        for j in range(i + 1, n_points):
+            p1 = points_to_analyze[i]
+            p2 = points_to_analyze[j]
+            l1, l2 = latencies[i], latencies[j]
+            e1, e2 = errors[i], errors[j]
+
+            # Relative differences
+            rel_lat_diff = abs(l1 - l2) / max(min(l1, l2), 1e-6)
+            abs_err_diff = abs(e1 - e2)
+            norm_dist = (((l1 - l2) / lat_span) ** 2 + ((e1 - e2) / err_span) ** 2) ** 0.5
+
+            if norm_dist < 0.15 or (rel_lat_diff < 0.08 and abs_err_diff < 0.005):
+                overlapping_or_close_pairs.append((p1.get("candidate_id", f"c{i}"), p2.get("candidate_id", f"c{j}")))
+
+    if n_points <= 1:
+        frontier_characterization = (
+            f"The empirical Pareto frontier currently contains a solitary non-dominated candidate point "
+            f"({points_to_analyze[0].get('candidate_id', 'candidate')}, latency {latencies[0]:.1f} ms, "
+            f"relative error {errors[0]:.4f}). With only one sample point resolved, the global curvature "
+            f"and trade-off gradient of the frontier cannot be decisively established for this run."
+        )
+    elif overlapping_or_close_pairs:
+        close_ids = ", ".join(f"({a}, {b})" for a, b in overlapping_or_close_pairs[:3])
+        frontier_characterization = (
+            f"Examination of the empirical Pareto front points reveals localized clustering and near-overlapping "
+            f"performance between candidate configurations (such as pairs {close_ids}). Rather than tracing a "
+            f"broadly dispersed trade-off curve, these points occupy a compact region with latencies between "
+            f"{min_lat:.1f} ms and {max_lat:.1f} ms and relative errors between {min_err:.4f} and {max_err:.4f}. "
+            f"This overlap indicates that the underlying parameter variations generated minimal dynamical separation, "
+            f"suggesting that the simulation trajectory saturated near a localized accuracy-latency plateau."
+        )
+    else:
+        frontier_characterization = (
+            f"The empirical Pareto frontier presents a crystal-clear, well-separated trade-off boundary across "
+            f"{n_points} distinct points. Candidate points span a broad performance spectrum from {min_lat:.1f} ms "
+            f"to {max_lat:.1f} ms in latency (up to {max_speedup:.2f}$\\times$ acceleration over the baseline) while "
+            f"modulating relative errors smoothly between {min_err:.4f} and {max_err:.4f}. The clear separation "
+            f"along both objective axes demonstrates that the explored configurations effectively sample non-redundant "
+            f"operating regimes on the analog accelerator."
+        )
+
+    tradeoff_summary = (
+        f"Compared against the reference baseline ({ref_lat:.1f} ms), the identified boundary provides an empirical "
+        f"trade-off envelope balancing physical inference throughput against numerical trajectory fidelity."
     )
 
-    return f"{variety_comment} {tradeoff_comment}"
+    return f"{frontier_characterization} {tradeoff_summary}"
 
 
 def _generate_dynamic_reliability_analysis(stats: Dict[str, Any]) -> str:
@@ -380,18 +419,33 @@ def _generate_dynamic_recommendations(
 ) -> str:
     """Dynamically generate actionable recommendations strictly based on empirical findings."""
     recs = []
-    candidate_solvers = [p.get("solver", "unknown") for p in pareto if not p.get("is_reference")]
-    solvers = list(dict.fromkeys(candidate_solvers if candidate_solvers else [p.get("solver", "unknown") for p in pareto])) if pareto else []
+    cand_points = [p for p in pareto if not p.get("is_reference")]
+    pts = cand_points if cand_points else pareto
 
-    if len(solvers) <= 1:
-        recs.append(
-            r"\textbf{Design Space Expansion:} Because the current Pareto frontier shows low variety, expand Phase 0 "
-            r"candidate generation to include higher-order explicit schemes and parallel integration methods."
-        )
+    if len(pts) >= 2:
+        latencies = [(p.get("latency_ms", 0.0) or 0.0) for p in pts]
+        errors = [
+            ((p.get("relative_error") if p.get("relative_error") is not None else p.get("accuracy_fid", 0.0)) or 0.0)
+            for p in pts
+        ]
+        lat_span = max(latencies) - min(latencies)
+        err_span = max(errors) - min(errors)
+
+        if lat_span < 10.0 and err_span < 0.01:
+            recs.append(
+                r"\textbf{Design Space Expansion:} Because the observed Pareto candidates cluster tightly in "
+                r"latency and error coordinates, expand subsequent exploration across orthogonal axes "
+                r"(such as crossbar sparsity or alternate discretization formulations) to break past localized performance clustering."
+            )
+        else:
+            recs.append(
+                r"\textbf{Frontier Operating Selection:} Leverage the clearly resolved trade-off frontier to select optimal operating "
+                r"points based on deployment constraints, favoring low-latency designs for edge inference and higher-accuracy configurations for precision tasks."
+            )
     else:
         recs.append(
-            r"\textbf{Solver Selection Strategy:} Adopt low-step explicit Euler schemes for energy-constrained edge deployment, "
-            r"reserving multi-stage solvers for high-precision calibration modes."
+            r"\textbf{Frontier Resolution:} Broaden candidate exploration in Phase 0 to populate the sparsely resolved trade-off surface "
+            r"with additional non-dominated points."
         )
 
     failed_comps = stats.get("compilations_failed_count", 0)
@@ -664,10 +718,11 @@ def node2_phase2_generate_final_report(
                 "Reflect on and analyze the actual experimental results of this loop run. "
                 "Respond with a JSON object containing keys: 'executive_summary', 'pareto_analysis', "
                 "'reliability_discussion', 'resource_discussion', and 'recommendations'. "
-                "Base your discussion strictly on the varying empirical data: evaluate the diversity "
-                "of the Pareto front (e.g. if results show low variety across solvers, explicitly recommend "
-                "expanding the design space in Phase 0), analyze execution pipeline reliability and bottlenecks, "
-                "and audit swarm token consumption. Avoid static repetitive boilerplate."
+                "Base your discussion strictly on the varying empirical data: critically analyze the distribution "
+                "of Pareto front points (latency vs. error coordinates) to evaluate whether they form a clear, distinct frontier "
+                "or whether they are tightly clustered or overlapping, and interpret why that pattern or overlap arose; "
+                "analyze execution pipeline reliability and bottlenecks; and audit swarm token and compute expenditures. "
+                "Avoid static boilerplate or rigid closed heuristics."
             ),
         }
 
