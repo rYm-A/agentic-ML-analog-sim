@@ -53,12 +53,12 @@ def test_sanitize_latex_text_preserves_math_and_labels():
 
 
 def test_sanitize_and_compile_original_final_report_tex(tmp_path: Path):
-    """Verify that reports/final_report.tex containing raw Unicode and unescaped characters
+    """Verify that test fixture final_report.tex containing raw Unicode and unescaped characters
     is fully sanitized and compiles cleanly to PDF via pdflatex without errors.
     """
-    raw_report_path = Path("/Users/chia/ChiaWorkspace/agentic-ML-analog-sim/reports/final_report.tex")
+    raw_report_path = Path(__file__).parent / "data" / "final_report.tex"
     if not raw_report_path.exists():
-        pytest.skip(f"Reference file {raw_report_path} does not exist")
+        pytest.skip(f"Reference test file {raw_report_path} does not exist")
 
     raw_content = raw_report_path.read_text(encoding="utf-8")
     assert "σ" in raw_content or "≤" in raw_content or "16.67%" in raw_content
