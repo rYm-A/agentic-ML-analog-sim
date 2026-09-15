@@ -249,6 +249,8 @@ def run_phase_1(
             candidate_id=active_candidate_id,
             target_device=target_device,
             un0_dir=str(resolved_un0_dir),
+            prepared_model=node3_res.get("prepared_model") if "node3_res" in locals() and isinstance(node3_res, dict) else None,
+            eager_model=node3_res.get("eager_model") if "node3_res" in locals() and isinstance(node3_res, dict) else None,
         )
 
         if comp_res.get("status") == "FAILED":

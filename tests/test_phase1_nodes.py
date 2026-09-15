@@ -218,25 +218,51 @@ def test_node1_and_node2_rewriters(tmp_db_and_config):
 
     mock_llm = MockAntigravityLLM(mode="valid")
 
-    # Node 1
+    # Node 1: Registered solver (euler) -> Deterministic reuse, 0 tokens consumed
     res1 = node1_solver_rewriter(db=db, config=config, candidate_id=cand_id, llm=mock_llm)
     assert res1["status"] == "SUCCESS"
     assert res1["solver"] == "euler"
+    assert res1["deterministic"] is True
+    assert res1["tokens_consumed"] == 0
 
     prop1 = db.get_proposal(cand_id)
     assert prop1["rewrite_solver_status"] == "SUCCESS"
 
-    # Node 2
+    # Node 2: Registered noise (L0_static_mismatch) -> Deterministic reuse, 0 tokens consumed
     res2 = node2_noise_rewriter(db=db, config=config, candidate_id=cand_id, llm=mock_llm)
     assert res2["status"] == "SUCCESS"
     assert res2["noise_model"] == "L0_static_mismatch"
+    assert res2["deterministic"] is True
+    assert res2["tokens_consumed"] == 0
 
     prop2 = db.get_proposal(cand_id)
     assert prop2["rewrite_noise_status"] == "SUCCESS"
 
-    # Verify token usage recorded
-    summary = db.get_token_usage_summary(phase="phase_1")
-    assert summary["overall"]["total_calls"] >= 2
+    # Verify no fake tokens recorded for deterministic execution
+    summary_det = db.get_token_usage_summary(phase="phase_1")
+    assert summary_det["overall"]["total_calls"] == 0
+
+    # Test Agentic Path with unregistered solver and noise
+    agentic_id = db.insert_proposal(
+        candidate_id="cand_agentic_rw_02",
+        solver="unregistered_custom_euler_v2",
+        noise_model="unregistered_custom_drift_v2",
+    )
+
+    res1_agentic = node1_solver_rewriter(db=db, config=config, candidate_id=agentic_id, llm=mock_llm)
+    assert res1_agentic["status"] == "SUCCESS"
+    assert res1_agentic["deterministic"] is False
+    assert res1_agentic["tokens_consumed"] > 0
+
+    res2_agentic = node2_noise_rewriter(db=db, config=config, candidate_id=agentic_id, llm=mock_llm)
+    assert res2_agentic["status"] == "SUCCESS"
+    assert res2_agentic["deterministic"] is False
+    assert res2_agentic["tokens_consumed"] > 0
+
+    # Verify real token usage recorded when LLM actually executed
+    summary_agentic = db.get_token_usage_summary(phase="phase_1")
+    assert summary_agentic["overall"]["total_calls"] >= 2
+    assert summary_agentic["overall"]["total_prompt_tokens"] > 0
 
 
 def test_node3_compiler_rewriter_and_node4_runner(tmp_db_and_config):
@@ -250,31 +276,46 @@ def test_node3_compiler_rewriter_and_node4_runner(tmp_db_and_config):
 
     mock_llm = MockAntigravityLLM(mode="valid")
 
-    # Node 3
+    # Node 3: HOP functionalization rewrite with dynamic batching
     res3 = node3_compiler_rewriter(db=db, config=config, candidate_id=cand_id, target_device="mps", llm=mock_llm)
     assert res3["status"] == "SUCCESS"
     assert res3["target_device"] == "mps"
+    assert res3["hop_functionalized"] is True
+    assert res3["prepared_model"] is not None
 
     prop3 = db.get_proposal(cand_id)
     assert prop3["rewrite_compiler_status"] == "SUCCESS"
 
-    # Node 4
+    # Node 4: Inductor compilation runner & eager vs inductor comparison
     res4 = node4_compilation_runner(
         db=db,
         config=config,
         candidate_id=cand_id,
         target_device="mps",
         prepared_model=res3.get("prepared_model"),
+        eager_model=res3.get("eager_model"),
     )
     assert res4["status"] == "SUCCESS"
+    assert "comparison_metrics" in res4
+    assert res4["compiled_model"] is not None
 
     prop4 = db.get_proposal(cand_id)
     assert prop4["compilation_status"] == "SUCCESS"
 
-    # Verify token usage recorded for node 3
+    # Verify Node 3 agentic prompt records token metrics when force_rewrite=True
+    res3_forced = node3_compiler_rewriter(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        target_device="mps",
+        llm=mock_llm,
+        force_rewrite=True,
+    )
+    assert res3_forced["tokens_consumed"] > 0
     summary = db.get_token_usage_summary(phase="phase_1")
     assert summary["overall"]["total_calls"] >= 1
     assert "phase_1.node3_phase1_compiler_rewriter" in summary["by_node"]
+
 
 
 # --- Tests for Node 5 Verification & Counter 1 ---
