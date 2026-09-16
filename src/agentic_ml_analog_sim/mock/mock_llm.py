@@ -38,9 +38,9 @@ DEFAULT_VALID_PROPOSAL: dict[str, Any] = {
     "noise_model": "L0_static_mismatch",
     "noise_params": {"sigma": 0.01},
     "sparsity_config": {"sparsity_ratio": 0.4},
-    "selection_reason": "Explore Euler with low static mismatch and 40% crossbar sparsity",
+    "selection_reason": "[pregenerated template text] Explore Euler with low static mismatch and 40% crossbar sparsity",
     "phase_1_prompt": (
-        "# Phase 1 Build & Simulation Instructions\n"
+        "[pregenerated template text] # Phase 1 Build & Simulation Instructions\n"
         "Configure Un-0 model to use 1st-order explicit Euler solver with num_steps=5 (dt=0.2). "
         "Apply L0 static mismatch noise (sigma=0.01) to coupling matrix K. "
         "Apply 40% threshold-based crossbar sparsity pruning (|K_ij| < tau). "
@@ -58,8 +58,8 @@ VALID_CANDIDATE_POOL: list[dict[str, Any]] = [
         "noise_model": "L0_static_mismatch",
         "noise_params": {"sigma": 0.01},
         "sparsity_config": {"sparsity_ratio": 0.2},
-        "selection_reason": "Explore Euler with 10 steps and 20% crossbar sparsity",
-        "phase_1_prompt": "Configure Euler solver with num_steps=10 and L0 noise.",
+        "selection_reason": "[pregenerated template text] Explore Euler with 10 steps and 20% crossbar sparsity",
+        "phase_1_prompt": "[pregenerated template text] Configure Euler solver with num_steps=10 and L0 noise.",
     },
     {
         "candidate_id": "cand_euler_l0_03",
@@ -69,8 +69,8 @@ VALID_CANDIDATE_POOL: list[dict[str, Any]] = [
         "noise_model": "L0_static_mismatch",
         "noise_params": {"sigma": 0.01},
         "sparsity_config": {"sparsity_ratio": 0.6},
-        "selection_reason": "Explore 2-step Euler with 60% crossbar sparsity",
-        "phase_1_prompt": "Configure Euler solver with num_steps=2 and L0 noise.",
+        "selection_reason": "[pregenerated template text] Explore 2-step Euler with 60% crossbar sparsity",
+        "phase_1_prompt": "[pregenerated template text] Configure Euler solver with num_steps=2 and L0 noise.",
     },
     {
         "candidate_id": "cand_rk4_l0_01",
@@ -80,8 +80,8 @@ VALID_CANDIDATE_POOL: list[dict[str, Any]] = [
         "noise_model": "L0_static_mismatch",
         "noise_params": {"sigma": 0.01},
         "sparsity_config": {"sparsity_ratio": 0.4},
-        "selection_reason": "Explore RK4 with 5 steps and 40% crossbar sparsity",
-        "phase_1_prompt": "Configure RK4 solver with num_steps=5 and L0 noise.",
+        "selection_reason": "[pregenerated template text] Explore RK4 with 5 steps and 40% crossbar sparsity",
+        "phase_1_prompt": "[pregenerated template text] Configure RK4 solver with num_steps=5 and L0 noise.",
     },
 ]
 
@@ -93,8 +93,8 @@ DEFAULT_DUPLICATE_PROPOSAL: dict[str, Any] = {
     "noise_model": "none",
     "noise_params": {},
     "sparsity_config": {"sparsity_ratio": 0.0},
-    "selection_reason": "Simulate duplicate proposal of baseline reference design",
-    "phase_1_prompt": "Evaluate baseline RK4 without noise or sparsity.",
+    "selection_reason": "[pregenerated template text] Simulate duplicate proposal of baseline reference design",
+    "phase_1_prompt": "[pregenerated template text] Evaluate baseline RK4 without noise or sparsity.",
 }
 
 DEFAULT_INVALID_SOLVER_PROPOSAL: dict[str, Any] = {
@@ -105,8 +105,8 @@ DEFAULT_INVALID_SOLVER_PROPOSAL: dict[str, Any] = {
     "noise_model": "L0_static_mismatch",
     "noise_params": {"sigma": 0.01},
     "sparsity_config": {"sparsity_ratio": 0.4},
-    "selection_reason": "Simulate invalid solver not in config",
-    "phase_1_prompt": "Test invalid solver rejection.",
+    "selection_reason": "[pregenerated template text] Simulate invalid solver not in config",
+    "phase_1_prompt": "[pregenerated template text] Test invalid solver rejection.",
 }
 
 DEFAULT_INVALID_NOISE_PROPOSAL: dict[str, Any] = {
@@ -117,8 +117,8 @@ DEFAULT_INVALID_NOISE_PROPOSAL: dict[str, Any] = {
     "noise_model": "quantum_vacuum_fluctuation",
     "noise_params": {"intensity": 99.0},
     "sparsity_config": {"sparsity_ratio": 0.4},
-    "selection_reason": "Simulate invalid noise model not in config",
-    "phase_1_prompt": "Test invalid noise rejection.",
+    "selection_reason": "[pregenerated template text] Simulate invalid noise model not in config",
+    "phase_1_prompt": "[pregenerated template text] Test invalid noise rejection.",
 }
 
 DEFAULT_INVALID_SPARSITY_PROPOSAL: dict[str, Any] = {
@@ -129,8 +129,8 @@ DEFAULT_INVALID_SPARSITY_PROPOSAL: dict[str, Any] = {
     "noise_model": "L0_static_mismatch",
     "noise_params": {"sigma": 0.01},
     "sparsity_config": {"sparsity_ratio": 0.99},
-    "selection_reason": "Simulate invalid crossbar sparsity ratio 0.99",
-    "phase_1_prompt": "Test invalid sparsity rejection.",
+    "selection_reason": "[pregenerated template text] Simulate invalid crossbar sparsity ratio 0.99",
+    "phase_1_prompt": "[pregenerated template text] Test invalid sparsity rejection.",
 }
 
 DEFAULT_INVALID_TOLERANCE_PROPOSAL: dict[str, Any] = {
@@ -141,8 +141,8 @@ DEFAULT_INVALID_TOLERANCE_PROPOSAL: dict[str, Any] = {
     "noise_model": "L0_static_mismatch",
     "noise_params": {"sigma": 0.01},
     "sparsity_config": {"sparsity_ratio": 0.4},
-    "selection_reason": "Tolerance check failure: Euler with h=1.0 cannot meet 1e-12 fp32 precision",
-    "phase_1_prompt": "Test invalid tolerance bounds check.",
+    "selection_reason": "[pregenerated template text] Simulate invalid tight tolerances",
+    "phase_1_prompt": "[pregenerated template text] Test invalid tolerance rejection.",
 }
 
 
@@ -304,11 +304,11 @@ class MockAntigravityLLM(AntigravityLLM):
         self.call_count += 1
         if not self._responses and ("technical synthesis" in user_message or "final co-design report" in user_message):
             proposal_dict = {
-                "executive_summary": "Empirical evaluation across all candidates demonstrated accelerated inference latencies with bounded relative error.",
-                "pareto_analysis": "Analysis of the Pareto front points reveals a distinct trade-off structure across numerical latency and error coordinates. Candidate points delineate an empirical boundary where accelerated step formulations achieve throughput improvements while maintaining bounded phase-locking deviations.",
-                "reliability_discussion": "All candidate proposals progressed through automated solver and noise rewrites, domain compilation, and numerical simulation with high pipeline reliability.",
-                "resource_discussion": "Swarm token consumption and financial expenditure remained well within allocated budgets across all exploration and verification phases.",
-                "recommendations": "1. Prioritize low-step schemes along the frontier for edge silicon deployment.\n2. Apply crossbar degree-bounding to reduce parasitic capacitance.\n3. Expand candidate exploration across orthogonal dimensions in subsequent sweeps.",
+                "executive_summary": "[pregenerated template text] Empirical evaluation across all candidates demonstrated accelerated inference latencies with bounded relative error.",
+                "pareto_analysis": "[pregenerated template text] Analysis of the Pareto front points reveals a distinct trade-off structure across numerical latency and error coordinates. Candidate points delineate an empirical boundary where accelerated step formulations achieve throughput improvements while maintaining bounded phase-locking deviations.",
+                "reliability_discussion": "[pregenerated template text] All candidate proposals progressed through automated solver and noise rewrites, domain compilation, and numerical simulation with high pipeline reliability.",
+                "resource_discussion": "[pregenerated template text] Swarm token consumption and financial expenditure remained well within allocated budgets across all exploration and verification phases.",
+                "recommendations": "[pregenerated template text]\n1. Prioritize low-step schemes along the frontier for edge silicon deployment.\n2. Apply crossbar degree-bounding to reduce parasitic capacitance.\n3. Expand candidate exploration across orthogonal dimensions in subsequent sweeps.",
             }
         else:
             proposal_dict = self._get_next_proposal_dict(tool_list)

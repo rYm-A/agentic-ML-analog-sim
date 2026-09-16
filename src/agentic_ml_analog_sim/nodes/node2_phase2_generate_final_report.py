@@ -267,7 +267,7 @@ def _generate_dynamic_executive_summary(
         max_speedup = 1.0
 
     return (
-        f"This technical report documents the empirical outcomes of the co-design optimization campaign "
+        f"[pregenerated template text] This technical report documents the empirical outcomes of the co-design optimization campaign "
         f"for experiment '{exp_name}'. An autonomous multi-agent swarm evaluated {total_prop} candidate "
         f"configurations against the reference baseline ({ref_lat:.1f} ms latency). The multi-objective "
         f"optimization established a Pareto frontier comprising {pareto_cnt} non-dominated configurations, "
@@ -285,7 +285,7 @@ def _generate_dynamic_pareto_analysis(
     """
     if not pareto:
         return (
-            "The multi-objective evaluation did not identify any non-dominated candidates beyond the "
+            "[pregenerated template text] The multi-objective evaluation did not identify any non-dominated candidates beyond the "
             "reference baseline. The trade-off surface remains unresolved, suggesting that the initial "
             "search space was overly constrained or that proposed candidates were strictly dominated."
         )
@@ -357,7 +357,7 @@ def _generate_dynamic_pareto_analysis(
         f"trade-off envelope balancing physical inference throughput against numerical trajectory fidelity."
     )
 
-    return f"{frontier_characterization} {tradeoff_summary}"
+    return f"[pregenerated template text] {frontier_characterization} {tradeoff_summary}"
 
 
 def _generate_dynamic_reliability_analysis(stats: Dict[str, Any]) -> str:
@@ -372,7 +372,7 @@ def _generate_dynamic_reliability_analysis(stats: Dict[str, Any]) -> str:
     total_failures = failed_rewrites + failed_comps + failed_sims
     if total_failures == 0:
         return (
-            f"The autonomous execution pipeline demonstrated 100\\% reliability across all {total_prop} evaluated "
+            f"[pregenerated template text] The autonomous execution pipeline demonstrated 100\\% reliability across all {total_prop} evaluated "
             f"proposals. All automated solver rewrites, noise injection passes, compiler adaptations, domain compilations, "
             f"and numerical simulations executed without runtime faults, compiler crashes, or numerical overflow."
         )
@@ -386,7 +386,7 @@ def _generate_dynamic_reliability_analysis(stats: Dict[str, Any]) -> str:
         bottlenecks.append(f"{failed_sims} numerical simulation divergences")
 
     return (
-        f"Pipeline reliability monitoring recorded {total_failures} execution failures across {total_prop} evaluated "
+        f"[pregenerated template text] Pipeline reliability monitoring recorded {total_failures} execution failures across {total_prop} evaluated "
         f"proposals: {', '.join(bottlenecks)}. Success rates achieved: {succ_comps}/{succ_comps + failed_comps} for domain "
         f"compilation and {succ_sims}/{succ_sims + failed_sims} for numerical simulation."
     )
@@ -405,7 +405,7 @@ def _generate_dynamic_resource_analysis(token_sum: Dict[str, Any]) -> str:
     p2_cost = by_phase.get("phase_2", {}).get("cost_usd", 0.0)
 
     return (
-        f"Swarm resource auditing recorded a total of {calls} LLM inference turns consuming "
+        f"[pregenerated template text] Swarm resource auditing recorded a total of {calls} LLM inference turns consuming "
         f"{tokens:,} total tokens with a cumulative cost of \\${cost:.4f} USD. Resource expenditure was distributed "
         f"across Phase 0 exploration (\\${p0_cost:.4f}), Phase 1 automated code rewriting and simulation "
         f"(\\${p1_cost:.4f}), and Phase 2 auditing and report synthesis (\\${p2_cost:.4f})."
@@ -470,7 +470,7 @@ def _generate_dynamic_recommendations(
         )
 
     items = "\n".join(f"  \\item {r}" for r in recs)
-    return f"\\begin{{enumerate}}\n{items}\n\\end{{enumerate}}"
+    return f"[pregenerated template text]\n\\begin{{enumerate}}\n{items}\n\\end{{enumerate}}"
 
 
 def _generate_report_tex_content(

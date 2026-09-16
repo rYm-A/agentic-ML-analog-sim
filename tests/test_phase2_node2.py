@@ -149,6 +149,7 @@ def test_phase2_generate_final_report_dynamic_pareto_point_analysis(tmp_path: Pa
     )
 
     tex_text = Path(res["tex_path"]).read_text(encoding="utf-8")
+    assert "[pregenerated template text]" in tex_text
     assert "clustering" in tex_text or "overlapping" in tex_text
     assert "diminishing dynamical separation" in tex_text or "localized accuracy-latency plateau" in tex_text
 
@@ -170,6 +171,7 @@ def test_phase2_generate_final_report_dynamic_pareto_point_analysis(tmp_path: Pa
         compile_pdf=False,
     )
     tex_clear = Path(res_clear["tex_path"]).read_text(encoding="utf-8")
+    assert "[pregenerated template text]" in tex_clear
     assert "crystal-clear, well-separated trade-off boundary" in tex_clear
 
 
