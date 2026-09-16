@@ -74,7 +74,13 @@ def node1_phase1_solver_rewriter(
     if proposal is None:
         raise KeyError(f"Proposal '{candidate_id}' not found in database.")
 
-    solver_name = proposal.get("solver", "rk4")
+    solver_name = proposal.get("solver")
+    if not solver_name:
+        ref_design = getattr(config, "reference_design", None)
+        solver_name = getattr(ref_design, "solver", None) if ref_design else None
+    if not solver_name:
+        raise KeyError(f"No solver specified for candidate '{candidate_id}' in proposal or simulation config.")
+
     logger.info("Node 1: Checking solver '%s' for candidate %s", solver_name, candidate_id)
 
     # Check solver registry
@@ -108,6 +114,11 @@ def node1_phase1_solver_rewriter(
             "solver_fn": solver_fn,
             "deterministic": True,
             "tokens_consumed": 0,
+            "token_usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
             "next_node": "node2_phase1_noise_rewriter",
         }
 
@@ -143,14 +154,20 @@ def node1_phase1_solver_rewriter(
     prompt_tokens = 0
     completion_tokens = 0
     total_tokens = 0
-    cost_usd = 0.0
     model_name = getattr(active_llm, "model", "gemini-2.5-pro")
 
     if isinstance(usage, dict):
         prompt_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
         completion_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or usage.get("candidates_tokens") or 0
         total_tokens = usage.get("total_tokens") or (prompt_tokens + completion_tokens)
-        cost_usd = (prompt_tokens * 0.00000125) + (completion_tokens * 0.000005)
+
+    logger.info(
+        "Node 1: Tokens consumed - prompt: %d, completion: %d, total: %d (model: %s)",
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        model_name,
+    )
 
     if total_tokens > 0:
         db.record_token_usage(
@@ -160,7 +177,7 @@ def node1_phase1_solver_rewriter(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
-            cost_usd=cost_usd,
+            cost_usd=0.0,
             candidate_id=candidate_id,
             duration_seconds=elapsed,
         )
@@ -197,6 +214,11 @@ def node1_phase1_solver_rewriter(
         "solver_fn": solver_fn,
         "deterministic": False,
         "tokens_consumed": total_tokens,
+        "token_usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        },
         "next_node": "node2_phase1_noise_rewriter",
     }
 

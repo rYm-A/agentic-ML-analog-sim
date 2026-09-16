@@ -7,6 +7,7 @@ a corrective rewrite proposal or a debug mode request.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from agentic_ml_analog_sim.config import SimulationConfig
@@ -93,6 +94,24 @@ def node8_phase1_diagnostic_proposal(
         debug_request = None
         diagnosis_text = f"Out-of-tolerance failure ({logs_str[:120]}). Proposing full pipeline correction rewrite (nodes 1, 2, 3)."
 
+    # Formulate diagnosis reasoning via LLM
+    prompt_text = (
+        f"Diagnose failure for candidate {candidate_id} in Phase 1 analog simulation loop.\n"
+        f"Failure logs: {logs_str[:300]}\n"
+        f"Counter 1 (compilation): {c1}, Counter 2 (rewrite): {c2}\n"
+        f"Proposed action: {action}, Nodes to rerun: {nodes_to_rerun}\n"
+        f"Formulate a concise diagnosis explanation."
+    )
+    start_time = time.time()
+    query_result = None
+    try:
+        if hasattr(active_llm, "prompt") and callable(active_llm.prompt):
+            query_result = active_llm.prompt(prompt_text)
+    except Exception as exc:
+        logger.warning("Node 8 LLM prompt failed: %s", exc)
+
+    elapsed = max(0.1, time.time() - start_time)
+
     # Record commentary in database
     db.add_comment(
         candidate_id=candidate_id,
@@ -101,30 +120,40 @@ def node8_phase1_diagnostic_proposal(
         comment=f"Action: {action}. Diagnosis: {diagnosis_text}",
     )
 
-    # Record token usage for diagnostic proposal step
+    # Extract real tokens from query_result or LLM history
+    usage = getattr(query_result, "usage", None) if query_result is not None else None
+    if not usage and hasattr(active_llm, "history") and active_llm.history:
+        usage = active_llm.history[-1].get("usage")
+
     model_name = getattr(active_llm, "model", "gemini-2.5-flash")
-    prompt_tokens = 250
-    completion_tokens = 120
-    cost_usd = (prompt_tokens * 0.00000125) + (completion_tokens * 0.000005)
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
 
-    if hasattr(active_llm, "history") and active_llm.history:
-        last_entry = active_llm.history[-1]
-        usage = last_entry.get("usage", {})
-        if usage:
-            prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
-            completion_tokens = usage.get("completion_tokens", completion_tokens)
+    if isinstance(usage, dict):
+        prompt_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+        completion_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or usage.get("candidates_tokens") or 0
+        total_tokens = usage.get("total_tokens") or (prompt_tokens + completion_tokens)
 
-    db.record_token_usage(
-        phase="phase_1",
-        node_name="node8_phase1_diagnostic_proposal",
-        model=model_name,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-        cost_usd=cost_usd,
-        candidate_id=candidate_id,
-        duration_seconds=0.8,
-    )
+    if total_tokens > 0:
+        logger.info(
+            "Node 8: Tokens consumed - prompt: %d, completion: %d, total: %d (model: %s)",
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            model_name,
+        )
+        db.record_token_usage(
+            phase="phase_1",
+            node_name="node8_phase1_diagnostic_proposal",
+            model=model_name,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cost_usd=0.0,
+            candidate_id=candidate_id,
+            duration_seconds=elapsed,
+        )
 
     return {
         "candidate_id": candidate_id,

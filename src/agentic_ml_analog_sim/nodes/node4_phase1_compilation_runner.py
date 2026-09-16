@@ -75,11 +75,50 @@ def node4_phase1_compilation_runner(
     if resolved_un0_dir.is_dir() and str(resolved_un0_dir) not in sys.path:
         sys.path.insert(0, str(resolved_un0_dir))
 
-    # Resolve eager model and prepared HOP model
+    # Resolve architecture and simulation parameters directly from configuration / proposal
     ref_design = getattr(config, "reference_design", None)
-    n_osc = getattr(ref_design, "n_oscillators", 1024)
-    n_cond = getattr(ref_design, "n_conditional_oscillators", 8)
+    if ref_design is None:
+        raise ValueError("Simulation configuration is missing 'reference_design'.")
+
+    n_osc = getattr(ref_design, "n_oscillators", None)
+    n_cond = getattr(ref_design, "n_conditional_oscillators", None)
+    if n_osc is None or n_cond is None:
+        raise ValueError("Simulation configuration reference_design must specify 'n_oscillators' and 'n_conditional_oscillators'.")
     state_dim = n_osc + n_cond
+
+    family = str(getattr(ref_design, "family", "")).lower()
+    if hasattr(ref_design, "num_classes") and ref_design.num_classes is not None:
+        num_classes = ref_design.num_classes
+    elif "cifar100" in family:
+        num_classes = 100
+    elif "cifar10" in family or "cifar" in family or "mnist" in family:
+        num_classes = 10
+    elif hasattr(config, "num_classes") and config.num_classes is not None:
+        num_classes = config.num_classes
+    else:
+        num_classes = 10
+
+    solver_name = proposal.get("solver") or getattr(ref_design, "solver", None)
+    if not solver_name:
+        raise KeyError(f"No solver specified for candidate '{candidate_id}' in proposal or simulation config.")
+
+    num_steps = proposal.get("num_steps") or getattr(ref_design, "num_steps", None)
+    if num_steps is None:
+        raise ValueError(f"num_steps not specified for candidate '{candidate_id}' or reference design.")
+
+    solver_params = proposal.get("solver_params", {}) or {}
+    if isinstance(solver_params, str):
+        try:
+            import json
+            solver_params = json.loads(solver_params)
+        except Exception:
+            solver_params = {}
+
+    integration_time = solver_params.get("integration_time") or getattr(ref_design, "integration_time", None)
+    if integration_time is None:
+        raise ValueError(f"integration_time not specified for candidate '{candidate_id}' or reference design.")
+
+    dt = solver_params.get("dt") or (float(integration_time) / float(num_steps))
 
     if eager_model is None:
         try:
@@ -89,10 +128,13 @@ def node4_phase1_compilation_runner(
             base_dynamics = ConditionalKuramotoDynamics(
                 n_oscillators=n_osc,
                 n_conditional_oscillators=n_cond,
-                num_classes=10,
+                num_classes=num_classes,
             )
-            noise_name = proposal.get("noise_model", "none")
-            if noise_name and noise_name.lower() != "none" and not proposal.get("is_reference"):
+            noise_name = proposal.get("noise_model")
+            if noise_name is None:
+                noise_name = getattr(ref_design, "noise_model", "none")
+
+            if noise_name and str(noise_name).lower() != "none" and not proposal.get("is_reference"):
                 noise_cls = get_noise_model(noise_name)
                 noise_params = proposal.get("noise_params", {}) or {}
                 if isinstance(noise_params, str):
@@ -101,7 +143,7 @@ def node4_phase1_compilation_runner(
                         noise_params = json.loads(noise_params)
                     except Exception:
                         noise_params = {}
-                eager_model = noise_cls(base_dynamics, **noise_params)
+                eager_model = noise_cls(base_dynamics, **(noise_params if isinstance(noise_params, dict) else {}))
             else:
                 eager_model = base_dynamics
         except Exception as exc:
@@ -110,20 +152,13 @@ def node4_phase1_compilation_runner(
     if prepared_model is None:
         try:
             from un0.compiler import functionalize_kuramoto_model
-            solver_name = proposal.get("solver", "rk4")
-            num_steps = proposal.get("num_steps", 25)
-            solver_params = proposal.get("solver_params", {}) or {}
-            if isinstance(solver_params, str):
-                try:
-                    import json
-                    solver_params = json.loads(solver_params)
-                except Exception:
-                    solver_params = {}
             prepared_model = functionalize_kuramoto_model(
                 model=eager_model,
                 solver_name=solver_name,
                 num_steps=num_steps,
-                dt=solver_params.get("dt", 1.0 / max(1, num_steps)),
+                dt=dt,
+                integration_time=integration_time,
+                use_hop=True,
             )
         except Exception as exc:
             logger.warning("Node 4: Functionalized HOP model fallback issue: %s", exc)
@@ -135,7 +170,7 @@ def node4_phase1_compilation_runner(
     comparison_metrics: Dict[str, Any] = {}
 
     try:
-        from un0.compiler import compile_model
+        from un0.compiler import compile_model, functionalize_kuramoto_model
 
         # Attempt Inductor compilation targeting device
         model_to_compile = prepared_model if prepared_model is not None else eager_model
@@ -148,29 +183,33 @@ def node4_phase1_compilation_runner(
             )
             backend_used = "inductor"
         else:
-            backend_used = "none"
+            compiled_model = eager_model
+            backend_used = "eager_fallback"
 
-        # Run Eager vs. Inductor compiled comparison on target device
-        if eager_model is not None and compiled_model is not None:
+        # Side-by-side empirical comparison: eager execution vs Inductor execution on target hardware
+        if compiled_model is not None and eager_model is not None:
             try:
                 # Test input with dynamic batch size B=4
                 batch_size = 4
                 sample_state = torch.randn(batch_size, state_dim, device=device)
                 sample_drive = torch.randn(batch_size, n_osc, n_cond, device=device)
 
-                # Move eager model to device
-                if hasattr(eager_model, "to"):
-                    eager_model = eager_model.to(device)
+                # Instantiate uncompiled eager baseline (model with solver and noise rewrites, no compilation rewrite)
+                eager_runner = functionalize_kuramoto_model(
+                    model=eager_model,
+                    solver_name=solver_name,
+                    num_steps=num_steps,
+                    dt=dt,
+                    integration_time=integration_time,
+                    use_hop=False,
+                )
+                if hasattr(eager_runner, "to"):
+                    eager_runner = eager_runner.to(device)
 
                 # Warmup and execute eager
                 t0 = time.perf_counter()
                 with torch.no_grad():
-                    if callable(prepared_model):
-                        out_eager = prepared_model(sample_state, sample_drive)
-                    elif hasattr(eager_model, "forward"):
-                        out_eager = eager_model(sample_state, torch.tensor(0.0, device=device), sample_drive)
-                    else:
-                        out_eager = sample_state
+                    out_eager = eager_runner(sample_state, sample_drive)
                 eager_latency_ms = (time.perf_counter() - t0) * 1000.0
 
                 # Warmup and execute compiled Inductor model

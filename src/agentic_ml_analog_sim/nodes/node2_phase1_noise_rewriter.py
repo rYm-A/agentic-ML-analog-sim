@@ -74,7 +74,11 @@ def node2_phase1_noise_rewriter(
     if proposal is None:
         raise KeyError(f"Proposal '{candidate_id}' not found in database.")
 
-    noise_name = proposal.get("noise_model", "none")
+    noise_name = proposal.get("noise_model")
+    if noise_name is None:
+        ref_design = getattr(config, "reference_design", None)
+        noise_name = getattr(ref_design, "noise_model", "none") if ref_design else "none"
+
     is_none = not noise_name or noise_name.lower() == "none"
     logger.info("Node 2: Checking noise model '%s' for candidate %s", noise_name, candidate_id)
 
@@ -109,6 +113,11 @@ def node2_phase1_noise_rewriter(
             "noise_cls": noise_cls,
             "deterministic": True,
             "tokens_consumed": 0,
+            "token_usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
             "next_node": "node3_phase1_compiler_rewriter",
         }
 
@@ -144,14 +153,20 @@ def node2_phase1_noise_rewriter(
     prompt_tokens = 0
     completion_tokens = 0
     total_tokens = 0
-    cost_usd = 0.0
     model_name = getattr(active_llm, "model", "gemini-2.5-pro")
 
     if isinstance(usage, dict):
         prompt_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
         completion_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or usage.get("candidates_tokens") or 0
         total_tokens = usage.get("total_tokens") or (prompt_tokens + completion_tokens)
-        cost_usd = (prompt_tokens * 0.00000125) + (completion_tokens * 0.000005)
+
+    logger.info(
+        "Node 2: Tokens consumed - prompt: %d, completion: %d, total: %d (model: %s)",
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        model_name,
+    )
 
     if total_tokens > 0:
         db.record_token_usage(
@@ -161,7 +176,7 @@ def node2_phase1_noise_rewriter(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
-            cost_usd=cost_usd,
+            cost_usd=0.0,
             candidate_id=candidate_id,
             duration_seconds=elapsed,
         )
@@ -200,6 +215,11 @@ def node2_phase1_noise_rewriter(
         "noise_cls": noise_cls,
         "deterministic": False,
         "tokens_consumed": total_tokens,
+        "token_usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        },
         "next_node": "node3_phase1_compiler_rewriter",
     }
 
