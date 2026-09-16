@@ -310,13 +310,12 @@ class MockAntigravityLLM(AntigravityLLM):
                 "resource_discussion": "[pregenerated template text] Swarm token consumption and financial expenditure remained well within allocated budgets across all exploration and verification phases.",
                 "recommendations": "[pregenerated template text]\n1. Prioritize low-step schemes along the frontier for edge silicon deployment.\n2. Apply crossbar degree-bounding to reduce parasitic capacitance.\n3. Expand candidate exploration across orthogonal dimensions in subsequent sweeps.",
             }
+            result_json = json.dumps(proposal_dict, indent=2)
         elif not self._responses and any(k in user_message.lower() for k in ("compiler rewriter", "torch._higher_order_ops", "functionalize the kuramoto")):
             if self.mode == "invalid_compiler":
-                proposal_dict = {
-                    "status": "FAILED",
-                    "rewrite_name": "invalid_hop_rewrite",
-                    "error": "SyntaxError or invalid rewrite",
-                }
+                result_text = "I failed to synthesize a valid compiler rewrite for this model."
+                proposal_dict = {"status": "FAILED", "error": result_text}
+                result_json = result_text
             else:
                 import re
                 m = re.search(r"candidate[_ ]*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
@@ -349,15 +348,80 @@ def {rewrite_name}(model, solver_name="rk4", num_steps=25, dt=0.04, integration_
                 if not registered:
                     rewrite_name = "hop_while_loop"
 
-                proposal_dict = {
-                    "status": "SUCCESS",
-                    "rewrite_name": rewrite_name,
-                    "target_device": "mps",
-                    "description": "Functionalized Kuramoto model using PyTorch HOP while_loop with dynamic batch shapes (B >= 1)",
-                }
+                # Return freeform natural-language agent explanation, NOT JSON!
+                result_text = (
+                    f"I analyzed the Kuramoto dynamics model for candidate '{cand}' and synthesized "
+                    f"a PyTorch Higher-Order Operator while_loop functional rewrite. "
+                    f"I registered the rewrite via `un0_register_compiler_rewrite` under name '{rewrite_name}'. "
+                    f"This avoids Python-side while-loops and dynamic graph breaks, supporting batch dimension B >= 1."
+                )
+                proposal_dict = {"raw_explanation": result_text}
+                result_json = result_text
+        elif not self._responses and any(k in user_message.lower() for k in ("solver rewriter", "implement an ode solver", "register_solver", "kuramoto physical analog dynamics")):
+            if self.mode in ("invalid_solver_rewrite", "invalid_solver"):
+                result_text = "I failed to synthesize a valid ODE solver for this configuration."
+                proposal_dict = {"status": "FAILED", "error": result_text}
+                result_json = result_text
+            else:
+                import re
+                m_cand = re.search(r"candidate[_ ]*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
+                cand = m_cand.group(1) if m_cand else f"cand_mock_{self.call_count}"
+
+                m_solver = re.search(r"named\s+['\"]([a-zA-Z0-9_\-]+)['\"]", user_message, re.IGNORECASE)
+                if not m_solver:
+                    m_solver = re.search(r"solver\s*[:=]\s*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
+                solver_name = m_solver.group(1) if m_solver else f"custom_solver_{cand}"
+
+                solver_code = f'''from __future__ import annotations
+import torch
+from torch import Tensor
+from typing import Callable
+from un0.solver import register_solver
+
+@register_solver("{solver_name}")
+def {solver_name}_step(
+    rhs: Callable[[Tensor, Tensor, Tensor], Tensor],
+    state: Tensor,
+    time_grid: Tensor,
+    drive: Tensor,
+    **kwargs,
+) -> Tensor:
+    """Agent synthesized 2nd-order explicit Runge-Kutta / Heun ODE solver."""
+    trajectory = [state]
+    current = state
+    num_steps = len(time_grid) - 1
+    for i in range(num_steps):
+        t = time_grid[i]
+        dt = time_grid[i + 1] - t
+        k1 = rhs(current, t, drive)
+        k2 = rhs(current + dt * k1, time_grid[i + 1], drive)
+        current = current + 0.5 * dt * (k1 + k2)
+        trajectory.append(current)
+    return torch.stack(trajectory, dim=0)
+'''
+                registered = False
+                for tool in tool_list:
+                    if hasattr(tool, "un0_register_solver_rewrite"):
+                        tool.un0_register_solver_rewrite(
+                            solver_name=solver_name,
+                            candidate_id=cand,
+                            code=solver_code,
+                            description=f"Agent synthesized {solver_name} ODE solver",
+                        )
+                        registered = True
+                        break
+
+                result_text = (
+                    f"I have consulted `solver_papers` and implemented a continuous ODE solver named '{solver_name}' "
+                    f"for candidate '{cand}'. The solver adheres to the Un-0 signature `(rhs, state, time_grid, drive, **kwargs) -> Tensor` "
+                    f"and returns trajectory shape `(len(time_grid), batch_size, state_dim)`. "
+                    f"I registered the solver via `un0_register_solver_rewrite` under name '{solver_name}'."
+                )
+                proposal_dict = {"status": "SUCCESS", "solver_name": solver_name, "raw_explanation": result_text}
+                result_json = result_text
         else:
             proposal_dict = self._get_next_proposal_dict(tool_list)
-        result_json = json.dumps(proposal_dict, indent=2)
+            result_json = json.dumps(proposal_dict, indent=2)
 
         usage_data = {
             "prompt_tokens": 120,

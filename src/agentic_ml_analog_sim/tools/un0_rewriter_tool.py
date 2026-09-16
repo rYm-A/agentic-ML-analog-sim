@@ -55,6 +55,12 @@ class Un0RewriterTool(ChiaTool):
         self.repo_root = resolve_un0_root(repo_root)
         self.context = Un0Context(repo_root=self.repo_root)
 
+        # Track registered rewrites directly on the tool
+        self.last_registered_rewrite: Optional[str] = None
+        self.last_registered_solver: Optional[str] = None
+        self.last_registration_details: Optional[Dict[str, Any]] = None
+        self.registrations_by_candidate: Dict[str, List[Dict[str, Any]]] = {}
+
         # Register MCP inspection tools
         self.mcp.add_tool(self.un0_read_file, name="un0_read_file")
         self.mcp.add_tool(self.un0_get_symbol, name="un0_get_symbol")
@@ -64,6 +70,7 @@ class Un0RewriterTool(ChiaTool):
 
         # Register MCP rewriter mutation tools
         self.mcp.add_tool(self.un0_register_compiler_rewrite, name="un0_register_compiler_rewrite")
+        self.mcp.add_tool(self.un0_register_solver_rewrite, name="un0_register_solver_rewrite")
         self.mcp.add_tool(self.un0_list_registered_rewrites, name="un0_list_registered_rewrites")
 
         should_start = auto_start is True or (auto_start is None and ray.is_initialized())
@@ -209,13 +216,156 @@ class Un0RewriterTool(ChiaTool):
             clean_name,
             clean_cand,
         )
-        return {
+        res = {
             "status": "SUCCESS",
             "rewrite_name": clean_name,
             "candidate_id": clean_cand,
             "file_path": str(target_file),
             "description": description,
         }
+        self.last_registered_rewrite = clean_name
+        self.last_registration_details = res
+        self.registrations_by_candidate.setdefault(clean_cand, []).append(res)
+        return res
+
+    def un0_register_solver_rewrite(
+        self,
+        solver_name: str,
+        candidate_id: str,
+        code: str,
+        description: str = "",
+    ) -> Dict[str, Any]:
+        """Validate and register an ODE solver function into un0.solver.SOLVER_REGISTRY.
+
+        Saves code to un0/solver/<candidate_id>_<clean_name>.py, executes module,
+        and ensures the callable is registered in un0.solver.SOLVER_REGISTRY.
+
+        Args:
+            solver_name: Target solver registry identifier (e.g. 'adaptive_heun', 'custom_rk4').
+            candidate_id: Proposal candidate ID.
+            code: Python source code implementing the ODE solver.
+            description: Optional summary of the solver scheme and discretization.
+
+        Returns:
+            Dict containing registration status, solver_name, candidate_id, and file_path.
+        """
+        clean_name = solver_name.strip().replace(" ", "_")
+        clean_cand = candidate_id.strip().replace(" ", "_")
+
+        # 1. AST syntax validation
+        try:
+            ast.parse(code)
+        except SyntaxError as syn_err:
+            return {
+                "status": "ERROR",
+                "error": f"SyntaxError in solver code: {syn_err}",
+                "solver_name": clean_name,
+                "candidate_id": clean_cand,
+            }
+
+        # 2. Persist code into Un-0 solver directory
+        solvers_dir = self.repo_root / "un0" / "solver"
+        solvers_dir.mkdir(parents=True, exist_ok=True)
+        target_file = solvers_dir / f"{clean_cand}_{clean_name}.py"
+        try:
+            target_file.write_text(code, encoding="utf-8")
+        except Exception as write_err:
+            return {
+                "status": "ERROR",
+                "error": f"Failed to write solver file: {write_err}",
+                "solver_name": clean_name,
+                "candidate_id": clean_cand,
+            }
+
+        # 3. Import and register into SOLVER_REGISTRY
+        from un0.solver import SOLVER_REGISTRY, register_solver
+
+        module_name = f"un0.solver.{clean_cand}_{clean_name}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, target_file)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not load spec for module {module_name}")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            # Check if registered via decorator or directly
+            if clean_name not in SOLVER_REGISTRY:
+                candidate_fn = (
+                    getattr(mod, clean_name, None)
+                    or getattr(mod, f"{clean_name}_step", None)
+                    or getattr(mod, "solve", None)
+                    or getattr(mod, "step", None)
+                )
+                if candidate_fn is None:
+                    for attr_name in dir(mod):
+                        val = getattr(mod, attr_name)
+                        if callable(val) and not attr_name.startswith("_") and getattr(val, "__module__", "") == module_name:
+                            candidate_fn = val
+                            break
+
+                if candidate_fn is not None:
+                    SOLVER_REGISTRY[clean_name] = candidate_fn
+                else:
+                    return {
+                        "status": "ERROR",
+                        "error": f"Module {target_file.name} did not register '{clean_name}' or define a callable solver function.",
+                        "solver_name": clean_name,
+                        "candidate_id": clean_cand,
+                    }
+        except Exception as load_err:
+            logger.error("Failed to load and register solver rewrite: %s", load_err)
+            return {
+                "status": "ERROR",
+                "error": f"Exception loading solver module: {load_err}",
+                "solver_name": clean_name,
+                "candidate_id": clean_cand,
+            }
+
+        logger.info(
+            "Successfully registered solver '%s' for candidate '%s' into SOLVER_REGISTRY",
+            clean_name,
+            clean_cand,
+        )
+        res = {
+            "status": "SUCCESS",
+            "solver_name": clean_name,
+            "candidate_id": clean_cand,
+            "file_path": str(target_file),
+            "description": description,
+        }
+        self.last_registered_solver = clean_name
+        self.last_registration_details = res
+        self.registrations_by_candidate.setdefault(clean_cand, []).append(res)
+        return res
+
+    def get_registered_solver(self, candidate_id: Optional[str] = None) -> Optional[str]:
+        """Retrieve registered solver name directly from tool state."""
+        if candidate_id:
+            cand_clean = candidate_id.strip().replace(" ", "_")
+            cand_records = self.registrations_by_candidate.get(cand_clean)
+            if cand_records:
+                for rec in reversed(cand_records):
+                    if "solver_name" in rec:
+                        return rec["solver_name"]
+        return self.last_registered_solver
+
+    def get_registered_rewrite(self, candidate_id: Optional[str] = None) -> Optional[str]:
+        """Retrieve registered compiler rewrite name directly from tool state.
+
+        Args:
+            candidate_id: Optional proposal candidate ID.
+
+        Returns:
+            Registered rewrite name string if registered, else None.
+        """
+        if candidate_id:
+            cand_clean = candidate_id.strip().replace(" ", "_")
+            cand_records = self.registrations_by_candidate.get(cand_clean)
+            if cand_records:
+                for rec in reversed(cand_records):
+                    if "rewrite_name" in rec:
+                        return rec["rewrite_name"]
+        return self.last_registered_rewrite
 
     def un0_list_registered_rewrites(self, axis: str = "compiler") -> List[str]:
         """List currently registered rewrites in Un-0 across solver, noise, or compiler.

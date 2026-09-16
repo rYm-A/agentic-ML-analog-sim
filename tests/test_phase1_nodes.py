@@ -283,6 +283,7 @@ def test_node3_compiler_rewriter_and_node4_runner(tmp_db_and_config):
     assert res3["hop_functionalized"] is True
     assert res3["prepared_model"] is not None
     assert "registered_rewrite" in res3
+    assert "raw_result" in res3
     assert res3["tokens_consumed"] > 0
 
     # Verify the 3 Chia tools were exposed to the agent
@@ -293,6 +294,11 @@ def test_node3_compiler_rewriter_and_node4_runner(tmp_db_and_config):
 
     prop3 = db.get_proposal(cand_id)
     assert prop3["rewrite_compiler_status"] == "SUCCESS"
+
+    # Verify that raw LLM output was recorded in proposal comments
+    comments = db.get_comments(cand_id)
+    assert len(comments) >= 1
+    assert any("REWRITE:" in c["comment"] and "Kuramoto" in c["comment"] for c in comments)
 
     # Node 4: Inductor compilation runner & eager vs inductor comparison
     res4 = node4_compilation_runner(
@@ -340,6 +346,11 @@ def test_node3_compiler_rewriter_no_fallback_on_failure(tmp_db_and_config):
     prop = db.get_proposal(cand_id)
     assert prop["rewrite_compiler_status"] == "FAILED"
     assert prop["error_stage"] == "node3_phase1_compiler_rewriter"
+
+    # Verify failure comment records raw LLM output
+    fail_comments = db.get_comments(cand_id)
+    assert len(fail_comments) >= 1
+    assert any("[NODE 3 FAILURE RAW OUTPUT]" in c["comment"] for c in fail_comments)
 
 
 

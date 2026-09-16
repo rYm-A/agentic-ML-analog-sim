@@ -59,6 +59,9 @@ def my_test_hop_rewrite(model, solver_name="rk4", num_steps=5, dt=0.2, integrati
     assert res_valid["status"] == "SUCCESS"
     assert res_valid["rewrite_name"] == "my_test_hop_rewrite"
     assert "my_test_hop_rewrite" in COMPILER_REGISTRY
+    assert tool.last_registered_rewrite == "my_test_hop_rewrite"
+    assert tool.get_registered_rewrite("cand_test_tool") == "my_test_hop_rewrite"
+    assert tool.get_registered_rewrite() == "my_test_hop_rewrite"
 
     rewrite_fn = get_compiler_rewrite("my_test_hop_rewrite")
     assert callable(rewrite_fn)

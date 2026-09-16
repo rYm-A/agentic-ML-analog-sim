@@ -262,11 +262,11 @@ def node3_phase1_compiler_rewriter(
         f"dynamic shapes, Inductor) and inspect reference HOP implementations in RegenerativeCoRNN (model/implicit_parallel.py).\n"
         f"3. `un0_rewriter`: read Un-0 codebase, inspect dynamics definitions, and register your functionalized "
         f"compiler rewrite into Un-0 using `un0_register_compiler_rewrite`.\n\n"
-        f"Directives:\n"
+        f"- Directives:\n"
         f"- Do NOT use static Python while-loops that cause graph breaks in TorchDynamo.\n"
         f"- Functionalize using PyTorch Higher-Order Operators (`torch._higher_order_ops.while_loop`) or unrolled functional operators.\n"
         f"- Register your rewrite via `un0_register_compiler_rewrite` in Un-0.\n"
-        f"- Return a JSON response with: {{\"status\": \"SUCCESS\", \"rewrite_name\": \"<registered_name>\", \"target_device\": \"{target_device}\", \"description\": \"...\"}}."
+        f"- In your final response, explain your functionalization design, operator choices, and compilation considerations."
     )
 
     # 5. Execute Agent Turn via Chia API
@@ -323,16 +323,27 @@ def node3_phase1_compiler_rewriter(
     except Exception:
         pass
 
-    # 7. Extract Registered Rewrite Name (No deterministic fallback!)
+    # 7. Extract Registered Rewrite Name Directly from un0_rewriter_tool (No deterministic fallback!)
     raw_result = getattr(query_result, "result", "") if query_result is not None else ""
-    rewrite_name = _extract_rewrite_name(raw_result)
+    if not isinstance(raw_result, str):
+        raw_result = str(raw_result)
 
+    # Primary source of truth: registered rewrite directly from un0_rewriter_tool
+    rewrite_name = un0_rewriter_tool.get_registered_rewrite(candidate_id=candidate_id)
+
+    # Secondary lookup: check if any rewrite registered for this candidate exists in registry
     if not rewrite_name:
-        # Check if un0_rewriter tool registered any rewrite matching candidate
         registered_compilers = un0_rewriter_tool.un0_list_registered_rewrites(axis="compiler")
         cand_matches = [name for name in registered_compilers if candidate_id in name]
         if cand_matches:
             rewrite_name = cand_matches[-1]
+        else:
+            # Fallback check if agent referred to an existing pre-registered rewrite (e.g. hop_while_loop)
+            extracted = _extract_rewrite_name(raw_result)
+            if extracted and extracted in COMPILER_REGISTRY:
+                rewrite_name = extracted
+            elif "hop_while_loop" in raw_result and "hop_while_loop" in COMPILER_REGISTRY:
+                rewrite_name = "hop_while_loop"
 
     if not rewrite_name or rewrite_name not in COMPILER_REGISTRY:
         error_msg = (
@@ -346,6 +357,14 @@ def node3_phase1_compiler_rewriter(
             error_stage="node3_phase1_compiler_rewriter",
             error_message=error_msg,
         )
+        # Record raw LLM output for diagnostic inspection by Node 8
+        if raw_result and raw_result.strip():
+            db.add_comment(
+                candidate_id=candidate_id,
+                phase="phase_1",
+                agent_name="node3_phase1_compiler_rewriter",
+                comment=f"[NODE 3 FAILURE RAW OUTPUT]\n{raw_result.strip()}",
+            )
         raise RuntimeError(error_msg)
 
     # 8. Retrieve and Execute Registered Compiler Rewrite
@@ -368,6 +387,13 @@ def node3_phase1_compiler_rewriter(
             error_stage="node3_phase1_compiler_rewriter",
             error_message=error_msg,
         )
+        if raw_result and raw_result.strip():
+            db.add_comment(
+                candidate_id=candidate_id,
+                phase="phase_1",
+                agent_name="node3_phase1_compiler_rewriter",
+                comment=f"[NODE 3 EXECUTION ERROR RAW OUTPUT]\n{raw_result.strip()}",
+            )
         raise RuntimeError(error_msg)
 
     # 9. Update Database Status and Cross-Node Comment
@@ -375,15 +401,24 @@ def node3_phase1_compiler_rewriter(
         candidate_id,
         rewrite_compiler_status="SUCCESS",
     )
-    db.add_comment(
-        candidate_id=candidate_id,
-        phase="phase_1",
-        agent_name="node3_phase1_compiler_rewriter",
-        comment=(
-            f"Registered compiler rewrite '{rewrite_name}' targeting device '{target_device}' "
-            f"with dynamic batching B >= 1."
-        ),
-    )
+    # Record the agent's raw response / explanation as a comment for cross-node communication
+    if raw_result and raw_result.strip():
+        db.add_comment(
+            candidate_id=candidate_id,
+            phase="phase_1",
+            agent_name="node3_phase1_compiler_rewriter",
+            comment=f"[REWRITE: {rewrite_name}] {raw_result.strip()}",
+        )
+    else:
+        db.add_comment(
+            candidate_id=candidate_id,
+            phase="phase_1",
+            agent_name="node3_phase1_compiler_rewriter",
+            comment=(
+                f"Registered compiler rewrite '{rewrite_name}' targeting device '{target_device}' "
+                f"with dynamic batching B >= 1."
+            ),
+        )
 
     logger.info(
         "Node 3: Compiler rewrite '%s' successfully applied for %s",
@@ -398,6 +433,7 @@ def node3_phase1_compiler_rewriter(
         "prepared_model": functional_model,
         "eager_model": eager_model,
         "registered_rewrite": rewrite_name,
+        "raw_result": raw_result,
         "tokens_consumed": t_tok,
         "token_usage": {
             "prompt_tokens": p_tok,
