@@ -34,11 +34,16 @@ try:
 except ImportError:
     _un0_exports = []
 
+from agentic_ml_analog_sim.tools.compilation_info_tool import CompilationInfoTool
+from agentic_ml_analog_sim.tools.un0_rewriter_tool import Un0RewriterTool
+
 __all__ = [
     "ResultDBTool",
     "ResultDBReadOnlyTool",
     "ResultDBReadTool",
     "PlotTool",
+    "CompilationInfoTool",
+    "Un0RewriterTool",
     "query_proposals",
     "read_prior_proposals",
     "get_candidate_history_summary",

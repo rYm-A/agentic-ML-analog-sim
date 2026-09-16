@@ -282,6 +282,14 @@ def test_node3_compiler_rewriter_and_node4_runner(tmp_db_and_config):
     assert res3["target_device"] == "mps"
     assert res3["hop_functionalized"] is True
     assert res3["prepared_model"] is not None
+    assert "registered_rewrite" in res3
+    assert res3["tokens_consumed"] > 0
+
+    # Verify the 3 Chia tools were exposed to the agent
+    last_call = mock_llm.history[-1]
+    assert "result_db" in last_call["tools"]
+    assert "compilation_info" in last_call["tools"]
+    assert "un0_rewriter" in last_call["tools"]
 
     prop3 = db.get_proposal(cand_id)
     assert prop3["rewrite_compiler_status"] == "SUCCESS"
@@ -302,19 +310,36 @@ def test_node3_compiler_rewriter_and_node4_runner(tmp_db_and_config):
     prop4 = db.get_proposal(cand_id)
     assert prop4["compilation_status"] == "SUCCESS"
 
-    # Verify Node 3 agentic prompt records token metrics when force_rewrite=True
-    res3_forced = node3_compiler_rewriter(
-        db=db,
-        config=config,
-        candidate_id=cand_id,
-        target_device="mps",
-        llm=mock_llm,
-        force_rewrite=True,
-    )
-    assert res3_forced["tokens_consumed"] > 0
+    # Verify token usage summary
     summary = db.get_token_usage_summary(phase="phase_1")
     assert summary["overall"]["total_calls"] >= 1
     assert "phase_1.node3_phase1_compiler_rewriter" in summary["by_node"]
+
+
+def test_node3_compiler_rewriter_no_fallback_on_failure(tmp_db_and_config):
+    """Test that Node 3 does NOT silently fall back to deterministic mode on failure."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_test_comp_fail",
+        solver="rk4",
+        noise_model="none",
+    )
+
+    failing_llm = MockAntigravityLLM(mode="invalid_compiler")
+
+    with pytest.raises(RuntimeError, match="failed to synthesize or register a valid compiler rewrite"):
+        node3_compiler_rewriter(
+            db=db,
+            config=config,
+            candidate_id=cand_id,
+            target_device="mps",
+            llm=failing_llm,
+        )
+
+    prop = db.get_proposal(cand_id)
+    assert prop["rewrite_compiler_status"] == "FAILED"
+    assert prop["error_stage"] == "node3_phase1_compiler_rewriter"
 
 
 

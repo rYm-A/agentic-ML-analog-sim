@@ -310,6 +310,51 @@ class MockAntigravityLLM(AntigravityLLM):
                 "resource_discussion": "[pregenerated template text] Swarm token consumption and financial expenditure remained well within allocated budgets across all exploration and verification phases.",
                 "recommendations": "[pregenerated template text]\n1. Prioritize low-step schemes along the frontier for edge silicon deployment.\n2. Apply crossbar degree-bounding to reduce parasitic capacitance.\n3. Expand candidate exploration across orthogonal dimensions in subsequent sweeps.",
             }
+        elif not self._responses and any(k in user_message.lower() for k in ("compiler rewriter", "torch._higher_order_ops", "functionalize the kuramoto")):
+            if self.mode == "invalid_compiler":
+                proposal_dict = {
+                    "status": "FAILED",
+                    "rewrite_name": "invalid_hop_rewrite",
+                    "error": "SyntaxError or invalid rewrite",
+                }
+            else:
+                import re
+                m = re.search(r"candidate[_ ]*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
+                cand = m.group(1) if m else f"cand_mock_{self.call_count}"
+                rewrite_name = f"hop_while_loop_{cand}"
+                custom_code = f'''from un0.compiler.functional_hop import functionalize_kuramoto_model
+
+def {rewrite_name}(model, solver_name="rk4", num_steps=25, dt=0.04, integration_time=1.0, **kwargs):
+    return functionalize_kuramoto_model(
+        model=model,
+        solver_name=solver_name,
+        num_steps=num_steps,
+        dt=dt,
+        integration_time=integration_time,
+        use_hop=True,
+    )
+'''
+                registered = False
+                for tool in tool_list:
+                    if hasattr(tool, "un0_register_compiler_rewrite"):
+                        tool.un0_register_compiler_rewrite(
+                            rewrite_name=rewrite_name,
+                            candidate_id=cand,
+                            code=custom_code,
+                            description="Mock agent synthesized HOP while_loop rewrite",
+                        )
+                        registered = True
+                        break
+
+                if not registered:
+                    rewrite_name = "hop_while_loop"
+
+                proposal_dict = {
+                    "status": "SUCCESS",
+                    "rewrite_name": rewrite_name,
+                    "target_device": "mps",
+                    "description": "Functionalized Kuramoto model using PyTorch HOP while_loop with dynamic batch shapes (B >= 1)",
+                }
         else:
             proposal_dict = self._get_next_proposal_dict(tool_list)
         result_json = json.dumps(proposal_dict, indent=2)
