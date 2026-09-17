@@ -369,12 +369,12 @@ def test_node_agent_efforts_execution_and_token_recording(
     cand_id = temp_db.insert_proposal(solver="euler", noise_model="none")
 
     # Node 1
-    node1_phase1_solver_rewriter(db=temp_db, config=custom_cfg, candidate_id=cand_id)
+    node1_phase1_solver_rewriter(db=temp_db, config=custom_cfg, candidate_id=cand_id, force_rewrite=True)
     summary_n1 = temp_db.get_token_usage_summary(phase="phase_1")
     assert "gemini-2.5-pro" in summary_n1["by_model"]
 
     # Node 2
-    node2_phase1_noise_rewriter(db=temp_db, config=custom_cfg, candidate_id=cand_id)
+    node2_phase1_noise_rewriter(db=temp_db, config=custom_cfg, candidate_id=cand_id, force_rewrite=True)
 
     # Node 3
     node3_phase1_compiler_rewriter(db=temp_db, config=custom_cfg, candidate_id=cand_id)

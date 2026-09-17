@@ -35,6 +35,7 @@ except ImportError:
     _un0_exports = []
 
 from agentic_ml_analog_sim.tools.compilation_info_tool import CompilationInfoTool
+from agentic_ml_analog_sim.tools.noise_papers_tool import NoisePapersTool
 from agentic_ml_analog_sim.tools.solver_papers_tool import SolverPapersTool
 from agentic_ml_analog_sim.tools.un0_rewriter_tool import Un0RewriterTool
 
@@ -44,6 +45,7 @@ __all__ = [
     "ResultDBReadTool",
     "PlotTool",
     "CompilationInfoTool",
+    "NoisePapersTool",
     "SolverPapersTool",
     "Un0RewriterTool",
     "query_proposals",

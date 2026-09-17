@@ -71,6 +71,7 @@ class ResultDBTool(ChiaTool):
             raise TypeError(f"Invalid type for db: {type(db)}")
 
         # Register read-only MCP tool methods (accessible in both read_only and read-write modes)
+        self.mcp.add_tool(self.get_proposal, name=f"{self.name}_get_proposal")
         self.mcp.add_tool(self.read_prior_proposals, name=f"{self.name}_read_prior_proposals")
         self.mcp.add_tool(self.get_candidate_history_summary, name=f"{self.name}_get_candidate_history_summary")
         self.mcp.add_tool(self.get_active_evaluations, name=f"{self.name}_get_active_evaluations")
@@ -87,6 +88,8 @@ class ResultDBTool(ChiaTool):
             self.mcp.add_tool(self.insert_proposal, name=f"{self.name}_insert_proposal")
             self.mcp.add_tool(self.add_comment, name=f"{self.name}_add_comment")
             self.mcp.add_tool(self.record_token_usage, name=f"{self.name}_record_token_usage")
+            self.mcp.add_tool(self.mark_proposal_status, name=f"{self.name}_mark_proposal_status")
+            self.mcp.add_tool(self.update_execution_status, name=f"{self.name}_update_execution_status")
 
     def read_prior_proposals(self, status: Optional[str] = None, limit: int = 50) -> str:
         """Read simulation candidate proposals that have already been made from the database.
@@ -537,6 +540,105 @@ class ResultDBTool(ChiaTool):
         except Exception as e:
             return json.dumps({"status": "ERROR", "message": f"Error getting completed experiments count: {e}"})
 
+    def get_proposal(self, candidate_id: str) -> str:
+        """Retrieve candidate proposal configuration and metadata by candidate_id.
+
+        Args:
+            candidate_id: Proposal candidate ID.
+
+        Returns:
+            JSON string containing candidate proposal details or error.
+        """
+        try:
+            prop = self.db.get_proposal(candidate_id)
+            if not prop:
+                return json.dumps({"status": "NOT_FOUND", "message": f"Candidate '{candidate_id}' not found."})
+            return json.dumps({"status": "SUCCESS", "proposal": prop}, default=str)
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error retrieving proposal: {e}"})
+
+    def mark_proposal_status(
+        self,
+        candidate_id: str,
+        status: str,
+        latency_ms: Optional[float] = None,
+        accuracy_fid: Optional[float] = None,
+        relative_error: Optional[float] = None,
+        wall_clock_s: Optional[float] = None,
+        worker_utilization: Optional[float] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Update candidate proposal status and evaluation metrics.
+
+        Args:
+            candidate_id: Proposal candidate ID.
+            status: New proposal status.
+            latency_ms: Measured inference latency in milliseconds.
+            accuracy_fid: Accuracy FID metric.
+            relative_error: Relative numerical error.
+            wall_clock_s: Wall clock elapsed time in seconds.
+            worker_utilization: Estimated worker utilization.
+            **kwargs: Extra fields passed to database mark_proposal_status.
+
+        Returns:
+            JSON string confirming update.
+        """
+        try:
+            self.db.mark_proposal_status(
+                candidate_id=candidate_id,
+                status=status,
+                latency_ms=latency_ms,
+                accuracy_fid=accuracy_fid,
+                relative_error=relative_error,
+                wall_clock_s=wall_clock_s,
+                worker_utilization=worker_utilization,
+                **kwargs,
+            )
+            return json.dumps({"status": "SUCCESS", "candidate_id": candidate_id, "new_status": status})
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error updating proposal status: {e}"})
+
+    def update_execution_status(
+        self,
+        candidate_id: str,
+        simulation_status: Optional[str] = None,
+        error_stage: Optional[str] = None,
+        error_message: Optional[str] = None,
+        compilation_status: Optional[str] = None,
+        rewrite_solver_status: Optional[str] = None,
+        rewrite_noise_status: Optional[str] = None,
+        rewrite_compiler_status: Optional[str] = None,
+    ) -> str:
+        """Update granular stage execution status in the database.
+
+        Args:
+            candidate_id: Proposal candidate ID.
+            simulation_status: Simulation status ('PENDING', 'RUNNING', 'SUCCESS', 'FAILED').
+            error_stage: Pipeline stage where error occurred.
+            error_message: Description of the error.
+            compilation_status: Compilation status.
+            rewrite_solver_status: Solver rewrite status.
+            rewrite_noise_status: Noise rewrite status.
+            rewrite_compiler_status: Compiler rewrite status.
+
+        Returns:
+            JSON string confirming update.
+        """
+        try:
+            self.db.update_execution_status(
+                candidate_id=candidate_id,
+                simulation_status=simulation_status,
+                error_stage=error_stage,
+                error_message=error_message,
+                compilation_status=compilation_status,
+                rewrite_solver_status=rewrite_solver_status,
+                rewrite_noise_status=rewrite_noise_status,
+                rewrite_compiler_status=rewrite_compiler_status,
+            )
+            return json.dumps({"status": "SUCCESS", "candidate_id": candidate_id, "simulation_status": simulation_status})
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error updating execution status: {e}"})
+
 
 # Direct helper functions for local/test execution without requiring tool server instantiation
 def query_proposals(db: ResultDatabase, status: Optional[str] = None, limit: int = 20) -> str:
@@ -645,4 +747,22 @@ def get_proposal_comments(db: ResultDatabase, candidate_id: str) -> str:
     """Helper function to retrieve proposal comments directly from a ResultDatabase."""
     tool = ResultDBReadOnlyTool(db=db, deploy=False)
     return tool.get_proposal_comments(candidate_id=candidate_id)
+
+
+def get_proposal(db: ResultDatabase, candidate_id: str) -> str:
+    """Helper function to retrieve candidate proposal directly from a ResultDatabase."""
+    tool = ResultDBReadOnlyTool(db=db, deploy=False)
+    return tool.get_proposal(candidate_id=candidate_id)
+
+
+def mark_proposal_status(db: ResultDatabase, candidate_id: str, status: str, **kwargs: Any) -> str:
+    """Helper function to mark proposal status directly on a ResultDatabase."""
+    tool = ResultDBTool(db=db, deploy=False)
+    return tool.mark_proposal_status(candidate_id=candidate_id, status=status, **kwargs)
+
+
+def update_execution_status(db: ResultDatabase, candidate_id: str, **kwargs: Any) -> str:
+    """Helper function to update execution status directly on a ResultDatabase."""
+    tool = ResultDBTool(db=db, deploy=False)
+    return tool.update_execution_status(candidate_id=candidate_id, **kwargs)
 

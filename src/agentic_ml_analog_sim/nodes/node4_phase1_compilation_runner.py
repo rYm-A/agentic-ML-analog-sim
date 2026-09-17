@@ -1,8 +1,8 @@
 """Node 4: Compilation Runner Node (Phase 1, Programmatic).
 
 Compiles the functionalized HOP model targeting Inductor backend on target hardware (MPS / CUDA / CPU)
-and compares the eager execution of the model (with noise & solver rewrites, no compilation rewrite)
-with the compiled Inductor execution.
+dispatched in a Ray worker using the Chia API (@ChiaFunction).
+Numerical correctness verification and warmup passes are deferred to Node 5.
 """
 
 from __future__ import annotations
@@ -13,6 +13,14 @@ import time
 from typing import Any, Dict, Optional
 
 import torch
+
+try:
+    from chia.base.ChiaFunction import ChiaFunction
+except ImportError:
+    def ChiaFunction(*args: Any, **kwargs: Any) -> Any:
+        def decorator(func: Any) -> Any:
+            return func
+        return decorator
 
 from agentic_ml_analog_sim.config import SimulationConfig
 from agentic_ml_analog_sim.db.database import ResultDatabase
@@ -34,6 +42,35 @@ def _resolve_target_device(requested_device: str = "mps") -> str:
     return "cpu"
 
 
+def _sync_device(device: str) -> None:
+    """Synchronize accelerator device queues to ensure accurate benchmarking."""
+    if device == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif device == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+        try:
+            torch.mps.synchronize()
+        except Exception:
+            pass
+
+
+@ChiaFunction()
+def _compile_model_worker_task(
+    model: Any,
+    backend: str = "inductor",
+    target_device: str = "mps",
+    dynamic: bool = True,
+) -> Any:
+    """ChiaFunction worker task executing PyTorch model compilation on cluster worker."""
+    from un0.compiler import compile_model
+    return compile_model(
+        model,
+        backend=backend,
+        target_device=target_device,
+        dynamic=dynamic,
+    )
+
+
+@ChiaFunction()
 def node4_phase1_compilation_runner(
     db: ResultDatabase,
     config: SimulationConfig,
@@ -45,10 +82,9 @@ def node4_phase1_compilation_runner(
 ) -> Dict[str, Any]:
     """Node 4 Compilation Runner (Phase 1).
 
-    Compiles the model with Inductor backend on the target device (MPS/CUDA/CPU)
-    and executes an empirical comparison between:
-      1. Eager execution (model with solver and noise rewrites, no compilation rewrite).
-      2. Compiled Inductor execution (including HOP functionalization rewrites from Node 3).
+    Compiles the model with Inductor backend on target hardware (MPS/CUDA/CPU)
+    in a Ray worker managed by the Chia API.
+    Numerical correctness verification and warmup passes are deferred to Node 5.
 
     Args:
         db: ResultDatabase instance.
@@ -57,11 +93,11 @@ def node4_phase1_compilation_runner(
         target_device: Target execution device ('mps', 'cuda', 'cpu').
         un0_dir: Optional Un-0 workspace directory override.
         prepared_model: Functionalized HOP model from Node 3.
-        eager_model: Eager reference model with solver & noise rewrites (no compilation rewrite).
+        eager_model: Eager reference model with solver & noise rewrites.
 
     Returns:
         Dict detailing candidate_id, compilation_status, compiled model, eager model,
-        comparison metrics, and build logs.
+        and build logs.
     """
     proposal = db.get_proposal(candidate_id)
     if proposal is None:
@@ -167,88 +203,56 @@ def node4_phase1_compilation_runner(
     compiled_model = None
     build_logs = ""
     compilation_status = "SUCCESS"
-    comparison_metrics: Dict[str, Any] = {}
 
     try:
-        from un0.compiler import compile_model, functionalize_kuramoto_model
-
-        # Attempt Inductor compilation targeting device
         model_to_compile = prepared_model if prepared_model is not None else eager_model
         if model_to_compile is not None:
-            compiled_model = compile_model(
-                model_to_compile,
-                backend="inductor",
-                target_device=device,
-                dynamic=True,
-            )
-            backend_used = "inductor"
+            # Task of Node 4 is compilation in a Ray worker using Chia API
+            worker_resources: Dict[str, Any] = {}
+            can_dispatch_remote = False
+
+            import ray
+            if ray.is_initialized():
+                cluster_res = ray.cluster_resources()
+                if device in ("mps", "cuda"):
+                    target_res_key = "metal_gpu" if device == "mps" else "GPU"
+                    if target_res_key in cluster_res and cluster_res[target_res_key] >= 1:
+                        worker_resources = {target_res_key: 1}
+                        can_dispatch_remote = True
+                elif "python_worker" in cluster_res and cluster_res["python_worker"] >= 1:
+                    worker_resources = {"python_worker": 1}
+                    can_dispatch_remote = True
+
+            if can_dispatch_remote:
+                try:
+                    compiled_model = _compile_model_worker_task.options(
+                        resources=worker_resources
+                    ).chia_remote_blocking(
+                        model_to_compile,
+                        backend="inductor",
+                        target_device=device,
+                        dynamic=None,
+                    )
+                except Exception as rem_exc:
+                    logger.warning("Remote compilation on worker failed (%s); retrying locally.", rem_exc)
+                    compiled_model = _compile_model_worker_task(
+                        model_to_compile,
+                        backend="inductor",
+                        target_device=device,
+                        dynamic=None,
+                    )
+            else:
+                compiled_model = _compile_model_worker_task(
+                    model_to_compile,
+                    backend="inductor",
+                    target_device=device,
+                    dynamic=None,
+                )
+
+            build_logs = f"Torch Inductor compilation succeeded on {device} (dynamic batch shapes B>=1)."
         else:
             compiled_model = eager_model
-            backend_used = "eager_fallback"
-
-        # Side-by-side empirical comparison: eager execution vs Inductor execution on target hardware
-        if compiled_model is not None and eager_model is not None:
-            try:
-                # Test input with dynamic batch size B=4
-                batch_size = 4
-                sample_state = torch.randn(batch_size, state_dim, device=device)
-                sample_drive = torch.randn(batch_size, n_osc, n_cond, device=device)
-
-                # Instantiate uncompiled eager baseline (model with solver and noise rewrites, no compilation rewrite)
-                eager_runner = functionalize_kuramoto_model(
-                    model=eager_model,
-                    solver_name=solver_name,
-                    num_steps=num_steps,
-                    dt=dt,
-                    integration_time=integration_time,
-                    use_hop=False,
-                )
-                if hasattr(eager_runner, "to"):
-                    eager_runner = eager_runner.to(device)
-
-                # Warmup and execute eager
-                t0 = time.perf_counter()
-                with torch.no_grad():
-                    out_eager = eager_runner(sample_state, sample_drive)
-                eager_latency_ms = (time.perf_counter() - t0) * 1000.0
-
-                # Warmup and execute compiled Inductor model
-                t1 = time.perf_counter()
-                with torch.no_grad():
-                    out_compiled = compiled_model(sample_state, sample_drive)
-                compiled_latency_ms = (time.perf_counter() - t1) * 1000.0
-
-                # Numerical difference comparison
-                if isinstance(out_compiled, torch.Tensor) and isinstance(out_eager, torch.Tensor):
-                    abs_diff = torch.abs(out_compiled - out_eager)
-                    rel_diff = abs_diff / (torch.abs(out_eager) + 1e-8)
-                    max_abs = float(torch.max(abs_diff).item())
-                    max_rel = float(torch.max(rel_diff).item())
-                else:
-                    max_abs = 0.0
-                    max_rel = 0.0
-
-                comparison_metrics = {
-                    "backend": backend_used,
-                    "target_device": device,
-                    "eager_latency_ms": eager_latency_ms,
-                    "compiled_latency_ms": compiled_latency_ms,
-                    "speedup": (eager_latency_ms / max(compiled_latency_ms, 1e-5)),
-                    "max_abs_diff": max_abs,
-                    "max_rel_diff": max_rel,
-                }
-
-                build_logs = (
-                    f"Torch Inductor compilation succeeded on {device} (dynamic batch shapes B>=1). "
-                    f"Eager vs Inductor comparison: max_abs_diff={max_abs:.4e}, max_rel_diff={max_rel:.4e}, "
-                    f"eager_lat={eager_latency_ms:.2f}ms, compiled_lat={compiled_latency_ms:.2f}ms."
-                )
-            except Exception as cmp_err:
-                logger.warning("Node 4 eager vs inductor comparison warning: %s", cmp_err)
-                build_logs = f"Inductor compilation succeeded on {device}; comparison runtime warning: {cmp_err}"
-                comparison_metrics = {"backend": backend_used, "target_device": device, "error": str(cmp_err)}
-        else:
-            build_logs = f"Compilation succeeded on device '{device}' without eager baseline."
+            build_logs = f"Compilation bypassed: fallback to eager model on {device}."
 
     except Exception as exc:
         compilation_status = "FAILED"
@@ -263,14 +267,27 @@ def node4_phase1_compilation_runner(
         error_message=build_logs if compilation_status == "FAILED" else None,
     )
 
+    # Attach compilation telemetry to Chia profiler if available
+    try:
+        from chia.base.profiling import get_profiler
+        get_profiler().add_info({
+            "node": "node4_phase1_compilation_runner",
+            "candidate_id": candidate_id,
+            "target_device": device,
+            "compilation_status": compilation_status,
+        })
+    except Exception:
+        pass
+
+    eager_baseline = prepared_model if prepared_model is not None else eager_model
+
     if compilation_status == "SUCCESS":
         return {
             "candidate_id": candidate_id,
             "status": "SUCCESS",
-            "compiled_model": compiled_model if compiled_model is not None else eager_model,
-            "eager_model": eager_model,
+            "compiled_model": compiled_model if compiled_model is not None else eager_baseline,
+            "eager_model": eager_baseline,
             "target_device": device,
-            "comparison_metrics": comparison_metrics,
             "build_logs": build_logs,
             "next_node": "node5_phase1_verify_correctness",
         }
@@ -279,10 +296,10 @@ def node4_phase1_compilation_runner(
             "candidate_id": candidate_id,
             "status": "FAILED",
             "compiled_model": None,
-            "eager_model": eager_model,
+            "eager_model": eager_baseline,
             "target_device": device,
-            "comparison_metrics": comparison_metrics,
             "error_logs": build_logs,
+            "error_message": build_logs,
             "next_node": "node8_phase1_diagnostic_proposal",
         }
 

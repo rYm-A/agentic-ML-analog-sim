@@ -36,24 +36,33 @@ from mcp.server.fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SKILL_PATH = Path("/Users/chia/ChiaWorkspace/agentic-ML-analog-sim/skills/solvers-for-continuous-systems/SKILL.md")
+# Relative path from agentic-ML-analog-sim/ repository root
+SKILL_RELATIVE_PATH = Path("skills/solvers-for-continuous-systems/SKILL.md")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_SKILL_PATH = REPO_ROOT / SKILL_RELATIVE_PATH
 
 
 def _resolve_skill_path(skill_path: Optional[Union[str, Path]] = None) -> Path:
-    """Resolve skill file path, falling back to workspace relative paths if needed."""
+    """Resolve skill file path relative to agentic-ML-analog-sim root or current working dir."""
     if skill_path is not None:
-        p = Path(skill_path).resolve()
+        p = Path(skill_path)
+        if not p.is_absolute():
+            for base in (REPO_ROOT, Path.cwd()):
+                candidate = (base / p).resolve()
+                if candidate.exists():
+                    return candidate
+        p = p.resolve()
         if p.exists():
             return p
 
     candidates = [
         DEFAULT_SKILL_PATH,
-        Path(__file__).resolve().parent.parent.parent.parent / "skills" / "solvers-for-continuous-systems" / "SKILL.md",
-        Path.cwd() / "skills" / "solvers-for-continuous-systems" / "SKILL.md",
+        (Path.cwd() / SKILL_RELATIVE_PATH).resolve(),
+        (REPO_ROOT / SKILL_RELATIVE_PATH).resolve(),
     ]
     for c in candidates:
         if c.exists():
-            return c.resolve()
+            return c
     return DEFAULT_SKILL_PATH
 
 
@@ -69,18 +78,22 @@ class SolverPapersTool(ChiaTool):
         logging_level: int = logging.INFO,
     ) -> None:
         super().__init__(name, task_options=task_options, logging_level=logging_level)
-        self.skill_path = _resolve_skill_path(skill_path)
-        self._content: Optional[str] = None
-
-        # Register MCP tools
-        self.mcp.add_tool(self.get_solver_skill_summary, name="get_solver_skill_summary")
-        self.mcp.add_tool(self.get_solver_tier_guide, name="get_solver_tier_guide")
-        self.mcp.add_tool(self.search_solver_papers, name="search_solver_papers")
-        self.mcp.add_tool(self.read_solver_skill_section, name="read_solver_skill_section")
+        self.setup(skill_path=skill_path)
 
         should_start = auto_start is True or (auto_start is None and ray.is_initialized())
         if should_start:
             super().__post_init__()
+
+    def setup(self, skill_path: Optional[Union[str, Path]] = None) -> None:
+        """Register MCP tool methods with FastMCP according to Chia documentation."""
+        self.skill_path = _resolve_skill_path(skill_path)
+        self._content: Optional[str] = None
+
+        # Register MCP tools in setup() function per Chia documentation
+        self.mcp.add_tool(self.get_solver_skill_summary, name="get_solver_skill_summary")
+        self.mcp.add_tool(self.get_solver_tier_guide, name="get_solver_tier_guide")
+        self.mcp.add_tool(self.search_solver_papers, name="search_solver_papers")
+        self.mcp.add_tool(self.read_solver_skill_section, name="read_solver_skill_section")
 
     def _load_content(self) -> str:
         """Cache and return the markdown content of the solver skill."""

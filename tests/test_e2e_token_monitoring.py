@@ -101,6 +101,7 @@ def test_e2e_cross_phase_token_monitoring(test_setup, tmp_path: Path):
         target_device="cpu",
         llm=mock_llm_p1,
         dry_run=True,
+        force_rewrites=True,
     )
 
     assert result_p1.action == "PROCEED_TO_PHASE_2"

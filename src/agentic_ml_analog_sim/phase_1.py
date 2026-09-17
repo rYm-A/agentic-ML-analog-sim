@@ -96,6 +96,7 @@ def run_phase_1(
     un0_dir: Union[str, Path, None] = None,
     dry_run: bool = False,
     max_loop_cycles: int = 15,
+    force_rewrites: bool = False,
 ) -> Phase1Result:
     """Execute the end-to-end Phase 1 execution, compilation, profiling, and diagnostic loop.
 
@@ -219,13 +220,25 @@ def run_phase_1(
         # STEP 2: Execute Rewriters (Nodes 1, 2, 3 as specified)
         if 1 in nodes_to_run:
             logger.info("Executing Node 1 (Solver Rewriter) for '%s'", active_candidate_id)
-            node1_res = node1_phase1_solver_rewriter(db=db, config=config, candidate_id=active_candidate_id, llm=llm)
+            node1_res = node1_phase1_solver_rewriter(
+                db=db,
+                config=config,
+                candidate_id=active_candidate_id,
+                llm=llm,
+                force_rewrite=force_rewrites,
+            )
             if node1_res.get("status") == "FAILED":
                 logger.warning("Node 1 solver rewriter failed: %s", node1_res.get("error"))
 
         if 2 in nodes_to_run:
             logger.info("Executing Node 2 (Noise Rewriter) for '%s'", active_candidate_id)
-            node2_res = node2_phase1_noise_rewriter(db=db, config=config, candidate_id=active_candidate_id, llm=llm)
+            node2_res = node2_phase1_noise_rewriter(
+                db=db,
+                config=config,
+                candidate_id=active_candidate_id,
+                llm=llm,
+                force_rewrite=force_rewrites,
+            )
             if node2_res.get("status") == "FAILED":
                 logger.warning("Node 2 noise rewriter failed: %s", node2_res.get("error"))
 
@@ -272,6 +285,7 @@ def run_phase_1(
             continue
 
         compiled_model = comp_res.get("compiled_model")
+        eager_model = comp_res.get("eager_model")
 
         # STEP 4: Node 5 Verify Correctness (Eager vs Compiled)
         logger.info("Executing Node 5 (Verify Correctness) for '%s'", active_candidate_id)
@@ -280,6 +294,7 @@ def run_phase_1(
             config=config,
             candidate_id=active_candidate_id,
             compiled_model=compiled_model,
+            eager_model=eager_model,
             target_device=target_device,
         )
 
@@ -315,14 +330,33 @@ def run_phase_1(
 
         # STEP 5: Node 6 Simulate and Profile
         logger.info("Executing Node 6 (Simulate & Profile) for '%s'", active_candidate_id)
+        model_to_profile = verify_res.get("compiled_model") if verify_res.get("compiled_model") is not None else compiled_model
         profile_res = node6_phase1_simulate_profile(
             db=db,
             config=config,
             candidate_id=active_candidate_id,
-            compiled_model=compiled_model,
+            compiled_model=model_to_profile,
             target_device=target_device,
             backend_mode=target_device,
         )
+
+        if profile_res.get("status") == "FAILED":
+            logger.warning("Node 6 simulation failed for candidate '%s': %s", active_candidate_id, profile_res.get("error_message"))
+            # Route to Node 8 Diagnostic Agent
+            diag_res = node8_phase1_diagnostic_proposal(
+                db=db,
+                config=config,
+                candidate_id=active_candidate_id,
+                error_logs=f"Simulation profiling failed: {profile_res.get('error_message')}",
+                llm=llm,
+            )
+            current_trigger = "node_8"
+            previous_node_id = "node_6"
+            if diag_res.get("type") == "DEBUG_MODE_REQUEST":
+                debug_request = diag_res
+            else:
+                debug_request = None
+            continue
 
         metrics = profile_res.get("metrics", {})
 

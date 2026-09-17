@@ -143,6 +143,7 @@ def node8_phase1_diagnostic_proposal(
             total_tokens,
             model_name,
         )
+        cost_usd = (prompt_tokens * 0.00000125) + (completion_tokens * 0.000005)
         db.record_token_usage(
             phase="phase_1",
             node_name="node8_phase1_diagnostic_proposal",
@@ -150,7 +151,7 @@ def node8_phase1_diagnostic_proposal(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
-            cost_usd=0.0,
+            cost_usd=cost_usd,
             candidate_id=candidate_id,
             duration_seconds=elapsed,
         )

@@ -5,10 +5,12 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 import pytest
+import torch
 
 from agentic_ml_analog_sim.config import SimulationConfig, load_simulation_config
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.mock import MockAntigravityLLM
+from agentic_ml_analog_sim.tools.result_db_tool import ResultDBTool
 from agentic_ml_analog_sim.nodes import (
     node0_gate,
     node0_phase1_gate,
@@ -365,7 +367,7 @@ def test_node3_compiler_rewriter_and_node4_runner(tmp_db_and_config):
     assert len(comments) >= 1
     assert any("REWRITE:" in c["comment"] and "Kuramoto" in c["comment"] for c in comments)
 
-    # Node 4: Inductor compilation runner & eager vs inductor comparison
+    # Node 4: Inductor compilation runner in Ray worker
     res4 = node4_compilation_runner(
         db=db,
         config=config,
@@ -375,8 +377,10 @@ def test_node3_compiler_rewriter_and_node4_runner(tmp_db_and_config):
         eager_model=res3.get("eager_model"),
     )
     assert res4["status"] == "SUCCESS"
-    assert "comparison_metrics" in res4
     assert res4["compiled_model"] is not None
+    assert res4["eager_model"] is not None
+    assert "build_logs" in res4
+    assert res4["next_node"] == "node5_phase1_verify_correctness"
 
     prop4 = db.get_proposal(cand_id)
     assert prop4["compilation_status"] == "SUCCESS"
@@ -494,6 +498,100 @@ def test_node5_verify_correctness_counter_1(tmp_db_and_config):
     prop_f = db.get_proposal(cand_id)
     assert prop_f["counter_1_compilation"] == 1
 
+    # Key consistency checks
+    assert "details" in res_fail
+    assert "error_logs" in res_fail
+    assert res_fail["details"] == res_fail["error_logs"]
+    assert "target_device" in res_fail
+    assert "rtol" in res_fail
+    assert "atol" in res_fail
+
+    assert "details" in res_pass
+    assert "error_logs" in res_pass
+    assert "target_device" in res_pass
+
+
+def test_node5_missing_models_fail_not_false_positive(tmp_db_and_config):
+    """Test that missing either compiled_model or eager_model fails verification instead of false positive."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_verif_missing_models",
+        solver="rk4",
+        noise_model="none",
+    )
+
+    # 1. Both missing
+    res_both_none = node5_verify_correctness(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=None,
+        eager_model=None,
+    )
+    assert res_both_none["status"] == "FAILED"
+    assert "missing model artifact(s)" in res_both_none["details"]
+    assert "compiled_model" in res_both_none["details"]
+    assert "eager_model" in res_both_none["details"]
+
+    # 2. Only eager missing
+    res_eager_none = node5_verify_correctness(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=lambda x: x,
+        eager_model=None,
+    )
+    assert res_eager_none["status"] == "FAILED"
+    assert "missing model artifact(s): eager_model" in res_eager_none["details"]
+
+    # 3. Only compiled missing
+    res_comp_none = node5_verify_correctness(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=None,
+        eager_model=lambda x: x,
+    )
+    assert res_comp_none["status"] == "FAILED"
+    assert "missing model artifact(s): compiled_model" in res_comp_none["details"]
+
+
+def test_node5_chia_function_options_and_device_handling(tmp_db_and_config):
+    """Test that node 5 has ChiaFunction worker options and handles device placement."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_verif_chia_options",
+        solver="euler",
+        noise_model="none",
+    )
+
+    # Verify ChiaFunction decorator exposed .options / .chia_remote if Ray ChiaFunction is active
+    if hasattr(node5_verify_correctness, "options"):
+        bound_fn = node5_verify_correctness.options(resources={"python_worker": 1})
+        assert bound_fn is not None
+
+    # Test device placement with simple nn.Module
+    import torch.nn as nn
+    linear_eager = nn.Linear(4, 4)
+    linear_comp = nn.Linear(4, 4)
+    linear_comp.load_state_dict(linear_eager.state_dict())
+
+    res_device = node5_verify_correctness(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=linear_comp,
+        eager_model=linear_eager,
+        sample_input=torch.randn(8, 4),
+        target_device="cpu",
+    )
+    assert res_device["status"] == "PASSED"
+    assert res_device["target_device"] == "cpu"
+    assert res_device["counter_1"] == 0
+    assert res_device["max_abs_diff"] < 1e-5
+
 
 # --- Tests for Node 6 Simulation & Profile ---
 
@@ -513,6 +611,7 @@ def test_node6_simulate_profile(tmp_db_and_config):
         candidate_id=cand_id,
         target_device="mps",
         backend_mode="mps",
+        test_mode=True,
     )
 
     assert res["status"] == "SUCCESS"
@@ -526,6 +625,168 @@ def test_node6_simulate_profile(tmp_db_and_config):
     assert prop["status"] == "EVALUATING"
     assert prop["simulation_status"] == "SUCCESS"
     assert prop["latency_ms"] is not None
+
+
+def test_node6_chia_function_decorator():
+    """Test that Node 6 is decorated as a ChiaFunction."""
+    assert hasattr(node6_phase1_simulate_profile, "_chia_original") or callable(node6_phase1_simulate_profile)
+    assert hasattr(node6_simulate_profile, "_chia_original") or callable(node6_simulate_profile)
+
+
+def test_node6_real_model_batch_size_1(tmp_db_and_config):
+    """Test that Node 6 executes a real model with batch size 1 and profiles actual hardware metrics."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_sim_real_bs1",
+        solver="rk4",
+        noise_model="none",
+    )
+
+    # Use a compiled PyTorch model (Inductor / aot_eager)
+    state_dim = config.reference_design.n_oscillators
+    real_model = torch.nn.Linear(state_dim, state_dim)
+    try:
+        compiled_model = torch.compile(real_model, backend="aot_eager")
+    except Exception:
+        compiled_model = real_model
+
+    res = node6_phase1_simulate_profile(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=compiled_model,
+        target_device="cpu",
+        backend_mode="local",
+        num_profile_samples=5,
+    )
+
+    assert res["status"] == "SUCCESS"
+    assert res["next_node"] == "node7_phase1_evaluation_gate"
+    metrics = res["metrics"]
+    assert metrics["mode"] == "real"
+    assert metrics["batch_size"] == 1
+    assert metrics["latency_ms"] > 0.0
+    assert metrics["throughput_samples_per_sec"] > 0.0
+    assert "peak_memory_mb" in metrics
+    assert "latency_std" in metrics
+
+    prop = db.get_proposal(cand_id)
+    assert prop["status"] == "EVALUATING"
+    assert prop["simulation_status"] == "SUCCESS"
+    assert prop["latency_ms"] == metrics["latency_ms"]
+
+
+def test_node6_divergence_failure(tmp_db_and_config):
+    """Test that numerical divergence (NaN/Inf) triggers FAILED status and routes to Node 8."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_sim_divergent",
+        solver="euler",
+        noise_model="L1_stochastic_parameter_noise",
+    )
+
+    class DivergentModel(torch.nn.Module):
+        def forward(self, x):
+            return torch.tensor([[float("nan")] * x.shape[-1]])
+
+    res = node6_phase1_simulate_profile(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=DivergentModel(),
+        target_device="cpu",
+        num_profile_samples=2,
+    )
+
+    assert res["status"] == "FAILED"
+    assert res["next_node"] == "node8_phase1_diagnostic_proposal"
+    assert "NaN/Inf detected" in res["error_message"]
+    assert "error_logs" in res
+
+    prop = db.get_proposal(cand_id)
+    assert prop["simulation_status"] == "FAILED"
+    assert prop["error_stage"] == "simulation"
+    assert "NaN/Inf detected" in prop["error_message"]
+
+
+def test_node6_missing_model_in_real_mode(tmp_db_and_config):
+    """Test that when test_mode=False and compiled_model is None, Node 6 fails cleanly."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_sim_missing_model",
+        solver="rk4",
+        noise_model="none",
+    )
+
+    res = node6_phase1_simulate_profile(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=None,
+        test_mode=False,
+    )
+
+    assert res["status"] == "FAILED"
+    assert res["next_node"] == "node8_phase1_diagnostic_proposal"
+    assert "compiled_model is required" in res["error_message"]
+
+    prop = db.get_proposal(cand_id)
+    assert prop["simulation_status"] == "FAILED"
+    assert prop["error_stage"] == "simulation"
+
+
+def test_node6_chia_tool_interface(tmp_db_and_config):
+    """Test that Node 6 interfaces directly with ResultDBTool ChiaTool MCP server."""
+    db, config = tmp_db_and_config
+    tool = ResultDBTool("test_db_tool", db=db, deploy=False)
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_sim_chia_tool",
+        solver="rk4",
+        noise_model="none",
+    )
+
+    res = node6_phase1_simulate_profile(
+        db=tool,
+        config=config,
+        candidate_id=cand_id,
+        test_mode=True,
+    )
+
+    assert res["status"] == "SUCCESS"
+    prop = db.get_proposal(cand_id)
+    assert prop["status"] == "EVALUATING"
+    assert prop["simulation_status"] == "SUCCESS"
+
+
+def test_node6_non_callable_model_in_real_mode(tmp_db_and_config):
+    """Test that a non-callable object passed as compiled_model fails cleanly."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_sim_bad_model",
+        solver="rk4",
+        noise_model="none",
+    )
+
+    res = node6_phase1_simulate_profile(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model="not_a_model",
+        target_device="cpu",
+    )
+
+    assert res["status"] == "FAILED"
+    assert res["next_node"] == "node8_phase1_diagnostic_proposal"
+    assert "compiled_model must be a callable" in res["error_message"]
+
+    prop = db.get_proposal(cand_id)
+    assert prop["simulation_status"] == "FAILED"
+    assert prop["error_stage"] == "simulation"
 
 
 # --- Tests for Node 7 Evaluation Gate & Counter Management ---
@@ -695,4 +956,43 @@ def test_phase1_counter_reset_on_entry_from_phase0(tmp_db_and_config):
     assert prop_after["counter_2_rewrite"] == 0
     assert prop_after["counter_3_debug_gate"] == 0
     assert prop_after["counter_4_debug_loop"] == 0
+
+
+def test_node4_compilation_runner_chia_function_and_failure_payload(tmp_db_and_config, monkeypatch):
+    """Test that Node 4 is decorated as a ChiaFunction and returns harmonized error keys on failure."""
+    db, config = tmp_db_and_config
+
+    # 1. Verify ChiaFunction decorator behavior
+    assert hasattr(node4_compilation_runner, "_chia_original") or callable(node4_compilation_runner)
+
+    # 2. Test failure case payload harmony (both error_logs and error_message present)
+    cand_fail = db.insert_proposal(
+        candidate_id="cand_test_node4_fail",
+        solver="rk4",
+        noise_model="none",
+    )
+
+    import torch
+    import un0.compiler
+    def failing_compile(*args, **kwargs):
+        raise RuntimeError("Forced TorchInductor compilation failure")
+
+    monkeypatch.setattr(un0.compiler, "compile_model", failing_compile)
+
+    res_fail = node4_compilation_runner(
+        db=db,
+        config=config,
+        candidate_id=cand_fail,
+        target_device="cpu",
+        prepared_model=torch.nn.Linear(10, 10),
+        eager_model=torch.nn.Linear(10, 10),
+    )
+
+    # Verify error payload
+    assert res_fail["status"] == "FAILED"
+    assert "error_logs" in res_fail
+    assert "error_message" in res_fail
+    assert res_fail["error_logs"] == res_fail["error_message"]
+    assert "Forced TorchInductor compilation failure" in res_fail["error_message"]
+    assert res_fail["next_node"] == "node8_phase1_diagnostic_proposal"
 

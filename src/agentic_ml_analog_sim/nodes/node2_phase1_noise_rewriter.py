@@ -2,17 +2,25 @@
 
 Applies or registers noise wrapper rewrite for Un-0 model and updates database status.
 Implements deterministic reuse when noise model is already registered (with null token consumption)
-and agentic LLM rewrite when noise model is unregistered or forced, capturing real token metrics.
+and agentic LLM rewrite using the Chia API and FastMCP tools (ResultDBTool, NoisePapersTool, Un0RewriterTool)
+when noise model is unregistered or forced, capturing real token metrics.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
 from typing import Any, Dict, Optional
 
+from chia.base.ChiaFunction import ChiaFunction
+
 from agentic_ml_analog_sim.config import SimulationConfig
 from agentic_ml_analog_sim.db.database import ResultDatabase
+from agentic_ml_analog_sim.tools.noise_papers_tool import NoisePapersTool
+from agentic_ml_analog_sim.tools.result_db_tool import ResultDBTool
+from agentic_ml_analog_sim.tools.un0_rewriter_tool import Un0RewriterTool
 
 logger = logging.getLogger("agentic_ml_analog_sim.nodes.node2_phase1_noise_rewriter")
 
@@ -40,6 +48,54 @@ def _resolve_llm(llm: Optional[Any] = None, config: Optional[SimulationConfig] =
         return MockAntigravityLLM(mode="valid", model=model, effort=effort, extra_cli_args=extra_cli_args)
 
 
+def _extract_registered_noise_from_text(raw_text: str) -> Optional[str]:
+    """Parse JSON or string output from agent response to extract registered noise model name."""
+    if not raw_text or not isinstance(raw_text, str):
+        return None
+
+    # 1. Direct JSON parse
+    try:
+        data = json.loads(raw_text.strip())
+        if isinstance(data, dict):
+            val = data.get("noise_name") or data.get("rewrite_name") or data.get("registered_noise")
+            if val:
+                return str(val).strip()
+    except Exception:
+        pass
+
+    # 2. Markdown fenced JSON block
+    match_fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw_text, re.DOTALL)
+    if match_fenced:
+        try:
+            data = json.loads(match_fenced.group(1).strip())
+            if isinstance(data, dict):
+                val = data.get("noise_name") or data.get("rewrite_name") or data.get("registered_noise")
+                if val:
+                    return str(val).strip()
+        except Exception:
+            pass
+
+    # 3. Try finding any JSON object in text
+    match_obj = re.search(r"\{[^{}]*(?:noise_name|rewrite_name|registered_noise)[^{}]*\}", raw_text, re.DOTALL)
+    if match_obj:
+        try:
+            data = json.loads(match_obj.group(0).strip())
+            if isinstance(data, dict):
+                val = data.get("noise_name") or data.get("rewrite_name") or data.get("registered_noise")
+                if val:
+                    return str(val).strip()
+        except Exception:
+            pass
+
+    # 4. Regex string capture for noise_name / rewrite_name
+    match_key = re.search(r'["\']?(?:noise_name|rewrite_name|registered_noise)["\']?\s*:\s*["\']([^"\']+)["\']', raw_text)
+    if match_key:
+        return match_key.group(1).strip()
+
+    return None
+
+
+@ChiaFunction()
 def node2_phase1_noise_rewriter(
     db: ResultDatabase,
     config: SimulationConfig,
@@ -55,8 +111,13 @@ def node2_phase1_noise_rewriter(
         and token consumption is null (0 tokens recorded).
 
     Agentic behavior:
-        If the noise model is not registered or forced, invokes the LLM agent to generate
-        the noise wrapper implementation adhering to physical noise guidelines and registers it.
+        If the noise model is not registered or forced, invokes the LLM agent using the Chia API
+        equipped with three MCP tools:
+        1. result_db: query proposal details and record cross-phase comments.
+        2. noise_papers: query physical hardware noise modeling skill (Tiers 0-5), ONN channels, and literature.
+        3. un0_rewriter: inspect Un-0 codebase and register the synthesized noise wrapper directly
+           via `un0_register_noise_rewrite`.
+
         Real token consumption metrics are captured from the agent framework and
         persisted to the ResultDatabase.
 
@@ -123,29 +184,76 @@ def node2_phase1_noise_rewriter(
 
     # Nondeterministic / Agentic branch: unregistered noise model or forced rewrite
     logger.info(
-        "Node 2: Noise model '%s' requires agentic implementation/rewrite. Invoking LLM.",
+        "Node 2: Noise model '%s' requires agentic implementation/rewrite. Invoking LLM via Chia API.",
         noise_name,
     )
-    active_llm = _resolve_llm(llm, config)
-    start_time = time.time()
 
+    # 1. Instantiate the 3 Chia Tools
+    result_db_tool = ResultDBTool(name="result_db", db=db, deploy=False)
+    noise_papers_tool = NoisePapersTool(name="noise_papers", auto_start=False)
+    un0_rewriter_tool = Un0RewriterTool(name="un0_rewriter", auto_start=False)
+
+    # Extract proposal parameters and instructions from previous nodes
+    noise_params = proposal.get("noise_params") or {}
+    if isinstance(noise_params, str):
+        try:
+            noise_params = json.loads(noise_params)
+        except Exception:
+            noise_params = {}
+
+    solver_name = proposal.get("solver", "euler")
+    phase_1_prompt = proposal.get("phase_1_prompt") or ""
+
+    # 2. Formulate Agentic Prompt
     prompt_text = (
-        f"Implement a hardware noise wrapper model named '{noise_name}' for Kuramoto physical analog simulation "
-        f"in the Un-0 repository. The wrapper must inherit from torch.nn.Module, wrap the underlying dynamics, "
-        f"and implement `forward(state, t, drive) -> Tensor`. "
-        f"Register the model with `@register_noise_model('{noise_name}')`."
+        f"# Phase 1 Hardware Noise Rewriter Agent (Node 2)\n\n"
+        f"You are the Hardware Noise Rewriter Agent for Phase 1 of the Un-0 Analog ML simulation loop.\n"
+        f"Your task is to dynamically implement and register a hardware noise wrapper model named '{noise_name}' "
+        f"for Kuramoto physical analog simulation in the Un-0 repository, matching the candidate specifications.\n\n"
+        f"Candidate Specifications:\n"
+        f"- Candidate ID: {candidate_id}\n"
+        f"- Target Noise Model: {noise_name}\n"
+        f"- Noise Parameters: {json.dumps(noise_params)}\n"
+        f"- Solver Scheme: {solver_name}\n"
+        f"- Exploration Prompt / Context: {phase_1_prompt}\n\n"
+        f"Available Chia Tools:\n"
+        f"1. `result_db`: query proposal details and record cross-phase comments via `add_comment`.\n"
+        f"2. `noise_papers`: access hardware noise modeling skill guidance via `get_noise_tier_guide(tier)` "
+        f"(Tier 0 static mismatch, Tier 1 stochastic/thermal, Tier 2 interface quantization/DAC/ADC, "
+        f"Tier 3 composite drift/aging, Tier 4 physics-informed/SDE, Tier 5 behavioral twin), "
+        f"`get_onn_noise_channels()`, and literature citations via `get_noise_literature_references()`.\n"
+        f"3. `un0_rewriter`: inspect existing Un-0 noise wrappers (`un0/noise/`), dynamics definitions, "
+        f"and register your new noise wrapper implementation into Un-0 using `un0_register_noise_rewrite`.\n\n"
+        f"Implementation Directives:\n"
+        f"- The wrapper must inherit from `torch.nn.Module`.\n"
+        f"- Wrap the underlying dynamics (e.g. `self.dynamics = dynamics`).\n"
+        f"- Implement `forward(self, state: torch.Tensor, t: torch.Tensor, drive: torch.Tensor) -> torch.Tensor`.\n"
+        f"- Apply noise perturbations according to the requested physical tier/mechanism.\n"
+        f"- Register your wrapper using `un0_rewriter.un0_register_noise_rewrite(\n"
+        f"    noise_name='{noise_name}',\n"
+        f"    candidate_id='{candidate_id}',\n"
+        f"    code='...python code implementing the nn.Module and decorated with @register_noise_model...',\n"
+        f"    description='...summary of physical noise modeling mechanism...'\n"
+        f")`.\n"
+        f"- Respond with a JSON object: {{\"status\": \"SUCCESS\", \"noise_name\": \"{noise_name}\", \"description\": \"...\"}}."
     )
 
+    active_llm = _resolve_llm(llm, config)
+    start_time = time.time()
     query_result = None
+
     try:
         if hasattr(active_llm, "prompt") and callable(active_llm.prompt):
-            query_result = active_llm.prompt(prompt_text)
+            query_result = active_llm.prompt(
+                prompt_text,
+                tools=[result_db_tool, noise_papers_tool, un0_rewriter_tool],
+            )
     except Exception as exc:
         logger.warning("Node 2: LLM prompt call failed: %s", exc)
 
     elapsed = max(0.1, time.time() - start_time)
 
-    # Extract REAL token metrics from query_result or LLM history
+    # 3. Extract REAL token metrics from query_result or LLM history
     usage = getattr(query_result, "usage", None) if query_result is not None else None
     if not usage and hasattr(active_llm, "history") and active_llm.history:
         usage = active_llm.history[-1].get("usage")
@@ -169,6 +277,7 @@ def node2_phase1_noise_rewriter(
     )
 
     if total_tokens > 0:
+        cost_usd = (prompt_tokens * 0.00000125) + (completion_tokens * 0.000005)
         db.record_token_usage(
             phase="phase_1",
             node_name="node2_phase1_noise_rewriter",
@@ -176,33 +285,46 @@ def node2_phase1_noise_rewriter(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
-            cost_usd=0.0,
+            cost_usd=cost_usd,
             candidate_id=candidate_id,
             duration_seconds=elapsed,
         )
 
-    # Register dynamic fallback noise class if not in registry
-    if not is_registered and register_noise_model is not None:
-        import torch
-        from torch import nn
+    # 4. Resolve registered noise model from tool or registry
+    registered_noise_name = (
+        un0_rewriter_tool.get_registered_noise(candidate_id=candidate_id)
+        or un0_rewriter_tool.last_registered_noise
+    )
 
-        @register_noise_model(noise_name)
-        class _DynamicGeneratedNoise(nn.Module):
-            def __init__(self, dynamics, sigma: float = 0.01):
-                super().__init__()
-                self.dynamics = dynamics
-                self.sigma = float(sigma)
+    if not registered_noise_name and query_result is not None:
+        raw_res = getattr(query_result, "result", str(query_result))
+        registered_noise_name = _extract_registered_noise_from_text(raw_res)
 
-            def forward(self, state, t, drive):
-                vel = self.dynamics(state, t, drive)
-                noise = torch.randn_like(vel) * self.sigma
-                return vel + noise
+    if not registered_noise_name:
+        registered_noise_name = noise_name
 
-        noise_cls = _DynamicGeneratedNoise
-    else:
-        noise_cls = get_noise_model(noise_name) if get_noise_model and noise_name in NOISE_REGISTRY else None
+    # Check if the class is now available in NOISE_REGISTRY
+    noise_cls = None
+    if get_noise_model and registered_noise_name in NOISE_REGISTRY:
+        noise_cls = get_noise_model(registered_noise_name)
+    elif get_noise_model and noise_name in NOISE_REGISTRY:
+        noise_cls = get_noise_model(noise_name)
 
-    # Update DB status
+    if noise_cls is None:
+        error_msg = (
+            f"Node 2: Agent failed to register noise model '{noise_name}' "
+            f"into NOISE_REGISTRY for candidate '{candidate_id}'."
+        )
+        logger.error(error_msg)
+        db.update_execution_status(
+            candidate_id,
+            rewrite_noise_status="FAILED",
+            error_stage="node2_phase1_noise_rewriter",
+            error_message=error_msg,
+        )
+        raise RuntimeError(error_msg)
+
+    # 5. Update DB status
     db.update_execution_status(
         candidate_id,
         rewrite_noise_status="SUCCESS",
@@ -211,7 +333,7 @@ def node2_phase1_noise_rewriter(
     return {
         "candidate_id": candidate_id,
         "status": "SUCCESS",
-        "noise_model": noise_name,
+        "noise_model": registered_noise_name,
         "noise_cls": noise_cls,
         "deterministic": False,
         "tokens_consumed": total_tokens,
