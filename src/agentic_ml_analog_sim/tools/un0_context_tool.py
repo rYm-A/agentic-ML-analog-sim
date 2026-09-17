@@ -497,6 +497,21 @@ class Un0ContextTool(ChiaTool):
             logging_level: Logging level for tool logger.
         """
         super().__init__(name, task_options=task_options, logging_level=logging_level)
+        self.setup(repo_root=repo_root)
+
+        # Auto-start Ray actor if requested or if Ray cluster is active
+        should_start = auto_start is True or (auto_start is None and ray.is_initialized())
+        if should_start:
+            try:
+                super().__post_init__()
+            except Exception as e:
+                self.logger.warning(
+                    f"{self.__class__.__name__}: Ray deployment skipped or failed ({e}). "
+                    "Operating in direct local execution mode."
+                )
+
+    def setup(self, repo_root: Optional[Union[str, Path]] = None) -> None:
+        """Register MCP tool endpoints with FastMCP according to Chia documentation."""
         self.context = Un0Context(repo_root=repo_root)
 
         # Register tools with FastMCP instance
@@ -505,11 +520,6 @@ class Un0ContextTool(ChiaTool):
         self.mcp.add_tool(self.un0_search_code, name="un0_search_code")
         self.mcp.add_tool(self.un0_list_modules, name="un0_list_modules")
         self.mcp.add_tool(self.un0_get_model_summary, name="un0_get_model_summary")
-
-        # Auto-start Ray actor if requested or if Ray cluster is active
-        should_start = auto_start is True or (auto_start is None and ray.is_initialized())
-        if should_start:
-            super().__post_init__()
 
     def un0_read_file(
         self,

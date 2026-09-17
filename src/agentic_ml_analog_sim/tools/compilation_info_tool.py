@@ -36,8 +36,10 @@ from mcp.server.fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REGENERATIVE_CORNN_ROOT = Path(
-    os.environ.get("REGENERATIVE_CORNN_ROOT", "/Users/chia/ChiaWorkspace/RegenariveCoRNN")
+DEFAULT_REGENERATIVE_CORNN_ROOT: Optional[Path] = (
+    Path(os.environ["REGENERATIVE_CORNN_ROOT"]).resolve()
+    if "REGENERATIVE_CORNN_ROOT" in os.environ
+    else None
 )
 
 TORCH_COMPILE_GUIDES: Dict[str, str] = {
@@ -102,12 +104,31 @@ class CompilationInfoTool(ChiaTool):
         logging_level: int = logging.INFO,
     ) -> None:
         super().__init__(name, task_options=task_options, logging_level=logging_level)
-        self.repo_root = Path(repo_root or os.environ.get("REGENERATIVE_CORNN_ROOT") or DEFAULT_REGENERATIVE_CORNN_ROOT).resolve()
-        self.is_available = self.repo_root.is_dir()
+        self.setup(repo_root=repo_root)
+
+        should_start = auto_start is True or (auto_start is None and ray.is_initialized())
+        if should_start:
+            try:
+                super().__post_init__()
+            except Exception as e:
+                self.logger.warning(
+                    f"{self.__class__.__name__}: Ray deployment skipped or failed ({e}). "
+                    "Operating in direct local execution mode."
+                )
+
+    def setup(self, repo_root: Optional[Union[str, Path]] = None) -> None:
+        """Register MCP tool endpoints and configure reference repository root per Chia documentation."""
+        target_path = repo_root or os.environ.get("REGENERATIVE_CORNN_ROOT") or DEFAULT_REGENERATIVE_CORNN_ROOT
+        if target_path:
+            self.repo_root: Optional[Path] = Path(target_path).resolve()
+            self.is_available: bool = self.repo_root.is_dir()
+        else:
+            self.repo_root = None
+            self.is_available = False
 
         if not self.is_available:
             logger.warning(
-                "RegenerativeCoRNN repository not found at '%s'. "
+                "RegenerativeCoRNN repository not found (path: %s). "
                 "Bypassing all RegenerativeCoRNN reference inspection logic and disabling reference tools.",
                 self.repo_root,
             )
@@ -119,10 +140,6 @@ class CompilationInfoTool(ChiaTool):
 
         # Static PyTorch compile documentation is always available
         self.mcp.add_tool(self.get_torch_compile_guide, name="get_torch_compile_guide")
-
-        should_start = auto_start is True or (auto_start is None and ray.is_initialized())
-        if should_start:
-            super().__post_init__()
 
     def get_torch_compile_guide(self, topic: str = "all") -> str:
         """Query official PyTorch compile, Dynamo, Inductor, and HOP while_loop documentation.
@@ -158,10 +175,11 @@ class CompilationInfoTool(ChiaTool):
         Returns:
             Line-numbered file contents.
         """
+        if not self.is_available or self.repo_root is None or not self.repo_root.is_dir():
+            logger.warning("RegenerativeCoRNN repository not configured or directory not found at '%s'; read operation bypassed.", self.repo_root)
+            return f"Warning: RegenerativeCoRNN repository not configured or directory not found at '{self.repo_root}'. Inspection bypassed."
+
         target = (self.repo_root / relative_path).resolve()
-        if not self.is_available or not self.repo_root.is_dir():
-            logger.warning("RegenerativeCoRNN repository not found at '%s'; read operation bypassed.", self.repo_root)
-            return f"Warning: RegenerativeCoRNN repository not found at '{self.repo_root}'. Inspection bypassed."
 
         try:
             target.relative_to(self.repo_root)
@@ -196,8 +214,8 @@ class CompilationInfoTool(ChiaTool):
         Returns:
             List of relative file paths.
         """
-        if not self.is_available or not self.repo_root.is_dir():
-            logger.warning("RegenerativeCoRNN repository not found at '%s'; listing bypassed.", self.repo_root)
+        if not self.is_available or self.repo_root is None or not self.repo_root.is_dir():
+            logger.warning("RegenerativeCoRNN repository not configured or directory not found at '%s'; listing bypassed.", self.repo_root)
             return []
 
         results: List[str] = []
@@ -219,9 +237,9 @@ class CompilationInfoTool(ChiaTool):
         Returns:
             Matching file paths and line snippets.
         """
-        if not self.is_available or not self.repo_root.is_dir():
-            logger.warning("RegenerativeCoRNN repository not found at '%s'; search operation bypassed.", self.repo_root)
-            return f"Warning: RegenerativeCoRNN repository not found at '{self.repo_root}'. Search bypassed."
+        if not self.is_available or self.repo_root is None or not self.repo_root.is_dir():
+            logger.warning("RegenerativeCoRNN repository not configured or directory not found at '%s'; search operation bypassed.", self.repo_root)
+            return f"Warning: RegenerativeCoRNN repository not configured or directory not found at '{self.repo_root}'. Search bypassed."
 
         matches: List[str] = []
         q_lower = query.lower()

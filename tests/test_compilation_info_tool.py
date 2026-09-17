@@ -28,7 +28,13 @@ def test_compilation_info_tool_guides():
     assert "Topic 'unknown_topic' not found" in guide_unknown
 
 
-def test_compilation_info_tool_regenerative_cornn():
+def test_compilation_info_tool_regenerative_cornn(monkeypatch):
+    import os
+    if "REGENERATIVE_CORNN_ROOT" not in os.environ:
+        workspace_cornn = Path(__file__).resolve().parents[2] / "RegenariveCoRNN"
+        if workspace_cornn.is_dir():
+            monkeypatch.setenv("REGENERATIVE_CORNN_ROOT", str(workspace_cornn))
+
     tool = CompilationInfoTool(auto_start=False)
 
     files = tool.list_regenerative_cornn_files()

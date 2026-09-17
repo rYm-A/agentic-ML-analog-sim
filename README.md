@@ -303,7 +303,18 @@ conda activate chia_env
 # 3. Install packages in editable mode
 pip install -e .
 pip install -e Un-0
+
+# 4. Optional: Configure external reference repository in shell (~/.zshrc)
+export REGENERATIVE_CORNN_ROOT="/path/to/RegenariveCoRNN"
 ```
+
+### Environment Variables
+
+Configure optional environment variables in your shell (e.g., `~/.zshrc`):
+
+| Variable | Description | Behavior when Unset / Missing |
+| :--- | :--- | :--- |
+| `REGENERATIVE_CORNN_ROOT` | Path to the local `RegenariveCoRNN` repository. Used by `CompilationInfoTool` in Phase 1 (Node 3) for reference code inspection and keyword searching (`read_regenerative_cornn_file`, `list_regenerative_cornn_files`, `search_regenerative_cornn`). | If unset or pointing to a non-existent directory, `CompilationInfoTool` logs a warning and gracefully bypasses all reference repository inspection tools, while continuing to serve static PyTorch 2.x compile guides (`get_torch_compile_guide`). Node 3 hides reference tools from the LLM agent and continues normal loop execution. |
 
 ---
 

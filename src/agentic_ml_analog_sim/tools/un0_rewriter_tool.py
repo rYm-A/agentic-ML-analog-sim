@@ -52,12 +52,27 @@ class Un0RewriterTool(ChiaTool):
         logging_level: int = logging.INFO,
     ) -> None:
         super().__init__(name, task_options=task_options, logging_level=logging_level)
+        self.setup(repo_root=repo_root)
+
+        should_start = auto_start is True or (auto_start is None and ray.is_initialized())
+        if should_start:
+            try:
+                super().__post_init__()
+            except Exception as e:
+                self.logger.warning(
+                    f"{self.__class__.__name__}: Ray deployment skipped or failed ({e}). "
+                    "Operating in direct local execution mode."
+                )
+
+    def setup(self, repo_root: Optional[Union[str, Path]] = None) -> None:
+        """Initialize repository context and register FastMCP tool methods per Chia documentation."""
         self.repo_root = resolve_un0_root(repo_root)
         self.context = Un0Context(repo_root=self.repo_root)
 
         # Track registered rewrites directly on the tool
         self.last_registered_rewrite: Optional[str] = None
         self.last_registered_solver: Optional[str] = None
+        self.last_registered_noise: Optional[str] = None
         self.last_registration_details: Optional[Dict[str, Any]] = None
         self.registrations_by_candidate: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -71,11 +86,8 @@ class Un0RewriterTool(ChiaTool):
         # Register MCP rewriter mutation tools
         self.mcp.add_tool(self.un0_register_compiler_rewrite, name="un0_register_compiler_rewrite")
         self.mcp.add_tool(self.un0_register_solver_rewrite, name="un0_register_solver_rewrite")
+        self.mcp.add_tool(self.un0_register_noise_rewrite, name="un0_register_noise_rewrite")
         self.mcp.add_tool(self.un0_list_registered_rewrites, name="un0_list_registered_rewrites")
-
-        should_start = auto_start is True or (auto_start is None and ray.is_initialized())
-        if should_start:
-            super().__post_init__()
 
     # --- Inspection methods delegated to Un0Context ---
 
@@ -337,6 +349,132 @@ class Un0RewriterTool(ChiaTool):
         self.last_registration_details = res
         self.registrations_by_candidate.setdefault(clean_cand, []).append(res)
         return res
+
+    def un0_register_noise_rewrite(
+        self,
+        noise_name: str,
+        candidate_id: str,
+        code: str,
+        description: str = "",
+    ) -> Dict[str, Any]:
+        """Validate and register a hardware noise wrapper model into un0.noise.NOISE_REGISTRY.
+
+        Saves code to un0/noise/rewrites/<candidate_id>_<clean_name>.py, executes module,
+        and ensures the nn.Module class is registered in un0.noise.NOISE_REGISTRY.
+
+        Args:
+            noise_name: Target noise registry identifier (e.g. 'custom_phase_jitter', 'drift_tier3').
+            candidate_id: Proposal candidate ID.
+            code: Python source code implementing the noise wrapper model (inheriting from nn.Module).
+            description: Optional summary of the noise mechanism and physical rationale.
+
+        Returns:
+            Dict containing registration status, noise_name, candidate_id, and file_path.
+        """
+        clean_name = noise_name.strip().replace(" ", "_")
+        clean_cand = candidate_id.strip().replace(" ", "_")
+
+        # 1. AST syntax validation
+        try:
+            ast.parse(code)
+        except SyntaxError as syn_err:
+            return {
+                "status": "ERROR",
+                "error": f"SyntaxError in noise wrapper code: {syn_err}",
+                "noise_name": clean_name,
+                "candidate_id": clean_cand,
+            }
+
+        # 2. Persist code into Un-0 noise rewrites directory
+        noise_rewrites_dir = self.repo_root / "un0" / "noise" / "rewrites"
+        noise_rewrites_dir.mkdir(parents=True, exist_ok=True)
+        init_file = noise_rewrites_dir / "__init__.py"
+        if not init_file.exists():
+            init_file.write_text('"""Dynamic noise rewrites."""\n', encoding="utf-8")
+
+        target_file = noise_rewrites_dir / f"{clean_cand}_{clean_name}.py"
+        try:
+            target_file.write_text(code, encoding="utf-8")
+        except Exception as write_err:
+            return {
+                "status": "ERROR",
+                "error": f"Failed to write noise file: {write_err}",
+                "noise_name": clean_name,
+                "candidate_id": clean_cand,
+            }
+
+        # 3. Import and register into NOISE_REGISTRY
+        from un0.noise import NOISE_REGISTRY, register_noise_model
+
+        module_name = f"un0.noise.rewrites.{clean_cand}_{clean_name}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, target_file)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not load spec for module {module_name}")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            # Check if registered via decorator or directly
+            if clean_name not in NOISE_REGISTRY:
+                candidate_cls = (
+                    getattr(mod, clean_name, None)
+                    or getattr(mod, f"{clean_name}Noise", None)
+                    or getattr(mod, "NoiseModel", None)
+                    or getattr(mod, "NoiseWrapper", None)
+                )
+                if candidate_cls is None:
+                    # Look for any class or callable defined in the module that is not private
+                    for attr_name in dir(mod):
+                        val = getattr(mod, attr_name)
+                        if isinstance(val, type) and not attr_name.startswith("_") and getattr(val, "__module__", "") == module_name:
+                            candidate_cls = val
+                            break
+
+                if candidate_cls is not None:
+                    NOISE_REGISTRY[clean_name] = candidate_cls
+                else:
+                    return {
+                        "status": "ERROR",
+                        "error": f"Module {target_file.name} did not register '{clean_name}' or define a noise wrapper class.",
+                        "noise_name": clean_name,
+                        "candidate_id": clean_cand,
+                    }
+        except Exception as load_err:
+            logger.error("Failed to load and register noise rewrite: %s", load_err)
+            return {
+                "status": "ERROR",
+                "error": f"Exception loading noise module: {load_err}",
+                "noise_name": clean_name,
+                "candidate_id": clean_cand,
+            }
+
+        logger.info(
+            "Successfully registered noise rewrite '%s' for candidate '%s' into NOISE_REGISTRY",
+            clean_name,
+            clean_cand,
+        )
+        res = {
+            "status": "SUCCESS",
+            "noise_name": clean_name,
+            "candidate_id": clean_cand,
+            "file_path": str(target_file),
+            "description": description,
+        }
+        self.last_registered_noise = clean_name
+        self.last_registration_details = res
+        self.registrations_by_candidate.setdefault(clean_cand, []).append(res)
+        return res
+
+    def get_registered_noise(self, candidate_id: Optional[str] = None) -> Optional[str]:
+        """Retrieve registered noise model name directly from tool state."""
+        if candidate_id:
+            cand_clean = candidate_id.strip().replace(" ", "_")
+            cand_records = self.registrations_by_candidate.get(cand_clean)
+            if cand_records:
+                for rec in reversed(cand_records):
+                    if "noise_name" in rec:
+                        return rec["noise_name"]
+        return self.last_registered_noise
 
     def get_registered_solver(self, candidate_id: Optional[str] = None) -> Optional[str]:
         """Retrieve registered solver name directly from tool state."""
