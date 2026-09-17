@@ -47,3 +47,21 @@ def test_compilation_info_tool_regenerative_cornn():
     # Test path traversal protection
     traversal_res = tool.read_regenerative_cornn_file("../../etc/passwd")
     assert "Error: Path" in traversal_res
+
+
+def test_compilation_info_tool_missing_repo_bypasses_and_warns(caplog):
+    tool = CompilationInfoTool(repo_root="/nonexistent/RegenariveCoRNN", auto_start=False)
+
+    assert tool.is_available is False
+    assert any("RegenerativeCoRNN repository not found" in record.message for record in caplog.records)
+
+    # All RegenerativeCoRNN logic is bypassed gracefully
+    assert tool.list_regenerative_cornn_files() == []
+    read_res = tool.read_regenerative_cornn_file("model/implicit_parallel.py")
+    assert "Inspection bypassed" in read_res
+    search_res = tool.search_regenerative_cornn("while_loop")
+    assert "Search bypassed" in search_res
+
+    # Static documentation continues to function
+    guide = tool.get_torch_compile_guide("while_loop")
+    assert "while_loop" in guide

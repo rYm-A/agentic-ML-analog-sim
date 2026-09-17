@@ -236,12 +236,36 @@ def node3_phase1_compiler_rewriter(
             )
             raise RuntimeError(error_msg)
 
-    # 3. Instantiate the 3 Chia Tools
+    # 3. Instantiate Chia Tools
     result_db_tool = ResultDBTool(name="result_db", db=db, deploy=False)
-    compilation_info_tool = CompilationInfoTool(name="compilation_info", auto_start=False)
     un0_rewriter_tool = Un0RewriterTool(name="un0_rewriter", auto_start=False)
 
+    tools = [result_db_tool, un0_rewriter_tool]
+    compilation_info_tool = CompilationInfoTool(name="compilation_info", auto_start=False)
+    if compilation_info_tool.is_available:
+        tools.append(compilation_info_tool)
+    else:
+        logger.warning(
+            "Node 3: RegenerativeCoRNN repository not found at '%s'. "
+            "Hiding compilation_info tool from agent and continuing normal execution.",
+            compilation_info_tool.repo_root,
+        )
+
     # 4. Formulate Agentic Prompt
+    tool_descriptions = [
+        "1. `result_db`: query proposal details, record comments, and check Pareto front.",
+    ]
+    if compilation_info_tool.is_available:
+        tool_descriptions.append(
+            "2. `compilation_info`: access official PyTorch compiler documentation (while_loop, associative_scan, "
+            "dynamic shapes, Inductor) and inspect reference HOP implementations in RegenerativeCoRNN (model/implicit_parallel.py)."
+        )
+    tool_descriptions.append(
+        f"{len(tool_descriptions) + 1}. `un0_rewriter`: read Un-0 codebase, inspect dynamics definitions, and register your functionalized "
+        "compiler rewrite into Un-0 using `un0_register_compiler_rewrite`."
+    )
+    tools_section = "\n".join(tool_descriptions)
+
     prompt_text = (
         f"# Phase 1 Compiler Rewriter Agent (Node 3)\n\n"
         f"You are the Compiler Rewriter Agent for Phase 1. Your task is to functionalize the Kuramoto "
@@ -257,11 +281,7 @@ def node3_phase1_compiler_rewriter(
         f"- Target Compilation Device: {target_device}\n"
         f"- Dynamic Batch Constraint: Batch size B >= 1 with no upper bound.\n\n"
         f"Available Chia Tools:\n"
-        f"1. `result_db`: query proposal details, record comments, and check Pareto front.\n"
-        f"2. `compilation_info`: access official PyTorch compiler documentation (while_loop, associative_scan, "
-        f"dynamic shapes, Inductor) and inspect reference HOP implementations in RegenerativeCoRNN (model/implicit_parallel.py).\n"
-        f"3. `un0_rewriter`: read Un-0 codebase, inspect dynamics definitions, and register your functionalized "
-        f"compiler rewrite into Un-0 using `un0_register_compiler_rewrite`.\n\n"
+        f"{tools_section}\n\n"
         f"- Directives:\n"
         f"- Do NOT use static Python while-loops that cause graph breaks in TorchDynamo.\n"
         f"- Functionalize using PyTorch Higher-Order Operators (`torch._higher_order_ops.while_loop`) or unrolled functional operators.\n"
@@ -277,7 +297,7 @@ def node3_phase1_compiler_rewriter(
         if hasattr(active_llm, "prompt") and callable(active_llm.prompt):
             query_result = active_llm.prompt(
                 prompt_text,
-                tools=[result_db_tool, compilation_info_tool, un0_rewriter_tool],
+                tools=tools,
             )
     except Exception as llm_err:
         logger.error("Node 3: LLM prompt failed: %s", llm_err)
@@ -294,6 +314,7 @@ def node3_phase1_compiler_rewriter(
     t_tok = (usage.get("total_tokens") or (p_tok + c_tok)) if isinstance(usage, dict) else 0
 
     if t_tok > 0:
+        cost_usd = (p_tok * 0.00000125) + (c_tok * 0.000005)
         db.record_token_usage(
             phase="phase_1",
             node_name="node3_phase1_compiler_rewriter",
@@ -301,7 +322,7 @@ def node3_phase1_compiler_rewriter(
             prompt_tokens=p_tok,
             completion_tokens=c_tok,
             total_tokens=t_tok,
-            cost_usd=0.0,
+            cost_usd=cost_usd,
             candidate_id=candidate_id,
             duration_seconds=elapsed,
         )
@@ -338,12 +359,10 @@ def node3_phase1_compiler_rewriter(
         if cand_matches:
             rewrite_name = cand_matches[-1]
         else:
-            # Fallback check if agent referred to an existing pre-registered rewrite (e.g. hop_while_loop)
+            # Check if agent referred to a valid registered rewrite in its response
             extracted = _extract_rewrite_name(raw_result)
             if extracted and extracted in COMPILER_REGISTRY:
                 rewrite_name = extracted
-            elif "hop_while_loop" in raw_result and "hop_while_loop" in COMPILER_REGISTRY:
-                rewrite_name = "hop_while_loop"
 
     if not rewrite_name or rewrite_name not in COMPILER_REGISTRY:
         error_msg = (

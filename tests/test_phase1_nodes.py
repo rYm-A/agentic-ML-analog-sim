@@ -253,16 +253,81 @@ def test_node1_and_node2_rewriters(tmp_db_and_config):
     assert res1_agentic["status"] == "SUCCESS"
     assert res1_agentic["deterministic"] is False
     assert res1_agentic["tokens_consumed"] > 0
+    assert callable(res1_agentic["solver_fn"])
+
+    # Verify the 3 Chia tools were exposed to the Node 1 agent
+    node1_call = [call for call in mock_llm.history if "node 1" in call["user_message"].lower() or "solver rewriter" in call["user_message"].lower()][-1]
+    assert "result_db" in node1_call["tools"]
+    assert "solver_papers" in node1_call["tools"]
+    assert "un0_rewriter" in node1_call["tools"]
 
     res2_agentic = node2_noise_rewriter(db=db, config=config, candidate_id=agentic_id, llm=mock_llm)
     assert res2_agentic["status"] == "SUCCESS"
     assert res2_agentic["deterministic"] is False
     assert res2_agentic["tokens_consumed"] > 0
+    assert res2_agentic["noise_cls"] is not None
+
+    # Verify the 3 Chia tools were exposed to the Node 2 agent
+    node2_call = [call for call in mock_llm.history if "node 2" in call["user_message"].lower() or "noise rewriter" in call["user_message"].lower()][-1]
+    assert "result_db" in node2_call["tools"]
+    assert "noise_papers" in node2_call["tools"]
+    assert "un0_rewriter" in node2_call["tools"]
 
     # Verify real token usage recorded when LLM actually executed
     summary_agentic = db.get_token_usage_summary(phase="phase_1")
     assert summary_agentic["overall"]["total_calls"] >= 2
     assert summary_agentic["overall"]["total_prompt_tokens"] > 0
+
+
+def test_node2_noise_rewriter_no_fallback_on_failure(tmp_db_and_config):
+    """Test that Node 2 does NOT silently fall back to hardcoded Gaussian noise on failure."""
+    import pytest
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_test_noise_fail",
+        solver="euler",
+        noise_model="unregistered_impossible_noise_v99",
+    )
+
+    failing_llm = MockAntigravityLLM(mode="invalid_noise_rewrite")
+
+    with pytest.raises(RuntimeError, match="Agent failed to register noise model"):
+        node2_noise_rewriter(
+            db=db,
+            config=config,
+            candidate_id=cand_id,
+            llm=failing_llm,
+        )
+
+    # Database execution status should be marked FAILED
+    prop = db.get_proposal(cand_id)
+    assert prop["rewrite_noise_status"] == "FAILED"
+    assert prop["error_stage"] == "node2_phase1_noise_rewriter"
+
+
+def test_node1_solver_rewriter_no_fallback_on_failure(tmp_db_and_config):
+    """Test that Node 1 does NOT silently fall back to hardcoded Euler on failure."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_test_solver_fail",
+        solver="unregistered_impossible_solver",
+        noise_model="none",
+    )
+
+    failing_llm = MockAntigravityLLM(mode="invalid_solver_rewrite")
+
+    with pytest.raises(RuntimeError, match="failed to synthesize or register a valid solver"):
+        node1_solver_rewriter(
+            db=db,
+            config=config,
+            candidate_id=cand_id,
+            llm=failing_llm,
+        )
+
+    prop = db.get_proposal(cand_id)
+    assert prop["rewrite_solver_status"] == "FAILED"
 
 
 def test_node3_compiler_rewriter_and_node4_runner(tmp_db_and_config):
@@ -351,6 +416,35 @@ def test_node3_compiler_rewriter_no_fallback_on_failure(tmp_db_and_config):
     fail_comments = db.get_comments(cand_id)
     assert len(fail_comments) >= 1
     assert any("[NODE 3 FAILURE RAW OUTPUT]" in c["comment"] for c in fail_comments)
+
+
+def test_node3_compiler_rewriter_missing_regenerative_cornn(tmp_db_and_config, monkeypatch):
+    """Test that Node 3 logs a warning, hides compilation_info tool, and continues normal execution when RegenerativeCoRNN is missing."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_test_no_cornn",
+        solver="rk4",
+        noise_model="none",
+    )
+
+    monkeypatch.setenv("REGENERATIVE_CORNN_ROOT", "/nonexistent/path/RegenariveCoRNN")
+
+    mock_llm = MockAntigravityLLM(mode="valid")
+    res = node3_compiler_rewriter(db=db, config=config, candidate_id=cand_id, target_device="mps", llm=mock_llm)
+
+    assert res["status"] == "SUCCESS"
+    assert res["hop_functionalized"] is True
+
+    # compilation_info should NOT be exposed to the agent
+    last_call = mock_llm.history[-1]
+    assert "result_db" in last_call["tools"]
+    assert "un0_rewriter" in last_call["tools"]
+    assert "compilation_info" not in last_call["tools"]
+
+    # Database execution status should be SUCCESS
+    prop = db.get_proposal(cand_id)
+    assert prop["rewrite_compiler_status"] == "SUCCESS"
 
 
 

@@ -141,7 +141,7 @@ DEFAULT_INVALID_TOLERANCE_PROPOSAL: dict[str, Any] = {
     "noise_model": "L0_static_mismatch",
     "noise_params": {"sigma": 0.01},
     "sparsity_config": {"sparsity_ratio": 0.4},
-    "selection_reason": "[pregenerated template text] Simulate invalid tight tolerances",
+    "selection_reason": "Tolerance check failure: [pregenerated template text] Simulate invalid tight tolerances",
     "phase_1_prompt": "[pregenerated template text] Test invalid tolerance rejection.",
 }
 
@@ -346,17 +346,19 @@ def {rewrite_name}(model, solver_name="rk4", num_steps=25, dt=0.04, integration_
                         break
 
                 if not registered:
-                    rewrite_name = "hop_while_loop"
-
-                # Return freeform natural-language agent explanation, NOT JSON!
-                result_text = (
-                    f"I analyzed the Kuramoto dynamics model for candidate '{cand}' and synthesized "
-                    f"a PyTorch Higher-Order Operator while_loop functional rewrite. "
-                    f"I registered the rewrite via `un0_register_compiler_rewrite` under name '{rewrite_name}'. "
-                    f"This avoids Python-side while-loops and dynamic graph breaks, supporting batch dimension B >= 1."
-                )
-                proposal_dict = {"raw_explanation": result_text}
-                result_json = result_text
+                    result_text = f"I failed to register a compiler rewrite for candidate '{cand}' because the un0_rewriter tool was not available or registration failed."
+                    proposal_dict = {"status": "FAILED", "error": result_text}
+                    result_json = result_text
+                else:
+                    # Return freeform natural-language agent explanation, NOT JSON!
+                    result_text = (
+                        f"I analyzed the Kuramoto dynamics model for candidate '{cand}' and synthesized "
+                        f"a PyTorch Higher-Order Operator while_loop functional rewrite. "
+                        f"I registered the rewrite via `un0_register_compiler_rewrite` under name '{rewrite_name}'. "
+                        f"This avoids Python-side while-loops and dynamic graph breaks, supporting batch dimension B >= 1."
+                    )
+                    proposal_dict = {"raw_explanation": result_text}
+                    result_json = result_text
         elif not self._responses and any(k in user_message.lower() for k in ("solver rewriter", "implement an ode solver", "register_solver", "kuramoto physical analog dynamics")):
             if self.mode in ("invalid_solver_rewrite", "invalid_solver"):
                 result_text = "I failed to synthesize a valid ODE solver for this configuration."
@@ -418,6 +420,61 @@ def {solver_name}_step(
                     f"I registered the solver via `un0_register_solver_rewrite` under name '{solver_name}'."
                 )
                 proposal_dict = {"status": "SUCCESS", "solver_name": solver_name, "raw_explanation": result_text}
+                result_json = result_text
+        elif not self._responses and any(k in user_message.lower() for k in ("noise rewriter", "hardware noise wrapper", "register_noise", "kuramoto physical analog simulation")):
+            if self.mode in ("invalid_noise_rewrite", "invalid_noise"):
+                result_text = "I failed to synthesize a valid hardware noise wrapper for this model."
+                proposal_dict = {"status": "FAILED", "error": result_text}
+                result_json = result_text
+            else:
+                import re
+                m_cand = re.search(r"candidate[_ ]*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
+                cand = m_cand.group(1) if m_cand else f"cand_mock_{self.call_count}"
+
+                m_noise = re.search(r"named\s+['\"]([a-zA-Z0-9_\-]+)['\"]", user_message, re.IGNORECASE)
+                if not m_noise:
+                    m_noise = re.search(r"noise\s*model\s*[:=]\s*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
+                noise_name = m_noise.group(1) if m_noise else f"custom_noise_{cand}"
+
+                noise_code = f'''from __future__ import annotations
+import torch
+from torch import Tensor, nn
+from typing import Callable
+from un0.noise import register_noise_model
+
+@register_noise_model("{noise_name}")
+class {noise_name.replace("_", "").capitalize()}Noise(nn.Module):
+    """Agent synthesized physical hardware noise wrapper."""
+
+    def __init__(self, dynamics: nn.Module | Callable, sigma: float = 0.01) -> None:
+        super().__init__()
+        self.dynamics = dynamics
+        self.sigma = float(sigma)
+
+    def forward(self, state: Tensor, t: Tensor, drive: Tensor) -> Tensor:
+        vel = self.dynamics(state, t, drive)
+        noise = torch.randn_like(vel) * self.sigma
+        return vel + noise
+'''
+                registered = False
+                for tool in tool_list:
+                    if hasattr(tool, "un0_register_noise_rewrite"):
+                        tool.un0_register_noise_rewrite(
+                            noise_name=noise_name,
+                            candidate_id=cand,
+                            code=noise_code,
+                            description=f"Agent synthesized {noise_name} noise wrapper model",
+                        )
+                        registered = True
+                        break
+
+                result_text = (
+                    f"I have consulted `noise_papers` and implemented a hardware noise wrapper model named '{noise_name}' "
+                    f"for candidate '{cand}'. The wrapper inherits from `torch.nn.Module`, wraps the continuous dynamics, "
+                    f"and implements `forward(state, t, drive) -> Tensor`. "
+                    f"I registered the model via `un0_register_noise_rewrite` under name '{noise_name}'."
+                )
+                proposal_dict = {"status": "SUCCESS", "noise_name": noise_name, "raw_explanation": result_text}
                 result_json = result_text
         else:
             proposal_dict = self._get_next_proposal_dict(tool_list)
