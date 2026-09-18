@@ -111,54 +111,52 @@ def _simulate_batch1_worker(
     has_drive = (n_osc is not None and n_cond is not None and n_cond > 0)
 
     # Warmup passes for Torch compiled model (fixed batch size 1 shape)
-    with torch.inference_mode():
-        for _ in range(2):
-            dummy_in = torch.randn(1, state_dim, device=device)
-            if has_drive:
-                dummy_drive = torch.randn(1, n_osc, n_cond, device=device)
-                try:
-                    _ = compiled_model(dummy_in, dummy_drive)
-                except TypeError:
-                    _ = compiled_model(dummy_in)
-            else:
+    for _ in range(2):
+        dummy_in = torch.randn(1, state_dim, device=device)
+        if has_drive:
+            dummy_drive = torch.randn(1, n_osc, n_cond, device=device)
+            try:
+                _ = compiled_model(dummy_in, dummy_drive)
+            except TypeError:
                 _ = compiled_model(dummy_in)
+        else:
+            _ = compiled_model(dummy_in)
     _sync_device(device_str)
 
     # Sequential batch size 1 profiling
     sample_latencies: List[float] = []
     t_start = time.perf_counter()
 
-    with torch.inference_mode():
-        for s_idx in range(num_eval_samples):
-            sample_in = torch.randn(1, state_dim, device=device)
-            if has_drive:
-                sample_drive = torch.randn(1, n_osc, n_cond, device=device)
-                _sync_device(device_str)
-                t0 = time.perf_counter()
-                try:
-                    out = compiled_model(sample_in, sample_drive)
-                except TypeError:
-                    out = compiled_model(sample_in)
-            else:
-                _sync_device(device_str)
-                t0 = time.perf_counter()
-                out = compiled_model(sample_in)
+    for s_idx in range(num_eval_samples):
+        sample_in = torch.randn(1, state_dim, device=device)
+        if has_drive:
+            sample_drive = torch.randn(1, n_osc, n_cond, device=device)
             _sync_device(device_str)
-            sample_lat_ms = (time.perf_counter() - t0) * 1000.0
-            sample_latencies.append(sample_lat_ms)
+            t0 = time.perf_counter()
+            try:
+                out = compiled_model(sample_in, sample_drive)
+            except TypeError:
+                out = compiled_model(sample_in)
+        else:
+            _sync_device(device_str)
+            t0 = time.perf_counter()
+            out = compiled_model(sample_in)
+        _sync_device(device_str)
+        sample_lat_ms = (time.perf_counter() - t0) * 1000.0
+        sample_latencies.append(sample_lat_ms)
 
-            # Check for numerical explosion / NaN / Inf
-            if isinstance(out, torch.Tensor):
-                if not torch.all(torch.isfinite(out)):
+        # Check for numerical explosion / NaN / Inf
+        if isinstance(out, torch.Tensor):
+            if not torch.all(torch.isfinite(out)):
+                raise ValueError(
+                    f"Numerical divergence: NaN/Inf detected in model output at evaluation sample {s_idx}"
+                )
+        elif isinstance(out, (tuple, list)):
+            for elem in out:
+                if isinstance(elem, torch.Tensor) and not torch.all(torch.isfinite(elem)):
                     raise ValueError(
-                        f"Numerical divergence: NaN/Inf detected in model output at evaluation sample {s_idx}"
+                        f"Numerical divergence: NaN/Inf detected in model output tuple at evaluation sample {s_idx}"
                     )
-            elif isinstance(out, (tuple, list)):
-                for elem in out:
-                    if isinstance(elem, torch.Tensor) and not torch.all(torch.isfinite(elem)):
-                        raise ValueError(
-                            f"Numerical divergence: NaN/Inf detected in model output tuple at evaluation sample {s_idx}"
-                        )
 
     total_eval_time_s = time.perf_counter() - t_start
     mean_lat_ms = float(sum(sample_latencies) / max(len(sample_latencies), 1))
