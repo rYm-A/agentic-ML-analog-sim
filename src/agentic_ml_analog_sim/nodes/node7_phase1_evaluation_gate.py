@@ -132,6 +132,75 @@ def node7_phase1_evaluation_gate(
 
     # Branch 2: Reference Proposal Handling
     if is_reference:
+        sim_status = proposal.get("simulation_status")
+        latency_ms = proposal.get("latency_ms")
+        err_msg = proposal.get("error_message") or "unspecified simulation error"
+
+        ref_failed = False
+        ref_reasons = []
+
+        if sim_status == "FAILED":
+            ref_failed = True
+            ref_reasons.append(f"simulation_status is FAILED ({err_msg})")
+
+        if latency_ms is None:
+            ref_failed = True
+            ref_reasons.append("Missing essential reference baseline metrics (latency_ms is None)")
+
+        if ref_failed:
+            curr_counter_2 = proposal.get("counter_2_rewrite", 0) + 1
+            db.update_counters(candidate_id, counter_2_rewrite=curr_counter_2)
+
+            counter_limits = getattr(config, "counter_limits", None)
+            max_retries = None
+            if counter_limits is not None:
+                max_retries = getattr(counter_limits, "max_counter_2_rewrite", None)
+                if max_retries is None and isinstance(counter_limits, dict):
+                    max_retries = counter_limits.get("max_counter_2_rewrite")
+            if max_retries is None:
+                limits = getattr(config, "experiment_limits", None) or getattr(config, "budget", None)
+                max_retries = getattr(limits, "max_node_retries", 3) if limits else 3
+
+            reason_str = "; ".join(ref_reasons)
+            if curr_counter_2 > max_retries:
+                logger.error("Node 7: Counter 2 limit exceeded (%d > %d) for reference candidate %s: %s", curr_counter_2, max_retries, candidate_id, reason_str)
+                return node9_phase1_error_handler(
+                    db=db,
+                    config=config,
+                    candidate_id=candidate_id,
+                    counter_name="counter_2_rewrite",
+                    current_count=curr_counter_2,
+                    max_count=max_retries,
+                    execution_mode="reference",
+                    error_stage="node7_phase1_evaluation_gate",
+                    details=f"reference_simulation_failed_limit_exceeded: {reason_str}",
+                )
+            else:
+                logger.warning("Node 7: Reference proposal %s failed evaluation (%s). Counter 2 = %d/%d. Routing to Node 8.", candidate_id, reason_str, curr_counter_2, max_retries)
+                result = {
+                    "status": "FAILED",
+                    "reason": "simulation_failed",
+                    "is_reference": True,
+                    "counter_2": curr_counter_2,
+                    "error_details": reason_str,
+                    "candidate_id": candidate_id,
+                    "next_node": "node8_phase1_diagnostic_proposal",
+                }
+                if get_profiler is not None:
+                    try:
+                        get_profiler().add_info({
+                            "node": "node7_phase1_evaluation_gate",
+                            "candidate_id": candidate_id,
+                            "status": "FAILED",
+                            "is_reference": True,
+                            "counter_2": curr_counter_2,
+                            "reasons": reason_str,
+                        })
+                    except Exception:
+                        pass
+                return result
+
+        # Success: reset counter 2, mark COMPLETED, compute Pareto front, route to Phase 2
         db.update_counters(candidate_id, counter_2_rewrite=0)
         db.mark_proposal_status(candidate_id, status="COMPLETED")
         db.compute_pareto_front()

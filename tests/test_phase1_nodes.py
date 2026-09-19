@@ -800,7 +800,10 @@ def test_node7_evaluation_gate_reference(tmp_db_and_config):
         solver="rk4",
         noise_model="none",
         is_reference=True,
+        latency_ms=4.2,
+        accuracy_fid=0.05,
     )
+    db.update_execution_status(ref_id, simulation_status="SUCCESS")
 
     res = node7_evaluation_gate(db=db, config=config, candidate_id=ref_id)
     assert res["status"] == "PASSED"
@@ -809,6 +812,80 @@ def test_node7_evaluation_gate_reference(tmp_db_and_config):
 
     prop = db.get_proposal(ref_id)
     assert prop["status"] == "COMPLETED"
+
+
+def test_node7_evaluation_gate_reference_simulation_failed(tmp_db_and_config):
+    """Verify that a reference candidate with FAILED simulation status routes to Node 8 instead of Phase 2."""
+    db, config = tmp_db_and_config
+
+    ref_id = db.insert_proposal(
+        candidate_id="ref_eval_failed",
+        solver="rk4",
+        noise_model="none",
+        is_reference=True,
+        latency_ms=4.2,
+    )
+    db.update_execution_status(ref_id, simulation_status="FAILED", error_message="Solver divergence in reference run")
+
+    res = node7_evaluation_gate(db=db, config=config, candidate_id=ref_id)
+    assert res["status"] == "FAILED"
+    assert res["reason"] == "simulation_failed"
+    assert res["is_reference"] is True
+    assert res["counter_2"] == 1
+    assert res["next_node"] == "node8_phase1_diagnostic_proposal"
+    assert "simulation_status is FAILED" in res["error_details"]
+
+    prop = db.get_proposal(ref_id)
+    # Must NOT be marked COMPLETED!
+    assert prop["status"] != "COMPLETED"
+
+
+def test_node7_evaluation_gate_reference_missing_metrics(tmp_db_and_config):
+    """Verify that a reference candidate missing baseline latency_ms routes to Node 8."""
+    db, config = tmp_db_and_config
+
+    ref_id = db.insert_proposal(
+        candidate_id="ref_eval_no_metrics",
+        solver="rk4",
+        noise_model="none",
+        is_reference=True,
+        latency_ms=None,
+    )
+    db.update_execution_status(ref_id, simulation_status="SUCCESS")
+
+    res = node7_evaluation_gate(db=db, config=config, candidate_id=ref_id)
+    assert res["status"] == "FAILED"
+    assert res["reason"] == "simulation_failed"
+    assert res["next_node"] == "node8_phase1_diagnostic_proposal"
+    assert "Missing essential reference baseline metrics" in res["error_details"]
+
+    prop = db.get_proposal(ref_id)
+    assert prop["status"] != "COMPLETED"
+
+
+def test_node7_evaluation_gate_reference_counter_2_exceeded(tmp_db_and_config):
+    """Verify that exceeding counter 2 retries on reference simulation failure routes to node 9 error handler."""
+    db, config = tmp_db_and_config
+
+    ref_id = db.insert_proposal(
+        candidate_id="ref_eval_max_retries",
+        solver="rk4",
+        noise_model="none",
+        is_reference=True,
+        latency_ms=4.2,
+        counter_2_rewrite=3,  # already at max retries (default 3)
+    )
+    db.update_execution_status(ref_id, simulation_status="FAILED", error_message="Persistent divergence")
+
+    res = node7_evaluation_gate(db=db, config=config, candidate_id=ref_id)
+    assert res["status"] == "TERMINATED_MAX_CYCLES"
+    assert res["counter_name"] == "counter_2_rewrite"
+    assert res["current_count"] == 4
+    assert res["execution_mode"] == "reference"
+    assert "reference_simulation_failed_limit_exceeded" in res["details"]
+
+    prop = db.get_proposal(ref_id)
+    assert prop["status"] == "FAILED"
 
 
 def test_node7_evaluation_gate_pass_and_fail(tmp_db_and_config):
