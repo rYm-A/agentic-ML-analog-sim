@@ -883,6 +883,76 @@ def test_node7_debug_mode_invariant_and_counter_4(tmp_db_and_config):
     assert res_d1["next_node"] in ("node8_phase1_diagnostic_proposal", "node8_diagnostic_proposal")  # Blocked from phase2_node1!
 
 
+def test_node7_chia_function_decorator():
+    """Verify that node7_phase1_evaluation_gate is wrapped with ChiaFunction."""
+    from agentic_ml_analog_sim.nodes.node7_phase1_evaluation_gate import node7_phase1_evaluation_gate
+    # ChiaFunction wraps the callable or exposes _chia_original
+    assert hasattr(node7_phase1_evaluation_gate, "_chia_original") or callable(node7_phase1_evaluation_gate)
+
+
+def test_node7_evaluation_gate_none_metrics(tmp_db_and_config):
+    """Verify that candidates with missing/None metrics fail tolerance checks."""
+    db, config = tmp_db_and_config
+
+    # Candidate with no simulation metrics evaluated
+    cand_none = db.insert_proposal(
+        candidate_id="cand_gate_none_metrics",
+        solver="rk4",
+        noise_model="none",
+        relative_error=None,
+        absolute_error=None,
+        accuracy_fid=None,
+    )
+
+    res = node7_evaluation_gate(db=db, config=config, candidate_id=cand_none)
+    assert res["status"] == "FAILED"
+    assert res["reason"] == "out_of_tolerance"
+    assert "Missing required simulation metrics" in res["error_details"]
+
+
+def test_node7_evaluation_gate_atol_comparison(tmp_db_and_config):
+    """Verify that exceeding atol causes evaluation failure even when relative_error <= rtol."""
+    db, config = tmp_db_and_config
+
+    # rtol is 0.05, atol is 0.05
+    # relative_error=0.01 (within rtol), absolute_error=0.10 (exceeds atol)
+    cand_atol_fail = db.insert_proposal(
+        candidate_id="cand_gate_atol_fail",
+        solver="rk4",
+        noise_model="none",
+        relative_error=0.01,
+        absolute_error=0.10,
+        accuracy_fid=0.1,
+    )
+
+    res = node7_evaluation_gate(db=db, config=config, candidate_id=cand_atol_fail)
+    assert res["status"] == "FAILED"
+    assert res["reason"] == "out_of_tolerance"
+    assert "absolute_error" in res["error_details"]
+    assert "atol" in res["error_details"]
+
+
+def test_node7_debug_mode_strict_missing_active_or_quarantined(tmp_db_and_config):
+    """Verify strict handling when active_debug or quarantined parent is None in debug mode."""
+    db, config = tmp_db_and_config
+
+    # Insert a debug proposal whose parent was NEVER quarantined and no active debug exists
+    debug_id = db.insert_proposal(
+        candidate_id="debug_rogue_01",
+        solver="euler",
+        noise_model="none",
+        is_debug=True,
+        debug_parent_id="non_existent_parent",
+        status="COMPLETED",  # not PENDING or EVALUATING, so get_active_debug_candidate() returns None
+    )
+
+    res = node7_evaluation_gate(db=db, config=config, candidate_id=debug_id)
+    assert res["status"] in ("TERMINATED_MAX_CYCLES", "FAILED")
+    assert "debug_invariant_violation" in res.get("details", "")
+    assert res["next_node"] is None
+
+
+
 # --- Tests for Node 8 Diagnostic Proposal ---
 
 

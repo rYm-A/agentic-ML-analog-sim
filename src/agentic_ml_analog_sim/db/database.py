@@ -77,6 +77,7 @@ class ResultDatabase:
                 ("simulation_status", "TEXT DEFAULT 'PENDING'"),
                 ("error_stage", "TEXT"),
                 ("error_message", "TEXT"),
+                ("absolute_error", "REAL"),
                 ("is_debug", "BOOLEAN DEFAULT 0"),
                 ("debug_parent_id", "TEXT"),
                 ("counter_1_compilation", "INT DEFAULT 0"),
@@ -167,6 +168,7 @@ class ResultDatabase:
         is_active_evaluation: bool = False,
         accuracy_fid: Optional[float] = None,
         relative_error: Optional[float] = None,
+        absolute_error: Optional[float] = None,
         latency_ms: Optional[float] = None,
         wall_clock_s: Optional[float] = None,
         worker_utilization: Optional[float] = None,
@@ -204,11 +206,11 @@ class ResultDatabase:
                     candidate_id, iteration, solver, noise_model,
                     sparsity_config, solver_params, noise_params,
                     status, is_reference, is_active_evaluation,
-                    accuracy_fid, relative_error, latency_ms, wall_clock_s,
+                    accuracy_fid, relative_error, absolute_error, latency_ms, wall_clock_s,
                     worker_utilization, pareto_optimal, selection_reason, phase_1_prompt,
                     is_debug, debug_parent_id,
                     counter_1_compilation, counter_2_rewrite, counter_3_debug_gate, counter_4_debug_loop
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate_id,
@@ -223,6 +225,7 @@ class ResultDatabase:
                     1 if is_active_evaluation else 0,
                     accuracy_fid,
                     relative_error,
+                    absolute_error,
                     latency_ms,
                     wall_clock_s,
                     worker_utilization,
@@ -489,6 +492,7 @@ class ResultDatabase:
         allowed_fields = {
             "accuracy_fid",
             "relative_error",
+            "absolute_error",
             "latency_ms",
             "wall_clock_s",
             "worker_utilization",

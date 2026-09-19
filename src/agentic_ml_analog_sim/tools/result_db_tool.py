@@ -564,6 +564,7 @@ class ResultDBTool(ChiaTool):
         latency_ms: Optional[float] = None,
         accuracy_fid: Optional[float] = None,
         relative_error: Optional[float] = None,
+        absolute_error: Optional[float] = None,
         wall_clock_s: Optional[float] = None,
         worker_utilization: Optional[float] = None,
         **kwargs: Any,
@@ -576,6 +577,7 @@ class ResultDBTool(ChiaTool):
             latency_ms: Measured inference latency in milliseconds.
             accuracy_fid: Accuracy FID metric.
             relative_error: Relative numerical error.
+            absolute_error: Absolute numerical error.
             wall_clock_s: Wall clock elapsed time in seconds.
             worker_utilization: Estimated worker utilization.
             **kwargs: Extra fields passed to database mark_proposal_status.
@@ -590,6 +592,7 @@ class ResultDBTool(ChiaTool):
                 latency_ms=latency_ms,
                 accuracy_fid=accuracy_fid,
                 relative_error=relative_error,
+                absolute_error=absolute_error,
                 wall_clock_s=wall_clock_s,
                 worker_utilization=worker_utilization,
                 **kwargs,

@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     is_active_evaluation BOOLEAN DEFAULT 0,
     accuracy_fid REAL,
     relative_error REAL,
+    absolute_error REAL,
     latency_ms REAL,
     wall_clock_s REAL,
     worker_utilization REAL,
