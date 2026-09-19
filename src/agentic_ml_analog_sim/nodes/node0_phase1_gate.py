@@ -12,9 +12,23 @@ from agentic_ml_analog_sim.config import SimulationConfig
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.nodes.node9_phase1_error_handler import node9_phase1_error_handler
 
+try:
+    from chia.base.ChiaFunction import ChiaFunction
+except ImportError:
+    def ChiaFunction(*args: Any, **kwargs: Any) -> Any:
+        def decorator(func: Any) -> Any:
+            return func
+        return decorator
+
+try:
+    from chia.base.profiling import get_profiler
+except ImportError:
+    get_profiler = None
+
 logger = logging.getLogger("agentic_ml_analog_sim.nodes.node0_phase1_gate")
 
 
+@ChiaFunction()
 def node0_gate(
     db: ResultDatabase,
     config: SimulationConfig,
@@ -34,7 +48,8 @@ def node0_gate(
         debug_request: Optional debug request dict from Node 8.
 
     Returns:
-        Dict specifying target execution mode, candidate_id, nodes to run, and next_node.
+        Dict specifying target execution mode, candidate_id, nodes to run, bypassed nodes,
+        explicit graph edges, and next_node.
     """
     # Resolve candidate ID if not explicitly provided
     if proposal_id is None:
@@ -55,19 +70,64 @@ def node0_gate(
 
     # Mode 1: Reference Profiling Mode (Triggered by Phase 0 Node 3 / reference design)
     if is_reference or is_from_phase_0:
-        logger.info("Node 0: Activating Reference Profiling Mode for %s", proposal_id)
+        mode = "reference" if is_reference else "standard"
+        next_node = "node3_phase1_compiler_rewriter" if is_reference else "node1_phase1_solver_rewriter"
+        nodes_to_run = [3] if is_reference else [1, 2, 3]
+        bypassed_nodes = [1, 2] if is_reference else []
+        logger.info("Node 0: Activating %s mode for %s", mode, proposal_id)
+
+        # Formalized task graph edge declarations
+        task_graph_edges = (
+            [("node0_phase1_gate", "node3_phase1_compiler_rewriter")]
+            if is_reference
+            else [
+                ("node0_phase1_gate", "node1_phase1_solver_rewriter"),
+                ("node1_phase1_solver_rewriter", "node2_phase1_noise_rewriter"),
+                ("node2_phase1_noise_rewriter", "node3_phase1_compiler_rewriter"),
+            ]
+        )
+
+        if get_profiler is not None:
+            try:
+                get_profiler().add_info({
+                    "node": "node0_phase1_gate",
+                    "mode": mode,
+                    "candidate_id": proposal_id,
+                    "nodes_to_run": nodes_to_run,
+                    "bypassed_nodes": bypassed_nodes,
+                    "edges": task_graph_edges,
+                })
+            except Exception:
+                pass
+
         return {
             "status": "SUCCESS",
-            "mode": "reference" if is_reference else "standard",
+            "mode": mode,
             "candidate_id": proposal_id,
-            "next_node": "node3_phase1_compiler_rewriter" if is_reference else "node1_phase1_solver_rewriter",
-            "nodes_to_run": [3] if is_reference else [1, 2, 3],
-            "bypassed_nodes": [1, 2] if is_reference else [],
+            "next_node": next_node,
+            "nodes_to_run": nodes_to_run,
+            "bypassed_nodes": bypassed_nodes,
+            "edges": task_graph_edges,
         }
 
     # Mode 2 / 3: Triggered by Node 8 (Diagnostic Proposal)
-    if previous_node_id in ("node8_phase1_diagnostic_proposal", "node8_diagnostic_proposal", "node8"):
-        if debug_request:
+    is_node8_trigger = (
+        previous_node_id in ("node8_phase1_diagnostic_proposal", "node8_diagnostic_proposal", "node8")
+        or trigger_source in ("node_8", "node8", "node8_phase1_diagnostic_proposal")
+    )
+    if is_node8_trigger:
+        # Discern Mode 3 (Debug Mode) vs Mode 2 (Rewrite Correction Mode)
+        is_debug_mode = bool(
+            debug_request
+            and (
+                debug_request.get("debugee_id")
+                or debug_request.get("deactivate")
+                or debug_request.get("deactivated_rewrites")
+                or debug_request.get("action") == "debug_request"
+                or debug_request.get("type") == "DEBUG_MODE_REQUEST"
+            )
+        )
+        if is_debug_mode:
             # Mode 3: Debug Mode
             debugee_id = debug_request.get("debugee_id") or proposal_id
             deactivated = debug_request.get("deactivated_rewrites") or debug_request.get("deactivate") or "deactivate_noise"
@@ -138,6 +198,21 @@ def node0_gate(
             # Reset counter 3 on debugee upon successful valid debug request acceptance
             db.update_counters(debugee_id, counter_3_debug_gate=0)
 
+            task_graph_edges = [("node0_phase1_gate", "node3_phase1_compiler_rewriter")]
+            if get_profiler is not None:
+                try:
+                    get_profiler().add_info({
+                        "node": "node0_phase1_gate",
+                        "mode": "debug",
+                        "candidate_id": debug_id,
+                        "debugee_id": debugee_id,
+                        "nodes_to_run": [3],
+                        "bypassed_nodes": [1, 2],
+                        "edges": task_graph_edges,
+                    })
+                except Exception:
+                    pass
+
             return {
                 "status": "SUCCESS",
                 "mode": "debug",
@@ -146,6 +221,7 @@ def node0_gate(
                 "next_node": "node3_phase1_compiler_rewriter",
                 "nodes_to_run": [3],
                 "bypassed_nodes": [1, 2],
+                "edges": task_graph_edges,
             }
 
         else:
@@ -165,7 +241,26 @@ def node0_gate(
             node_map = {1: "node1_phase1_solver_rewriter", 2: "node2_phase1_noise_rewriter", 3: "node3_phase1_compiler_rewriter"}
             next_node = node_map[first_node]
 
+            # Construct explicit task graph edges for rerun sequence
+            task_graph_edges = [("node0_phase1_gate", next_node)]
+            for i in range(len(nodes_to_run) - 1):
+                task_graph_edges.append((node_map[nodes_to_run[i]], node_map[nodes_to_run[i + 1]]))
+
             logger.info("Node 0: Rewrite Correction Mode for %s (nodes: %s)", proposal_id, nodes_to_run)
+
+            if get_profiler is not None:
+                try:
+                    get_profiler().add_info({
+                        "node": "node0_phase1_gate",
+                        "mode": "rewrite_correction",
+                        "candidate_id": proposal_id,
+                        "nodes_to_run": nodes_to_run,
+                        "bypassed_nodes": bypassed,
+                        "edges": task_graph_edges,
+                    })
+                except Exception:
+                    pass
+
             return {
                 "status": "SUCCESS",
                 "mode": "rewrite_correction",
@@ -173,10 +268,29 @@ def node0_gate(
                 "next_node": next_node,
                 "nodes_to_run": nodes_to_run,
                 "bypassed_nodes": bypassed,
+                "edges": task_graph_edges,
             }
 
     # Standard entry mode (N1 -> N2 -> N3)
     logger.info("Node 0: Standard entry mode for %s", proposal_id)
+    std_edges = [
+        ("node0_phase1_gate", "node1_phase1_solver_rewriter"),
+        ("node1_phase1_solver_rewriter", "node2_phase1_noise_rewriter"),
+        ("node2_phase1_noise_rewriter", "node3_phase1_compiler_rewriter"),
+    ]
+    if get_profiler is not None:
+        try:
+            get_profiler().add_info({
+                "node": "node0_phase1_gate",
+                "mode": "standard",
+                "candidate_id": proposal_id,
+                "nodes_to_run": [1, 2, 3],
+                "bypassed_nodes": [],
+                "edges": std_edges,
+            })
+        except Exception:
+            pass
+
     return {
         "status": "SUCCESS",
         "mode": "standard",
@@ -184,6 +298,7 @@ def node0_gate(
         "next_node": "node1_phase1_solver_rewriter",
         "nodes_to_run": [1, 2, 3],
         "bypassed_nodes": [],
+        "edges": std_edges,
     }
 
 

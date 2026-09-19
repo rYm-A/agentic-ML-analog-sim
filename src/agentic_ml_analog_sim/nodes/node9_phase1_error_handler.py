@@ -26,7 +26,12 @@ from agentic_ml_analog_sim.db.database import ResultDatabase
 logger = logging.getLogger("agentic_ml_analog_sim.nodes.node9_phase1_error_handler")
 
 
-@ChiaFunction()
+def _cleanup_node9_resources(*args: Any, **kwargs: Any) -> None:
+    """Best-effort cleanup hook executed in worker teardown via ChiaFunction hooks."""
+    logger.debug("Node 9: Worker cleanup completed.")
+
+
+@ChiaFunction(num_cpus=0.1, max_retries=0)
 def node9_phase1_error_handler(
     db: ResultDatabase,
     config: SimulationConfig,
@@ -41,9 +46,10 @@ def node9_phase1_error_handler(
     """Perform a graceful hard failure and loop termination.
 
     1. Formats failure message and logs error (reason, problematic candidate, mode).
-    2. Marks candidate status as "FAILED" in DB with error_stage and error_message.
-    3. Creates a forensic database snapshot/dump for human inspection/debugging.
-    4. Returns a standardized termination dict.
+    2. Marks candidate status as "FAILED" in DB with error_stage and error_message using safe transaction concurrency.
+    3. Performs SQLite WAL checkpoint maintenance (folding -wal sidecar) and creates a forensic snapshot dump.
+    4. Attaches profiler metadata/events if profiling is active.
+    5. Returns a standardized termination dict.
 
     Args:
         db: ResultDatabase instance.
@@ -93,23 +99,36 @@ def node9_phase1_error_handler(
     except Exception as exc:
         logger.warning("Node 9: Could not update candidate status in DB for %s: %s", candidate_id, exc)
 
-    # 2. Store current state of database by creating snapshot / dump
+    # 2. Store current state of database by creating snapshot / dump with WAL maintenance
     snapshot_path: Optional[str] = None
     try:
         db_path = getattr(db, "db_path", None)
         if db_path and str(db_path) != ":memory:":
-            snapshot_dir = Path(db_path).resolve().parent / "snapshots"
+            resolved_db_path = Path(db_path).resolve()
+            snapshot_dir = resolved_db_path.parent / "snapshots"
+
+            # WAL checkpoint maintenance: fold -wal sidecar into main DB file for consistent snapshot
+            try:
+                if resolved_db_path.is_file():
+                    with sqlite3.connect(str(resolved_db_path), timeout=30.0) as maint_conn:
+                        maint_conn.execute("PRAGMA busy_timeout = 30000;")
+                        maint_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            except Exception as maint_exc:
+                logger.warning("Node 9: PRAGMA wal_checkpoint maintenance encountered warning: %s", maint_exc)
         else:
             snapshot_dir = Path.cwd() / "snapshots"
+
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         target_snapshot = snapshot_dir / f"{candidate_id}_error_snapshot.db"
 
         if hasattr(db, "backup") and callable(db.backup):
             snapshot_path = str(db.backup(target_snapshot))
         elif db_path and Path(db_path).is_file():
-            src_conn = sqlite3.connect(str(db_path))
+            # Concurrency-safe backup with busy timeout
+            src_conn = sqlite3.connect(str(db_path), timeout=30.0)
+            src_conn.execute("PRAGMA busy_timeout = 30000;")
             try:
-                dst_conn = sqlite3.connect(str(target_snapshot))
+                dst_conn = sqlite3.connect(str(target_snapshot), timeout=30.0)
                 try:
                     src_conn.backup(dst_conn)
                 finally:
@@ -140,6 +159,28 @@ def node9_phase1_error_handler(
     except Exception as exc:
         logger.error("Node 9: Failed to create database snapshot: %s", exc)
         snapshot_path = None
+
+    # Profiler integration if Chia profiling is active
+    try:
+        from chia.trace.profiler import get_profiler
+        profiler = get_profiler()
+        if profiler.enabled:
+            profiler.add_info({
+                "termination_reason": failure_reason,
+                "counter_name": counter_name,
+                "current_count": current_count,
+                "max_count": max_count,
+                "error_stage": error_stage,
+                "snapshot_path": snapshot_path,
+            })
+            profiler.log_event(
+                "circuit_breaker_termination",
+                candidate_id=candidate_id,
+                counter_name=counter_name,
+                error_stage=error_stage,
+            )
+    except Exception as prof_exc:
+        logger.debug("Node 9: Profiler notification skipped or unavailable: %s", prof_exc)
 
     # 3. Return standardized termination dictionary
     result: Dict[str, Any] = {

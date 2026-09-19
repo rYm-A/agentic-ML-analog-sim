@@ -71,47 +71,6 @@ def _sync_device(device: str) -> None:
         except Exception:
             pass
 
-class _SafeCompiledHOPWrapper(torch.nn.Module):
-    """Wrapper that catches Inductor HOP lowering/runtime failures on CPU and falls back to aot_eager."""
-
-    def __init__(self, compiled_m: Any):
-        super().__init__()
-        self.compiled_m = compiled_m
-        self.fallback = None
-        raw = getattr(compiled_m, "_orig_mod", compiled_m)
-        self._raw_model = raw
-        for attr in [
-            "n_oscillators",
-            "n",
-            "n_conditional_oscillators",
-            "n_cond",
-            "state_dim",
-            "dynamics",
-            "num_steps",
-            "dt",
-            "integration_time",
-            "use_hop",
-        ]:
-            if hasattr(raw, attr):
-                setattr(self, attr, getattr(raw, attr))
-
-    def forward(self, *args: Any, **kwargs: Any) -> Any:
-        if self.fallback is not None:
-            return self.fallback(*args, **kwargs)
-        try:
-            return self.compiled_m(*args, **kwargs)
-        except Exception as compile_err:
-            raw = getattr(self.compiled_m, "_orig_mod", self.compiled_m)
-            logger.info("Node 5: Compiled execution failed (%s); attempting safe aot_eager / functional unroll fallback.", compile_err)
-            try:
-                from un0.compiler import compile_model
-                self.fallback = compile_model(raw, backend="aot_eager", dynamic=True)
-                return self.fallback(*args, **kwargs)
-            except Exception:
-                # If HOP itself cannot be lowered by Dynamo, safely fallback to raw functional execution
-                self.fallback = raw
-                return self.fallback(*args, **kwargs)
-
 
 @ChiaFunction()
 def node5_phase1_verify_correctness(
@@ -122,6 +81,8 @@ def node5_phase1_verify_correctness(
     eager_model: Optional[Any] = None,
     sample_input: Optional[Any] = None,
     target_device: str = "mps",
+    compilation_status: str = "SUCCESS",
+    compilation_error: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Node 5 Verify Correctness (Phase 1).
 
@@ -133,10 +94,13 @@ def node5_phase1_verify_correctness(
         eager_model: Eager reference model.
         sample_input: Optional sample evaluation data tensor/input.
         target_device: Execution device ('mps', 'cuda', 'cpu').
+        compilation_status: Compilation status from Node 4 ('SUCCESS' or 'FAILED').
+        compilation_error: Error message/traceback from Node 4 if compilation failed.
 
     Returns:
-        Dict specifying verification status (PASSED/FAILED), details, error_logs,
-        tolerances (rtol, atol), max_abs_diff, max_rel_diff, and counter_1 value.
+        Dict specifying verification status (PASSED/FAILED/TERMINATED_MAX_CYCLES),
+        details, error_logs, tolerances (rtol, atol), max_abs_diff, max_rel_diff,
+        and counter_1 value.
     """
     proposal = db.get_proposal(candidate_id)
     if proposal is None:
@@ -152,224 +116,13 @@ def node5_phase1_verify_correctness(
     device = _resolve_target_device(target_device)
     logger.info("Node 5: Verifying correctness for %s on device %s (rtol=%.1e, atol=%.1e)", candidate_id, device, rtol, atol)
 
-    is_correct = True
-    error_msg = ""
-    max_rel_diff = 0.0
-    max_abs_diff = 0.0
-
-    # 1. Strict check: Missing either model is a verification failure, never a silent pass
-    if compiled_model is None or eager_model is None:
-        missing = []
-        if compiled_model is None:
-            missing.append("compiled_model")
-        if eager_model is None:
-            missing.append("eager_model")
-        is_correct = False
-        error_msg = f"Verification failed: missing model artifact(s): {', '.join(missing)}."
-        logger.error("Node 5: %s for candidate %s", error_msg, candidate_id)
-    else:
-        try:
-            # Ensure compiled model handles CPU lowering gracefully via fallback wrapper
-            wrapped_compiled_model = _SafeCompiledHOPWrapper(compiled_model)
-
-            # Pre-initialize any uninitialized buffers (e.g. static_mismatch in L0 noise) to avoid graph breaks
-            for m in [eager_model, compiled_model]:
-                if m is not None and hasattr(m, "modules"):
-                    for submod in m.modules():
-                        if hasattr(submod, "static_mismatch") and getattr(submod, "static_mismatch") is None:
-                            dim = getattr(submod, "state_dim", 1032)
-                            submod.static_mismatch = torch.zeros(1, dim, device=device)
-
-            # Place eager model on device and set evaluation mode if supported
-            if hasattr(eager_model, "to") and callable(getattr(eager_model, "to")):
-                try:
-                    eager_model = eager_model.to(device)
-                except Exception as dev_err:
-                    logger.warning("Node 5: eager_model.to(%s) failed: %s; running on current device.", device, dev_err)
-
-            if hasattr(eager_model, "eval") and callable(getattr(eager_model, "eval")):
-                eager_model.eval()
-
-            if hasattr(wrapped_compiled_model, "to") and callable(getattr(wrapped_compiled_model, "to")):
-                try:
-                    wrapped_compiled_model = wrapped_compiled_model.to(device)
-                except Exception as dev_err:
-                    logger.warning("Node 5: wrapped_compiled_model.to(%s) failed: %s; running on current device.", device, dev_err)
-
-            if hasattr(wrapped_compiled_model, "eval") and callable(getattr(wrapped_compiled_model, "eval")):
-                wrapped_compiled_model.eval()
-
-            # Align eager baseline runner: if eager_model is bare dynamics (takes _time and drive),
-            # wrap with functionalize_kuramoto_model(use_hop=False) to produce trajectory output.
-            eager_runner = eager_model
-            try:
-                import inspect
-                sig = inspect.signature(eager_model.forward)
-                if "_time" in sig.parameters or "time" in sig.parameters:
-                    from un0.compiler import functionalize_kuramoto_model
-                    solver_name = proposal.get("solver") or getattr(getattr(config, "reference_design", None), "solver", "rk4")
-                    solver_params = proposal.get("solver_params", {}) or {}
-                    if isinstance(solver_params, str):
-                        try:
-                            import json
-                            solver_params = json.loads(solver_params)
-                        except Exception:
-                            solver_params = {}
-                    num_steps = solver_params.get("num_steps") or getattr(getattr(config, "reference_design", None), "num_steps", 25)
-                    integration_time = solver_params.get("integration_time") or getattr(getattr(config, "reference_design", None), "integration_time", 1.0)
-                    dt = solver_params.get("dt") or (float(integration_time) / float(num_steps))
-                    eager_runner = functionalize_kuramoto_model(
-                        model=eager_model,
-                        solver_name=solver_name,
-                        num_steps=num_steps,
-                        dt=dt,
-                        integration_time=integration_time,
-                        use_hop=False,
-                    )
-            except Exception as align_err:
-                logger.debug("Node 5: eager baseline alignment skipped: %s", align_err)
-
-            # Warmup and execute model on sample inputs with proper device placement
-            num_samples = 100
-            with torch.no_grad(), _freeze_noise([wrapped_compiled_model, eager_runner, eager_model]):
-                if sample_input is not None:
-                    # Explicit sample input provided
-                    if hasattr(sample_input, "to") and callable(getattr(sample_input, "to")):
-                        inp = sample_input.to(device)
-                    else:
-                        inp = sample_input
-
-                    # Warmup (2 passes under no_grad)
-                    for _ in range(2):
-                        if callable(wrapped_compiled_model):
-                            _ = wrapped_compiled_model(inp)
-                        if callable(eager_runner):
-                            _ = eager_runner(inp)
-                    _sync_device(device)
-
-                    torch.manual_seed(42)
-                    out_compiled = wrapped_compiled_model(inp)
-                    _sync_device(device)
-                    torch.manual_seed(42)
-                    out_eager = eager_runner(inp)
-                    _sync_device(device)
-                else:
-                    # Determine whether this is a multi-input Kuramoto model (state + drive)
-                    n_osc = (
-                        getattr(eager_model, "n_oscillators", None)
-                        or getattr(eager_model, "n", None)
-                        or getattr(getattr(eager_model, "dynamics", None), "n", None)
-                        or getattr(getattr(eager_model, "dynamics", None), "n_oscillators", None)
-                        or getattr(getattr(config, "reference_design", None), "n_oscillators", None)
-                    )
-                    n_cond = (
-                        getattr(eager_model, "n_conditional_oscillators", None)
-                        or getattr(eager_model, "n_cond", None)
-                        or getattr(getattr(eager_model, "dynamics", None), "n_cond", None)
-                        or getattr(getattr(eager_model, "dynamics", None), "n_conditional_oscillators", None)
-                        or getattr(getattr(config, "reference_design", None), "n_conditional_oscillators", None)
-                    )
-
-                    if n_osc is not None and n_cond is not None:
-                        state_dim = getattr(eager_model, "state_dim", None) or getattr(getattr(eager_model, "dynamics", None), "state_dim", None) or (n_osc + n_cond)
-                        batch_size = 4
-                        sample_state = torch.randn(batch_size, state_dim, device=device)
-                        sample_drive = torch.randn(batch_size, n_osc, n_cond, device=device)
-
-                        # Warmup (2 passes under no_grad)
-                        for _ in range(2):
-                            try:
-                                _ = wrapped_compiled_model(sample_state, sample_drive)
-                            except TypeError:
-                                _ = wrapped_compiled_model(sample_state)
-                            try:
-                                _ = eager_runner(sample_state, sample_drive)
-                            except TypeError:
-                                _ = eager_runner(sample_state)
-                        _sync_device(device)
-
-                        # Test invocation with state and drive
-                        try:
-                            out_compiled = wrapped_compiled_model(sample_state, sample_drive)
-                        except TypeError:
-                            out_compiled = wrapped_compiled_model(sample_state)
-                        _sync_device(device)
-
-                        try:
-                            out_eager = eager_runner(sample_state, sample_drive)
-                        except TypeError:
-                            out_eager = eager_runner(sample_state)
-                        _sync_device(device)
-                    else:
-                        state_dim = getattr(eager_model, "state_dim", 1024)
-                        inp = torch.randn(num_samples, state_dim, device=device)
-
-                        # Warmup (2 passes under no_grad)
-                        for _ in range(2):
-                            if callable(wrapped_compiled_model):
-                                _ = wrapped_compiled_model(inp)
-                            if callable(eager_runner):
-                                _ = eager_runner(inp)
-                        _sync_device(device)
-
-                        out_compiled = wrapped_compiled_model(inp)
-                        _sync_device(device)
-                        out_eager = eager_runner(inp)
-                        _sync_device(device)
-
-            if isinstance(out_compiled, torch.Tensor) and isinstance(out_eager, torch.Tensor):
-                abs_diff = torch.abs(out_compiled - out_eager)
-                rel_diff = abs_diff / (torch.abs(out_eager) + 1e-8)
-
-                max_abs_diff = float(torch.max(abs_diff).item())
-                max_rel_diff = float(torch.max(rel_diff).item())
-
-                if max_abs_diff > atol or max_rel_diff > rtol:
-                    is_correct = False
-                    error_msg = f"Numerical tolerance exceeded: max_abs_diff={max_abs_diff:.6e} > atol={atol}, max_rel_diff={max_rel_diff:.6e} > rtol={rtol}"
-            else:
-                is_correct = True
-
-        except Exception as exc:
-            is_correct = False
-            error_msg = f"Error during numerical verification: {exc}"
-            logger.error("Node 5 evaluation error for %s: %s", candidate_id, exc)
-
-    # Attach verification metadata to Chia profiler if available
-    try:
-        from chia.base.profiling import get_profiler
-        get_profiler().add_info({
-            "candidate_id": candidate_id,
-            "node": "node5_phase1_verify_correctness",
-            "is_correct": is_correct,
-            "max_abs_diff": max_abs_diff,
-            "max_rel_diff": max_rel_diff,
-            "target_device": device,
-        })
-    except Exception:
-        pass
-
-    if is_correct:
-        # Reset Counter ID 1 on success
-        db.update_counters(candidate_id, counter_1_compilation=0)
-        logger.info("Node 5: Verification PASSED for candidate %s (Counter 1 reset to 0)", candidate_id)
-
-        return {
-            "candidate_id": candidate_id,
-            "status": "PASSED",
-            "compiled_model": wrapped_compiled_model if "wrapped_compiled_model" in locals() else compiled_model,
-            "counter_1": 0,
-            "max_abs_diff": max_abs_diff,
-            "max_rel_diff": max_rel_diff,
-            "rtol": rtol,
-            "atol": atol,
-            "target_device": device,
-            "details": f"Verification passed: max_abs_diff={max_abs_diff:.6e}, max_rel_diff={max_rel_diff:.6e}",
-            "error_logs": "",
-            "next_node": "node6_phase1_simulate_profile",
-        }
-    else:
-        # Increment Counter ID 1 on failure
+    def _handle_failure(
+        error_stage: str,
+        error_msg: str,
+        max_abs: float = 0.0,
+        max_rel: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Helper to centralize Counter 1 increment, limit check, and DB updates."""
         new_counter_1 = curr_counter_1 + 1
         db.update_counters(candidate_id, counter_1_compilation=new_counter_1)
 
@@ -385,10 +138,11 @@ def node5_phase1_verify_correctness(
 
         if new_counter_1 > max_counter_1:
             logger.error(
-                "Node 5: Counter 1 limit exceeded (%d > %d) for candidate %s",
+                "Node 5: Counter 1 limit exceeded (%d > %d) for candidate %s: %s",
                 new_counter_1,
                 max_counter_1,
                 candidate_id,
+                error_msg,
             )
             mode = "debug" if proposal.get("is_debug") else ("reference" if proposal.get("is_reference") else "standard")
             return node9_phase1_error_handler(
@@ -399,17 +153,32 @@ def node5_phase1_verify_correctness(
                 current_count=new_counter_1,
                 max_count=max_counter_1,
                 execution_mode=mode,
-                error_stage="correctness_verification",
+                error_stage=error_stage,
                 details=error_msg,
             )
 
         db.update_execution_status(
             candidate_id,
             compilation_status="FAILED",
-            error_stage="correctness_verification",
+            error_stage=error_stage,
             error_message=error_msg,
         )
         logger.warning("Node 5: Verification FAILED for %s (Counter 1 = %d)", candidate_id, new_counter_1)
+
+        # Attach telemetry to profiler if available
+        try:
+            from chia.base.profiling import get_profiler
+            get_profiler().add_info({
+                "candidate_id": candidate_id,
+                "node": "node5_phase1_verify_correctness",
+                "is_correct": False,
+                "counter_1": new_counter_1,
+                "error_stage": error_stage,
+                "error_message": error_msg,
+                "target_device": device,
+            })
+        except Exception:
+            pass
 
         return {
             "candidate_id": candidate_id,
@@ -417,15 +186,222 @@ def node5_phase1_verify_correctness(
             "counter_1": new_counter_1,
             "details": error_msg,
             "error_logs": error_msg,
-            "max_abs_diff": max_abs_diff,
-            "max_rel_diff": max_rel_diff,
+            "max_abs_diff": max_abs,
+            "max_rel_diff": max_rel,
             "rtol": rtol,
             "atol": atol,
             "target_device": device,
             "next_node": "node8_phase1_diagnostic_proposal",
         }
 
+    # 1. Handle Compilation Failures or Missing Models upfront
+    if compilation_status == "FAILED" or compiled_model is None or eager_model is None:
+        if compilation_status == "FAILED" or compiled_model is None:
+            err_stage = "compilation"
+            if compilation_error:
+                err_msg = compilation_error
+            elif compiled_model is None and eager_model is None:
+                err_msg = "Verification failed: missing model artifact(s): compiled_model, eager_model."
+            elif compiled_model is None:
+                err_msg = "Verification failed: missing model artifact(s): compiled_model."
+            else:
+                err_msg = "Compilation failed in Node 4 runner"
+        else:
+            err_stage = "correctness_verification"
+            err_msg = "Verification failed: missing model artifact(s): eager_model."
+
+        logger.error("Node 5: %s for candidate %s", err_msg, candidate_id)
+        return _handle_failure(error_stage=err_stage, error_msg=err_msg)
+
+    # 2. Pure Numerical Verification (both compiled and eager models present)
+    max_rel_diff = 0.0
+    max_abs_diff = 0.0
+
+    try:
+        # Place eager model on device and set evaluation mode if supported
+        if hasattr(eager_model, "to") and callable(getattr(eager_model, "to")):
+            try:
+                eager_model = eager_model.to(device)
+            except Exception as dev_err:
+                logger.warning("Node 5: eager_model.to(%s) failed: %s; running on current device.", device, dev_err)
+
+        if hasattr(eager_model, "eval") and callable(getattr(eager_model, "eval")):
+            eager_model.eval()
+
+        if hasattr(compiled_model, "to") and callable(getattr(compiled_model, "to")):
+            try:
+                compiled_model = compiled_model.to(device)
+            except Exception as dev_err:
+                logger.warning("Node 5: compiled_model.to(%s) failed: %s; running on current device.", device, dev_err)
+
+        if hasattr(compiled_model, "eval") and callable(getattr(compiled_model, "eval")):
+            compiled_model.eval()
+
+        # Warmup and execute model on sample inputs under torch.no_grad() and frozen noise
+        num_samples = 100
+        with torch.no_grad(), _freeze_noise([compiled_model, eager_model]):
+            if sample_input is not None:
+                if isinstance(sample_input, (tuple, list)):
+                    inp = [x.to(device) if hasattr(x, "to") and callable(getattr(x, "to")) else x for x in sample_input]
+                    for _ in range(2):
+                        if callable(compiled_model):
+                            _ = compiled_model(*inp)
+                        if callable(eager_model):
+                            _ = eager_model(*inp)
+                    _sync_device(device)
+
+                    torch.manual_seed(42)
+                    out_compiled = compiled_model(*inp)
+                    _sync_device(device)
+                    torch.manual_seed(42)
+                    out_eager = eager_model(*inp)
+                    _sync_device(device)
+                else:
+                    inp = sample_input.to(device) if hasattr(sample_input, "to") and callable(getattr(sample_input, "to")) else sample_input
+                    for _ in range(2):
+                        if callable(compiled_model):
+                            _ = compiled_model(inp)
+                        if callable(eager_model):
+                            _ = eager_model(inp)
+                    _sync_device(device)
+
+                    torch.manual_seed(42)
+                    out_compiled = compiled_model(inp)
+                    _sync_device(device)
+                    torch.manual_seed(42)
+                    out_eager = eager_model(inp)
+                    _sync_device(device)
+            else:
+                # Determine whether this is a multi-input Kuramoto model (state + drive)
+                n_osc = (
+                    getattr(eager_model, "n_oscillators", None)
+                    or getattr(eager_model, "n", None)
+                    or getattr(getattr(eager_model, "dynamics", None), "n", None)
+                    or getattr(getattr(eager_model, "dynamics", None), "n_oscillators", None)
+                    or getattr(getattr(config, "reference_design", None), "n_oscillators", None)
+                )
+                n_cond = (
+                    getattr(eager_model, "n_conditional_oscillators", None)
+                    or getattr(eager_model, "n_cond", None)
+                    or getattr(getattr(eager_model, "dynamics", None), "n_cond", None)
+                    or getattr(getattr(eager_model, "dynamics", None), "n_conditional_oscillators", None)
+                    or getattr(getattr(config, "reference_design", None), "n_conditional_oscillators", None)
+                )
+
+                if n_osc is not None and n_cond is not None:
+                    state_dim = getattr(eager_model, "state_dim", None) or getattr(getattr(eager_model, "dynamics", None), "state_dim", None) or (n_osc + n_cond)
+                    batch_size = 4
+                    sample_state = torch.randn(batch_size, state_dim, device=device)
+                    sample_drive = torch.randn(batch_size, n_osc, n_cond, device=device)
+
+                    # Warmup (2 passes under no_grad)
+                    for _ in range(2):
+                        try:
+                            _ = compiled_model(sample_state, sample_drive)
+                        except TypeError:
+                            _ = compiled_model(sample_state)
+                        try:
+                            _ = eager_model(sample_state, sample_drive)
+                        except TypeError:
+                            _ = eager_model(sample_state)
+                    _sync_device(device)
+
+                    # Test invocation with state and drive
+                    try:
+                        out_compiled = compiled_model(sample_state, sample_drive)
+                    except TypeError:
+                        out_compiled = compiled_model(sample_state)
+                    _sync_device(device)
+
+                    try:
+                        out_eager = eager_model(sample_state, sample_drive)
+                    except TypeError:
+                        out_eager = eager_model(sample_state)
+                    _sync_device(device)
+                else:
+                    state_dim = getattr(eager_model, "state_dim", 1024)
+                    inp = torch.randn(num_samples, state_dim, device=device)
+
+                    # Warmup (2 passes under no_grad)
+                    for _ in range(2):
+                        if callable(compiled_model):
+                            _ = compiled_model(inp)
+                        if callable(eager_model):
+                            _ = eager_model(inp)
+                    _sync_device(device)
+
+                    out_compiled = compiled_model(inp)
+                    _sync_device(device)
+                    out_eager = eager_model(inp)
+                    _sync_device(device)
+
+        if isinstance(out_compiled, torch.Tensor) and isinstance(out_eager, torch.Tensor):
+            abs_diff = torch.abs(out_compiled - out_eager)
+            rel_diff = abs_diff / (torch.abs(out_eager) + 1e-8)
+
+            max_abs_diff = float(torch.max(abs_diff).item())
+            max_rel_diff = float(torch.max(rel_diff).item())
+
+            if max_abs_diff > atol or max_rel_diff > rtol:
+                error_msg = f"Numerical tolerance exceeded: max_abs_diff={max_abs_diff:.6e} > atol={atol}, max_rel_diff={max_rel_diff:.6e} > rtol={rtol}"
+                return _handle_failure(
+                    error_stage="correctness_verification",
+                    error_msg=error_msg,
+                    max_abs=max_abs_diff,
+                    max_rel=max_rel_diff,
+                )
+        elif type(out_compiled) != type(out_eager):
+            error_msg = f"Output type mismatch: compiled returned {type(out_compiled)}, eager returned {type(out_eager)}"
+            return _handle_failure(
+                error_stage="correctness_verification",
+                error_msg=error_msg,
+                max_abs=max_abs_diff,
+                max_rel=max_rel_diff,
+            )
+
+    except Exception as exc:
+        error_msg = f"Error during numerical verification: {exc}"
+        logger.error("Node 5 evaluation error for %s: %s", candidate_id, exc)
+        return _handle_failure(
+            error_stage="correctness_verification",
+            error_msg=error_msg,
+            max_abs=0.0,
+            max_rel=0.0,
+        )
+
+    # Reset Counter ID 1 on success
+    db.update_counters(candidate_id, counter_1_compilation=0)
+    logger.info("Node 5: Verification PASSED for candidate %s (Counter 1 reset to 0)", candidate_id)
+
+    # Attach verification metadata to Chia profiler if available
+    try:
+        from chia.base.profiling import get_profiler
+        get_profiler().add_info({
+            "candidate_id": candidate_id,
+            "node": "node5_phase1_verify_correctness",
+            "is_correct": True,
+            "max_abs_diff": max_abs_diff,
+            "max_rel_diff": max_rel_diff,
+            "target_device": device,
+        })
+    except Exception:
+        pass
+
+    return {
+        "candidate_id": candidate_id,
+        "status": "PASSED",
+        "compiled_model": compiled_model,
+        "counter_1": 0,
+        "max_abs_diff": max_abs_diff,
+        "max_rel_diff": max_rel_diff,
+        "rtol": rtol,
+        "atol": atol,
+        "target_device": device,
+        "details": f"Verification passed: max_abs_diff={max_abs_diff:.6e}, max_rel_diff={max_rel_diff:.6e}",
+        "error_logs": "",
+        "next_node": "node6_phase1_simulate_profile",
+    }
+
 
 # Backwards compatibility alias
 node5_verify_correctness = node5_phase1_verify_correctness
-

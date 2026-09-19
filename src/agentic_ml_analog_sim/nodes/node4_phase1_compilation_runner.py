@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import sys
-import time
 from typing import Any, Dict, Optional
 
 import torch
@@ -58,16 +57,39 @@ def _compile_model_worker_task(
     model: Any,
     backend: str = "inductor",
     target_device: str = "mps",
-    dynamic: bool = True,
+    dynamic: Optional[bool] = None,
+    sample_state: Optional[Any] = None,
+    sample_drive: Optional[Any] = None,
 ) -> Any:
-    """ChiaFunction worker task executing PyTorch model compilation on cluster worker."""
+    """ChiaFunction worker task executing PyTorch model compilation on cluster worker.
+
+    Performs a single-step dry-run pass on dummy inputs under torch.no_grad()
+    to trigger PyTorch lazy compilation and verify lowering on target hardware.
+    """
     from un0.compiler import compile_model
-    return compile_model(
+    compiled = compile_model(
         model,
         backend=backend,
         target_device=target_device,
         dynamic=dynamic,
     )
+
+    # Trigger PyTorch lazy compilation via dry-run pass on target device
+    if sample_state is not None:
+        device = _resolve_target_device(target_device)
+        s = sample_state.to(device) if hasattr(sample_state, "to") and callable(getattr(sample_state, "to")) else sample_state
+        d = sample_drive.to(device) if sample_drive is not None and hasattr(sample_drive, "to") and callable(getattr(sample_drive, "to")) else sample_drive
+        with torch.no_grad():
+            if d is not None:
+                try:
+                    _ = compiled(s, d)
+                except TypeError:
+                    _ = compiled(s)
+            else:
+                _ = compiled(s)
+        _sync_device(device)
+
+    return compiled
 
 
 @ChiaFunction()
@@ -84,7 +106,7 @@ def node4_phase1_compilation_runner(
 
     Compiles the model with Inductor backend on target hardware (MPS/CUDA/CPU)
     in a Ray worker managed by the Chia API.
-    Numerical correctness verification and warmup passes are deferred to Node 5.
+    Unconditionally routes to Node 5 (Verify Correctness).
 
     Args:
         db: ResultDatabase instance.
@@ -96,8 +118,8 @@ def node4_phase1_compilation_runner(
         eager_model: Eager reference model with solver & noise rewrites.
 
     Returns:
-        Dict detailing candidate_id, compilation_status, compiled model, eager model,
-        and build logs.
+        Dict detailing candidate_id, status, compiled_model, eager_model, target_device,
+        build_logs, error_logs, error_message, and next_node ('node5_phase1_verify_correctness').
     """
     proposal = db.get_proposal(candidate_id)
     if proposal is None:
@@ -185,7 +207,7 @@ def node4_phase1_compilation_runner(
         except Exception as exc:
             logger.warning("Node 4: Eager model resolution warning: %s", exc)
 
-    if prepared_model is None:
+    if prepared_model is None and eager_model is not None:
         try:
             from un0.compiler import functionalize_kuramoto_model
             prepared_model = functionalize_kuramoto_model(
@@ -194,11 +216,34 @@ def node4_phase1_compilation_runner(
                 num_steps=num_steps,
                 dt=dt,
                 integration_time=integration_time,
-                use_hop=True,
+                use_hop=False,
             )
         except Exception as exc:
             logger.warning("Node 4: Functionalized HOP model fallback issue: %s", exc)
             prepared_model = eager_model
+
+    # Construct sample dummy inputs for dry-run
+    sample_state = torch.randn(4, state_dim)
+    sample_drive = torch.randn(4, n_osc, n_cond)
+
+    # Prepare eager baseline with consistent trajectory interface for Node 5
+    eager_baseline = eager_model
+    if eager_model is not None:
+        try:
+            import inspect
+            sig = inspect.signature(eager_model.forward)
+            if "_time" in sig.parameters or "time" in sig.parameters or "t" in sig.parameters:
+                from un0.compiler import functionalize_kuramoto_model
+                eager_baseline = functionalize_kuramoto_model(
+                    model=eager_model,
+                    solver_name=solver_name,
+                    num_steps=num_steps,
+                    dt=dt,
+                    integration_time=integration_time,
+                    use_hop=False,
+                )
+        except Exception as align_err:
+            logger.debug("Node 4: Eager baseline alignment skipped: %s", align_err)
 
     compiled_model = None
     build_logs = ""
@@ -206,8 +251,11 @@ def node4_phase1_compilation_runner(
 
     try:
         model_to_compile = prepared_model if prepared_model is not None else eager_model
-        if model_to_compile is not None:
-            # Task of Node 4 is compilation in a Ray worker using Chia API
+        if model_to_compile is None:
+            compilation_status = "FAILED"
+            build_logs = "Compilation error: No model available to compile."
+            logger.error("Node 4: %s", build_logs)
+        else:
             worker_resources: Dict[str, Any] = {}
             can_dispatch_remote = False
 
@@ -232,6 +280,8 @@ def node4_phase1_compilation_runner(
                         backend="inductor",
                         target_device=device,
                         dynamic=None,
+                        sample_state=sample_state,
+                        sample_drive=sample_drive,
                     )
                 except Exception as rem_exc:
                     logger.warning("Remote compilation on worker failed (%s); retrying locally.", rem_exc)
@@ -240,6 +290,8 @@ def node4_phase1_compilation_runner(
                         backend="inductor",
                         target_device=device,
                         dynamic=None,
+                        sample_state=sample_state,
+                        sample_drive=sample_drive,
                     )
             else:
                 compiled_model = _compile_model_worker_task(
@@ -247,19 +299,19 @@ def node4_phase1_compilation_runner(
                     backend="inductor",
                     target_device=device,
                     dynamic=None,
+                    sample_state=sample_state,
+                    sample_drive=sample_drive,
                 )
 
             build_logs = f"Torch Inductor compilation succeeded on {device} (dynamic batch shapes B>=1)."
-        else:
-            compiled_model = eager_model
-            build_logs = f"Compilation bypassed: fallback to eager model on {device}."
 
     except Exception as exc:
         compilation_status = "FAILED"
+        compiled_model = None
         build_logs = f"Compilation error on device '{device}': {exc}"
         logger.error("Node 4 compilation failed for candidate %s: %s", candidate_id, exc)
 
-    # Update DB status
+    # Update DB status (Node 4 never increments Counter 1; Counter 1 is owned by Node 5)
     db.update_execution_status(
         candidate_id,
         compilation_status=compilation_status,
@@ -279,16 +331,17 @@ def node4_phase1_compilation_runner(
     except Exception:
         pass
 
-    eager_baseline = prepared_model if prepared_model is not None else eager_model
-
+    # Node 4 UNCONDITIONALLY routes to Node 5 (Verify Correctness)
     if compilation_status == "SUCCESS":
         return {
             "candidate_id": candidate_id,
             "status": "SUCCESS",
-            "compiled_model": compiled_model if compiled_model is not None else eager_baseline,
+            "compiled_model": compiled_model,
             "eager_model": eager_baseline,
             "target_device": device,
             "build_logs": build_logs,
+            "error_logs": "",
+            "error_message": "",
             "next_node": "node5_phase1_verify_correctness",
         }
     else:
@@ -298,9 +351,10 @@ def node4_phase1_compilation_runner(
             "compiled_model": None,
             "eager_model": eager_baseline,
             "target_device": device,
+            "build_logs": build_logs,
             "error_logs": build_logs,
             "error_message": build_logs,
-            "next_node": "node8_phase1_diagnostic_proposal",
+            "next_node": "node5_phase1_verify_correctness",
         }
 
 

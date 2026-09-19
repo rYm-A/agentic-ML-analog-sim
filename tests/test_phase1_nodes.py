@@ -593,6 +593,74 @@ def test_node5_chia_function_options_and_device_handling(tmp_db_and_config):
     assert res_device["max_abs_diff"] < 1e-5
 
 
+def test_node5_compilation_status_failed_centralized_counter_1(tmp_db_and_config):
+    """Test that Node 5 centralizes Counter 1 on compilation_status='FAILED'."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_verif_comp_fail",
+        solver="euler",
+        noise_model="none",
+    )
+
+    # 1. Compilation failure from Node 4 passed to Node 5
+    res = node5_phase1_verify_correctness(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=None,
+        eager_model=lambda x: x,
+        compilation_status="FAILED",
+        compilation_error="Inductor backend failed: unsupported operator",
+    )
+
+    assert res["status"] == "FAILED"
+    assert res["counter_1"] == 1
+    assert res["error_logs"] == "Inductor backend failed: unsupported operator"
+    assert res["next_node"] == "node8_phase1_diagnostic_proposal"
+
+    prop = db.get_proposal(cand_id)
+    assert prop["counter_1_compilation"] == 1
+    assert prop["compilation_status"] == "FAILED"
+    assert prop["error_stage"] == "compilation"
+    assert prop["error_message"] == "Inductor backend failed: unsupported operator"
+
+
+def test_node5_no_safe_compiled_hop_wrapper_and_forward_exception(tmp_db_and_config):
+    """Test that _SafeCompiledHOPWrapper is removed and forward exceptions increment Counter 1."""
+    import agentic_ml_analog_sim.nodes.node5_phase1_verify_correctness as n5_mod
+    assert not hasattr(n5_mod, "_SafeCompiledHOPWrapper"), "_SafeCompiledHOPWrapper must be completely removed"
+
+    db, config = tmp_db_and_config
+    cand_id = db.insert_proposal(
+        candidate_id="cand_verif_exception",
+        solver="euler",
+        noise_model="none",
+    )
+
+    def crashing_compiled(x):
+        raise RuntimeError("Inductor execution crash")
+
+    res = node5_phase1_verify_correctness(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=crashing_compiled,
+        eager_model=lambda x: x,
+        sample_input=torch.ones(2, 2),
+    )
+
+    assert res["status"] == "FAILED"
+    assert res["counter_1"] == 1
+    assert "Inductor execution crash" in res["details"]
+    assert res["next_node"] == "node8_phase1_diagnostic_proposal"
+
+    prop = db.get_proposal(cand_id)
+    assert prop["counter_1_compilation"] == 1
+    assert prop["compilation_status"] == "FAILED"
+    assert prop["error_stage"] == "correctness_verification"
+
+
 # --- Tests for Node 6 Simulation & Profile ---
 
 
@@ -1141,5 +1209,5 @@ def test_node4_compilation_runner_chia_function_and_failure_payload(tmp_db_and_c
     assert "error_message" in res_fail
     assert res_fail["error_logs"] == res_fail["error_message"]
     assert "Forced TorchInductor compilation failure" in res_fail["error_message"]
-    assert res_fail["next_node"] == "node8_phase1_diagnostic_proposal"
+    assert res_fail["next_node"] == "node5_phase1_verify_correctness"
 

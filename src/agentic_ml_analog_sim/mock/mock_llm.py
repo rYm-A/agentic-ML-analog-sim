@@ -330,7 +330,7 @@ def {rewrite_name}(model, solver_name="rk4", num_steps=25, dt=0.04, integration_
         num_steps=num_steps,
         dt=dt,
         integration_time=integration_time,
-        use_hop=True,
+        use_hop=False,
     )
 '''
                 registered = False
@@ -476,6 +476,44 @@ class {noise_name.replace("_", "").capitalize()}Noise(nn.Module):
                 )
                 proposal_dict = {"status": "SUCCESS", "noise_name": noise_name, "raw_explanation": result_text}
                 result_json = result_text
+        elif not self._responses and any(k in user_message.lower() for k in ("diagnostic & root-cause analysis", "diagnose failure", "diagnostic proposal", "diagnostic agent")):
+            import re
+            m_cand = re.search(r"candidate[_ ]*(?:id)?[:=\s]*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
+            cand = m_cand.group(1) if m_cand else f"cand_mock_{self.call_count}"
+
+            # Check if prompt mentions multiple rewrite retries or debug request condition
+            m_c2 = re.search(r"counter\s*2\s*\(rewrite\)\s*:\s*(\d+)", user_message, re.IGNORECASE)
+            c2_val = int(m_c2.group(1)) if m_c2 else 0
+
+            if c2_val >= 2 or "multiple rewrites" in user_message.lower() or "debug mode" in user_message.lower() or "counter_2=2" in user_message.lower():
+                proposal_dict = {
+                    "action": "debug_request",
+                    "nodes_to_rerun": [3],
+                    "diagnosis": f"Multiple rewrite attempts failed for candidate {cand}. Requesting Debug Mode to isolate hardware noise versus solver dynamics.",
+                    "reasoning": f"Candidate {cand} has accumulated repeated failures. Entering debug mode with deactivated noise isolates solver dynamics from analog parameter noise.",
+                    "debug_request": {
+                        "debugee_id": cand,
+                        "deactivate": "deactivate_noise",
+                        "deactivated_rewrites": ["noise"],
+                    },
+                }
+            elif any(k in user_message.lower() for k in ("compil", "inductor", "hop", "dynamic shape")):
+                proposal_dict = {
+                    "action": "rewrite_correction",
+                    "nodes_to_rerun": [3],
+                    "diagnosis": f"Compilation failure detected for candidate {cand} during Inductor HOP lowering.",
+                    "reasoning": "Rerunning compiler rewriter (Node 3) with dynamic shapes disabled to generate a compilable graph.",
+                    "debug_request": None,
+                }
+            else:
+                proposal_dict = {
+                    "action": "rewrite_correction",
+                    "nodes_to_rerun": [1, 2, 3],
+                    "diagnosis": f"Out-of-tolerance simulation error for candidate {cand}.",
+                    "reasoning": "Rerunning full rewrite pipeline (Nodes 1, 2, and 3) to co-optimize solver step size and noise wrapper scaling.",
+                    "debug_request": None,
+                }
+            result_json = json.dumps(proposal_dict, indent=2)
         else:
             proposal_dict = self._get_next_proposal_dict(tool_list)
             result_json = json.dumps(proposal_dict, indent=2)

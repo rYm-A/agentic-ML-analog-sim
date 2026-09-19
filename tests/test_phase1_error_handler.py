@@ -269,3 +269,37 @@ def test_counter4_exceedance_in_node7(test_config, test_db):
     # DB status marked FAILED
     prop = test_db.get_proposal(debug_id)
     assert prop["status"] == "FAILED"
+
+
+def test_node9_chia_execution_options_and_maintenance(test_config, test_db):
+    """Verify Node 9 ChiaFunction execution options and WAL maintenance."""
+    cand_id = test_db.insert_proposal(
+        candidate_id="cand_node9_chia_opts_01",
+        solver="euler",
+        noise_model="none",
+        status="PENDING",
+    )
+
+    # Check ChiaFunction options
+    chia_opts = getattr(node9_phase1_error_handler, "_chia_options", {})
+    assert chia_opts.get("max_retries") == 0
+    assert chia_opts.get("num_cpus") == 0.1
+
+    res = node9_phase1_error_handler(
+        db=test_db,
+        config=test_config,
+        candidate_id=cand_id,
+        counter_name="counter_2_rewrite",
+        current_count=5,
+        max_count=4,
+        execution_mode="standard",
+        error_stage="rewrite_evaluation",
+        details="Rewrite count exceeded.",
+    )
+
+    assert res["status"] == "TERMINATED_MAX_CYCLES"
+    assert res["counter_name"] == "counter_2_rewrite"
+    snapshot_path = res.get("db_snapshot")
+    assert snapshot_path is not None
+    assert Path(snapshot_path).is_file()
+

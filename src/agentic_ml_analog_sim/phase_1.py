@@ -266,26 +266,10 @@ def run_phase_1(
             eager_model=node3_res.get("eager_model") if "node3_res" in locals() and isinstance(node3_res, dict) else None,
         )
 
-        if comp_res.get("status") == "FAILED":
-            logger.warning("Node 4 compilation failed for candidate '%s': %s", active_candidate_id, comp_res.get("error_message"))
-            # Route to Node 8 Diagnostic Agent
-            diag_res = node8_phase1_diagnostic_proposal(
-                db=db,
-                config=config,
-                candidate_id=active_candidate_id,
-                error_logs=comp_res.get("error_message", "Compilation failed"),
-                llm=llm,
-            )
-            current_trigger = "node_8"
-            previous_node_id = "node_4"
-            if diag_res.get("type") == "DEBUG_MODE_REQUEST":
-                debug_request = diag_res
-            else:
-                debug_request = None
-            continue
-
         compiled_model = comp_res.get("compiled_model")
         eager_model = comp_res.get("eager_model")
+        compilation_status = comp_res.get("status", "SUCCESS")
+        compilation_error = comp_res.get("error_message") or comp_res.get("error_logs")
 
         # STEP 4: Node 5 Verify Correctness (Eager vs Compiled)
         logger.info("Executing Node 5 (Verify Correctness) for '%s'", active_candidate_id)
@@ -296,6 +280,8 @@ def run_phase_1(
             compiled_model=compiled_model,
             eager_model=eager_model,
             target_device=target_device,
+            compilation_status=compilation_status,
+            compilation_error=compilation_error,
         )
 
         if verify_res.get("status") == "TERMINATED_MAX_CYCLES":
@@ -321,11 +307,11 @@ def run_phase_1(
                 llm=llm,
             )
             current_trigger = "node_8"
-            previous_node_id = "node_5"
-            if diag_res.get("type") == "DEBUG_MODE_REQUEST":
-                debug_request = diag_res
+            previous_node_id = "node8_phase1_diagnostic_proposal"
+            if diag_res.get("type") == "DEBUG_MODE_REQUEST" or diag_res.get("action") == "debug_request":
+                debug_request = diag_res.get("debug_request") or diag_res
             else:
-                debug_request = None
+                debug_request = {"nodes_to_rerun": diag_res.get("nodes_to_rerun", [1, 2, 3])}
             continue
 
         # STEP 5: Node 6 Simulate and Profile
@@ -351,11 +337,11 @@ def run_phase_1(
                 llm=llm,
             )
             current_trigger = "node_8"
-            previous_node_id = "node_6"
-            if diag_res.get("type") == "DEBUG_MODE_REQUEST":
-                debug_request = diag_res
+            previous_node_id = "node8_phase1_diagnostic_proposal"
+            if diag_res.get("type") == "DEBUG_MODE_REQUEST" or diag_res.get("action") == "debug_request":
+                debug_request = diag_res.get("debug_request") or diag_res
             else:
-                debug_request = None
+                debug_request = {"nodes_to_rerun": diag_res.get("nodes_to_rerun", [1, 2, 3])}
             continue
 
         metrics = profile_res.get("metrics", {})
@@ -400,11 +386,11 @@ def run_phase_1(
                 llm=llm,
             )
             current_trigger = "node_8"
-            previous_node_id = "node_7"
-            if diag_res.get("type") == "DEBUG_MODE_REQUEST":
-                debug_request = diag_res
+            previous_node_id = "node8_phase1_diagnostic_proposal"
+            if diag_res.get("type") == "DEBUG_MODE_REQUEST" or diag_res.get("action") == "debug_request":
+                debug_request = diag_res.get("debug_request") or diag_res
             else:
-                debug_request = None
+                debug_request = {"nodes_to_rerun": diag_res.get("nodes_to_rerun", [1, 2, 3])}
             continue
 
     # Exceeded loop bound
