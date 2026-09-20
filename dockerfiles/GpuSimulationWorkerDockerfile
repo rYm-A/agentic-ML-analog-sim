@@ -45,8 +45,9 @@ RUN /opt/conda/bin/conda create -n py_worker python=${PYTHON_VERSION} -y -q \
 
 # 3. Compilation & Simulation Dependencies
 RUN /opt/conda/envs/py_worker/bin/pip install --no-cache-dir \
+        torch==2.4.0 torchvision --extra-index-url https://download.pytorch.org/whl/cu121 \
+    && /opt/conda/envs/py_worker/bin/pip install --no-cache-dir \
         "ray[default]==${RAY_VERSION}" \
-        torch==2.4.0 torchvision --index-url https://download.pytorch.org/whl/cu121 \
         torchdiffeq \
         scipy \
         numpy \
