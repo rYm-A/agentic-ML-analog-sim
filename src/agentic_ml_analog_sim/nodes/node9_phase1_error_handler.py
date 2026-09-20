@@ -31,7 +31,7 @@ def _cleanup_node9_resources(*args: Any, **kwargs: Any) -> None:
     logger.debug("Node 9: Worker cleanup completed.")
 
 
-@ChiaFunction(num_cpus=0.1, max_retries=0)
+@ChiaFunction(num_cpus=0.1, max_retries=0, resources={"control_worker": 1})
 def node9_phase1_error_handler(
     db: ResultDatabase,
     config: SimulationConfig,

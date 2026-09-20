@@ -1,0 +1,155 @@
+# ==============================================================================
+# Un-0 Analog ML Swarm - Agent Worker Container
+# ==============================================================================
+# Target Platform: Linux x86_64 (linux/amd64)
+#
+# This Dockerfile defines the containerized execution environment for Agent
+# Worker nodes within the Un-0 Analog ML Swarm. It satisfies the execution
+# requirements of:
+#   - Phase 0: Proposal generation, context gathering, and LLM reasoning.
+#   - Phase 1: Agentic solver/noise/compiler rewriting with FastMCP tools.
+#   - Phase 2: Autonomous report synthesis and PDF compilation via pdflatex.
+#
+# ------------------------------------------------------------------------------
+# Base Image & Runtime Compatibility
+# ------------------------------------------------------------------------------
+# Base: ghcr.io/ucb-bar/chia:latest (derived from rayproject/ray:2.54.0-cpu)
+# - Python: 3.10.19
+# - Ray: 2.54.0
+# - Chia: Pre-installed ucb-bar/chia package with FastMCP/FastAPI tool servers.
+#
+# Ray and Python minor versions strictly match the cluster head to prevent
+# protocol deserialization mismatches when connecting via `ray start`.
+# If building against a raw ray base (rayproject/ray:2.54.0-cpu), ensure the
+# chia package is installed via `pip install chia`.
+#
+# ------------------------------------------------------------------------------
+# Volume Mount Conventions
+# ------------------------------------------------------------------------------
+# When starting the container (via CHIA cluster manager or standalone docker run),
+# the following volume mounts should be established:
+#
+#   1. Google Antigravity OAuth Credentials:
+#      -v ~/.gemini:/home/ray/.gemini:ro (or rw if token refresh is needed)
+#      Allows the Antigravity CLI (`agy`) and AntigravityLLM backend to authenticate
+#      without hardcoding secrets or API keys.
+#
+#   2. Project Code Base:
+#      -v ${PROJECT_ROOT}:/workspace
+#      Mounts the root repository of agentic-ML-analog-sim for simulation scripts,
+#      node orchestration, and SQLite result database access.
+#
+#   3. Project Reports & Artifacts:
+#      -v ${PROJECT_ROOT}/reports:/workspace/reports
+#      Persists generated LaTeX tables, figures, executive summaries, and final
+#      compiled PDFs (final_report.pdf) outside the container lifecycle.
+#
+# ------------------------------------------------------------------------------
+# Port Reservations (FastMCP Tool Servers)
+# ------------------------------------------------------------------------------
+# Range: 8000-8050
+# Reserved for persistent ChiaTool FastMCP HTTP microservices deployed as Ray actors:
+#   - Port 8000: ResultDBTool (query results, candidate status, Pareto analysis)
+#   - Port 8001: NoisePapersTool (domain RAG over analog hardware literature)
+#   - Port 8002: Un0ContextTool (Un-0 hardware specs and ODE solver constraints)
+#   - Port 8003: Un0RewriterTool (AST rewrites for solver and compiler targets)
+#   - Ports 8004-8050: Dynamic allocations for diagnostic & evaluation subagents.
+#
+# ------------------------------------------------------------------------------
+# Build Instructions (Targeting Linux x86_64)
+# ------------------------------------------------------------------------------
+# Note: DO NOT run docker build automatically in CI/agent loops.
+# Manual build command:
+#   docker buildx build \
+#       --platform linux/amd64 \
+#       -f dockerfiles/AgentWorkerDockerfile \
+#       -t ghcr.io/ucb-bar/chia-agent-worker:latest \
+#       --load .
+#
+# ------------------------------------------------------------------------------
+# Standalone Smoke Test & Run
+# ------------------------------------------------------------------------------
+#   docker run --rm -it \
+#       --platform linux/amd64 \
+#       --user $(id -u):$(id -g) \
+#       -v ~/.gemini:/home/ray/.gemini \
+#       -v $(pwd):/workspace -w /workspace \
+#       ghcr.io/ucb-bar/chia-agent-worker:latest \
+#       bash -lc 'agy --version && pdflatex --version && python -c "import chia, ray; print(ray.__version__)"'
+# ==============================================================================
+
+# Specify default base image carrying Python 3.10.19 and Ray 2.54.0
+ARG BASE_IMAGE=ghcr.io/ucb-bar/chia:latest
+FROM --platform=linux/amd64 ${BASE_IMAGE}
+
+USER root
+
+# Avoid interactive prompts (e.g. tzdata / debconf) during TeX Live installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ------------------------------------------------------------------------------
+# System Dependencies & TeX Live Suite for Phase 2 LaTeX Reporting
+# ------------------------------------------------------------------------------
+# - curl, ca-certificates, tar: Required for downloading & verifying Antigravity CLI.
+# - openssh-client, rsync: Required for Chia cluster file transport and SSH tunneling.
+# - texlive-latex-base, texlive-latex-extra: Core LaTeX engines and extended macro packages.
+# - texlive-fonts-recommended: Standard font bundles (Times, Helvetica, Courier, Computer Modern).
+# - texlive-science: Mathematical, physics, and algorithm packages (amsmath, algorithmicx, etc.).
+# - latexmk: Automated multi-pass LaTeX compilation engine.
+# - ghostscript: PostScript/PDF processing and vector graphics rasterization.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        tar \
+        openssh-client \
+        rsync \
+        texlive-latex-base \
+        texlive-latex-extra \
+        texlive-fonts-recommended \
+        texlive-science \
+        latexmk \
+        ghostscript \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------------------------
+# Antigravity CLI Installation
+# ------------------------------------------------------------------------------
+# Install Google Antigravity CLI (`agy`) as the unprivileged `ray` user into
+# ~/.local/bin/agy, mirroring chia/dockerfiles/AntigravityDockerfile.
+USER ray
+ENV HOME=/home/ray
+WORKDIR /home/ray
+
+# Pre-create configuration and credential directories
+RUN mkdir -p /home/ray/.local/bin /home/ray/.gemini
+
+# Download and run Google Antigravity CLI installer
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
+
+# Ensure Antigravity binary is discoverable on PATH for login and non-login shells
+ENV PATH="/home/ray/.local/bin:${PATH}"
+
+# ------------------------------------------------------------------------------
+# Workspace Setup & User Permissions
+# ------------------------------------------------------------------------------
+# Create the standard /workspace mount target and grant universal read/write
+# access to /home/ray and /etc/passwd so arbitrary UID execution (--user) succeeds.
+USER root
+RUN mkdir -p /workspace /workspace/reports \
+    && chown -R ray:ray /workspace \
+    && chmod -R a+rwX /home/ray /workspace \
+    && chmod a+rw /etc/passwd
+
+# Drop back to unprivileged ray user
+USER ray
+WORKDIR /workspace
+
+# ------------------------------------------------------------------------------
+# Port Reservations
+# ------------------------------------------------------------------------------
+# FastMCP tool server port range (ResultDBTool, etc.)
+EXPOSE 8000-8050
+
+# Ray worker execution defaults:
+# CHIA orchestrator manages lifecycle via `docker run ... sleep infinity`
+# and connects the worker via `ray start --address=...`.

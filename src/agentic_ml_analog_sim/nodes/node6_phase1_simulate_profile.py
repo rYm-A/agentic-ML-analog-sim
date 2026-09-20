@@ -90,7 +90,7 @@ def _get_peak_memory_mb(device_str: str) -> float:
         return 0.0
 
 
-@ChiaFunction(resources={"sim_worker": 1, "metal_gpu": 0.5})
+@ChiaFunction(resources={"sim_worker": 1})
 def _simulate_batch1_worker(
     compiled_model: Any,
     num_eval_samples: int,
@@ -180,7 +180,7 @@ def _simulate_batch1_worker(
     }
 
 
-@ChiaFunction()
+@ChiaFunction(resources={"sim_worker": 1})
 def node6_phase1_simulate_profile(
     db: Union[ResultDatabase, ResultDBTool],
     config: SimulationConfig,

@@ -62,7 +62,21 @@ from agentic_ml_analog_sim.nodes.node9_phase1_error_handler import (
     node9_phase1_error_handler,
 )
 
+try:
+    from chia.base.ChiaFunction import get
+except ImportError:
+    get = None
+import ray
+
 logger = logging.getLogger("agentic_ml_analog_sim.phase_1")
+
+
+def _dispatch_node(node_fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Dispatch a node function via chia_remote if Ray is initialized, else local."""
+    if ray.is_initialized() and hasattr(node_fn, "chia_remote") and get is not None:
+        ref = node_fn.chia_remote(*args, **kwargs)
+        return get(ref)
+    return node_fn(*args, **kwargs)
 
 
 @dataclass
@@ -188,7 +202,8 @@ def run_phase_1(
         logger.info("Phase 1 loop cycle %d starting for candidate '%s'", cycle_count, active_candidate_id)
 
         # STEP 1: Node 0 Programmatic Gate
-        gate_res = node0_gate(
+        gate_res = _dispatch_node(
+            node0_phase1_gate,
             db=db,
             config=config,
             trigger_source=current_trigger,
@@ -220,7 +235,8 @@ def run_phase_1(
         # STEP 2: Execute Rewriters (Nodes 1, 2, 3 as specified)
         if 1 in nodes_to_run:
             logger.info("Executing Node 1 (Solver Rewriter) for '%s'", active_candidate_id)
-            node1_res = node1_phase1_solver_rewriter(
+            node1_res = _dispatch_node(
+                node1_phase1_solver_rewriter,
                 db=db,
                 config=config,
                 candidate_id=active_candidate_id,
@@ -232,7 +248,8 @@ def run_phase_1(
 
         if 2 in nodes_to_run:
             logger.info("Executing Node 2 (Noise Rewriter) for '%s'", active_candidate_id)
-            node2_res = node2_phase1_noise_rewriter(
+            node2_res = _dispatch_node(
+                node2_phase1_noise_rewriter,
                 db=db,
                 config=config,
                 candidate_id=active_candidate_id,
@@ -244,7 +261,8 @@ def run_phase_1(
 
         if 3 in nodes_to_run:
             logger.info("Executing Node 3 (Compiler Rewriter) for '%s'", active_candidate_id)
-            node3_res = node3_phase1_compiler_rewriter(
+            node3_res = _dispatch_node(
+                node3_phase1_compiler_rewriter,
                 db=db,
                 config=config,
                 candidate_id=active_candidate_id,
@@ -256,7 +274,8 @@ def run_phase_1(
 
         # STEP 3: Node 4 Compilation Runner
         logger.info("Executing Node 4 (Compilation Runner) on '%s' for '%s'", target_device, active_candidate_id)
-        comp_res = node4_phase1_compilation_runner(
+        comp_res = _dispatch_node(
+            node4_phase1_compilation_runner,
             db=db,
             config=config,
             candidate_id=active_candidate_id,
@@ -273,7 +292,8 @@ def run_phase_1(
 
         # STEP 4: Node 5 Verify Correctness (Eager vs Compiled)
         logger.info("Executing Node 5 (Verify Correctness) for '%s'", active_candidate_id)
-        verify_res = node5_phase1_verify_correctness(
+        verify_res = _dispatch_node(
+            node5_phase1_verify_correctness,
             db=db,
             config=config,
             candidate_id=active_candidate_id,
@@ -299,7 +319,8 @@ def run_phase_1(
         if verify_res.get("status") == "FAILED":
             logger.warning("Node 5 verification failed for candidate '%s': %s", active_candidate_id, verify_res.get("details"))
             # Route to Node 8 Diagnostic Agent
-            diag_res = node8_phase1_diagnostic_proposal(
+            diag_res = _dispatch_node(
+                node8_phase1_diagnostic_proposal,
                 db=db,
                 config=config,
                 candidate_id=active_candidate_id,
@@ -317,7 +338,8 @@ def run_phase_1(
         # STEP 5: Node 6 Simulate and Profile
         logger.info("Executing Node 6 (Simulate & Profile) for '%s'", active_candidate_id)
         model_to_profile = verify_res.get("compiled_model") if verify_res.get("compiled_model") is not None else compiled_model
-        profile_res = node6_phase1_simulate_profile(
+        profile_res = _dispatch_node(
+            node6_phase1_simulate_profile,
             db=db,
             config=config,
             candidate_id=active_candidate_id,
@@ -329,7 +351,8 @@ def run_phase_1(
         if profile_res.get("status") == "FAILED":
             logger.warning("Node 6 simulation failed for candidate '%s': %s", active_candidate_id, profile_res.get("error_message"))
             # Route to Node 8 Diagnostic Agent
-            diag_res = node8_phase1_diagnostic_proposal(
+            diag_res = _dispatch_node(
+                node8_phase1_diagnostic_proposal,
                 db=db,
                 config=config,
                 candidate_id=active_candidate_id,
@@ -348,7 +371,12 @@ def run_phase_1(
 
         # STEP 6: Node 7 Evaluation Gate
         logger.info("Executing Node 7 (Evaluation Gate) for '%s'", active_candidate_id)
-        eval_res = node7_phase1_evaluation_gate(db=db, config=config, candidate_id=active_candidate_id)
+        eval_res = _dispatch_node(
+            node7_phase1_evaluation_gate,
+            db=db,
+            config=config,
+            candidate_id=active_candidate_id,
+        )
 
         eval_status = eval_res.get("status")
         next_node = eval_res.get("next_node")
@@ -378,7 +406,8 @@ def run_phase_1(
         else:
             # Out of tolerance -> Route to Node 8 Diagnostic Agent
             logger.warning("Node 7 marked candidate '%s' out of tolerance. Triggering Node 8 diagnostic.", active_candidate_id)
-            diag_res = node8_phase1_diagnostic_proposal(
+            diag_res = _dispatch_node(
+                node8_phase1_diagnostic_proposal,
                 db=db,
                 config=config,
                 candidate_id=active_candidate_id,
@@ -395,7 +424,8 @@ def run_phase_1(
 
     # Exceeded loop bound
     logger.error("Exceeded maximum internal Phase 1 loop cycles (%d)", max_loop_cycles)
-    node9_res = node9_phase1_error_handler(
+    node9_res = _dispatch_node(
+        node9_phase1_error_handler,
         db=db,
         config=config,
         candidate_id=active_candidate_id,

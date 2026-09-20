@@ -329,7 +329,7 @@ def _resolve_llm(llm: Any = None, config: Any = None) -> Any:
         return MockAntigravityLLM(mode="valid", model=model, effort=effort, extra_cli_args=extra_cli_args, system_message=NODE2_SYSTEM_INSTRUCTIONS)
 
 
-@ChiaFunction()
+@ChiaFunction(resources={"agent_worker": 1, "antigravity_creds": 0.01})
 def node2_phase0_propose_candidate(
     db: Any,
     config: Any,

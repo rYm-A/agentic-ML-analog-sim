@@ -60,7 +60,7 @@ def _resolve_llm(llm: Optional[Any] = None, config: Optional[SimulationConfig] =
         return MockAntigravityLLM(mode="valid", model=model, effort=effort, extra_cli_args=extra_cli_args)
 
 
-@ChiaFunction()
+@ChiaFunction(resources={"agent_worker": 1, "antigravity_creds": 0.01})
 def node1_phase1_solver_rewriter(
     db: ResultDatabase,
     config: SimulationConfig,

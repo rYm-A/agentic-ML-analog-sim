@@ -25,6 +25,8 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
+from chia.base.ChiaFunction import ChiaFunction
+
 from agentic_ml_analog_sim.config import SimulationConfig
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.tools.compilation_info_tool import CompilationInfoTool
@@ -110,6 +112,7 @@ def _extract_rewrite_name(raw_text: str) -> Optional[str]:
     return None
 
 
+@ChiaFunction(resources={"agent_worker": 1, "antigravity_creds": 0.01})
 def node3_phase1_compiler_rewriter(
     db: ResultDatabase,
     config: SimulationConfig,

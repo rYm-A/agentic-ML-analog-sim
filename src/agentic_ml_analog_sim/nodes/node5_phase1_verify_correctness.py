@@ -72,7 +72,7 @@ def _sync_device(device: str) -> None:
             pass
 
 
-@ChiaFunction()
+@ChiaFunction(resources={"sim_worker": 1})
 def node5_phase1_verify_correctness(
     db: ResultDatabase,
     config: SimulationConfig,

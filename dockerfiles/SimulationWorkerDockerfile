@@ -1,0 +1,180 @@
+# syntax=docker/dockerfile:1
+# ==============================================================================
+# Un-0 Analog ML Swarm - Simulation Worker Container
+# ==============================================================================
+# Target Platform: Linux x86_64 (linux/amd64) with CUDA Acceleration
+#
+# This Dockerfile defines the containerized execution environment for Simulation
+# Worker nodes within the Un-0 Analog ML Swarm. It provides the GPU-accelerated
+# numerical runtime required for:
+#   - Phase 1: High-throughput Kuramoto oscillator dynamics and ODE simulation
+#     via torchdiffeq on NVIDIA GPUs.
+#   - Phase 1 & 2: Profiling inference latency, numerical stability, peak VRAM,
+#     and hardware noise modeling across multi-fidelity candidate evaluations.
+#
+# ------------------------------------------------------------------------------
+# Base Image & Runtime Compatibility
+# ------------------------------------------------------------------------------
+# Base: pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime (or -devel)
+# - CUDA: 12.1 with cuDNN 9 support for Linux x86_64
+# - Python: 3.10.19 (isolated conda env `py_worker` matching the cluster head)
+# - Ray: 2.54.0 (strictly pinned to cluster head to guarantee wire protocol parity)
+# - Chia: ucb-bar/chia framework (chialoops) for Ray cluster participation and MCP tools
+#
+# ------------------------------------------------------------------------------
+# Run Options & Execution Flags
+# ------------------------------------------------------------------------------
+# When launching this worker container (via Chia cluster manager or standalone):
+#
+#   1. GPU Acceleration:
+#      --gpus=all
+#      Passes all host NVIDIA GPUs into the container with full CUDA runtime access
+#      for torchdiffeq numerical integration and tensor computations.
+#
+#   2. Shared Memory:
+#      --shm-size=16gb
+#      Allocates 16 GB shared memory (/dev/shm) to support PyTorch DataLoader IPC
+#      and Ray Plasma Object Store tensor exchanges without memory exhaustion.
+#
+#   3. File Descriptor Limit:
+#      --ulimit nofile=65536:65536
+#      Raises the maximum open file descriptors to accommodate high concurrency Ray
+#      actor channels, sockets, and parallel simulation streams.
+#
+#   4. Workspace Volume Mounts:
+#      -v ${PROJECT_ROOT}:/workspace
+#         Mounts the agentic-ML-analog-sim repository into the container working
+#         directory for direct access to model definitions, solvers, and scripts.
+#      -v ${PROJECT_ROOT}/results.db:/workspace/results.db
+#         Persists the SQLite simulation metrics and token usage database.
+#      -v ~/.cache/huggingface:/home/ray/.cache/huggingface
+#         Caches dataset and model artifacts across worker container restarts.
+#
+# ------------------------------------------------------------------------------
+# Chia Cluster Configuration Reference (e.g. cluster.cloud.yaml)
+# ------------------------------------------------------------------------------
+# available_node_types:
+#   gpu_simulation_worker:
+#     resources: {"nvidia_gpu": 1, "sim_worker": 1}
+#     num_workers: 2
+#     compatible_ips: ["@sim_gpu_pool:0", "@sim_gpu_pool:1"]
+#     docker:
+#       image: "ghcr.io/ucb-bar/chia-simulation-worker:latest"
+#       container_name: "chia-sim-worker-${USER}"
+#       pull_before_run: false
+#       run_options:
+#         - --gpus=all
+#         - --shm-size=16gb
+#         - --ulimit nofile=65536:65536
+#         - -v ${PWD}:/workspace
+#
+# ------------------------------------------------------------------------------
+# Build Instructions (Targeting Linux x86_64)
+# ------------------------------------------------------------------------------
+# NOTE: DO NOT run docker build automatically during agent swarm execution!
+# Manual build command:
+#   docker buildx build \
+#       --platform linux/amd64 \
+#       -f dockerfiles/SimulationWorkerDockerfile \
+#       -t ghcr.io/ucb-bar/chia-simulation-worker:latest \
+#       --load .
+#
+# ------------------------------------------------------------------------------
+# Standalone Smoke Test
+# ------------------------------------------------------------------------------
+#   docker run --rm -it \
+#       --platform linux/amd64 \
+#       --gpus=all \
+#       --shm-size=16gb \
+#       --ulimit nofile=65536:65536 \
+#       -v $(pwd):/workspace -w /workspace \
+#       ghcr.io/ucb-bar/chia-simulation-worker:latest \
+#       python -c "import torch, ray, torchdiffeq, chia; print('PyTorch CUDA available:', torch.cuda.is_available(), '| Ray:', ray.__version__)"
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Base Image: PyTorch 2.4.0 with CUDA 12.1 and cuDNN 9 (Linux x86_64)
+# ------------------------------------------------------------------------------
+ARG BASE_IMAGE=pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
+FROM --platform=linux/amd64 ${BASE_IMAGE}
+
+SHELL ["/bin/bash", "-cl"]
+
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ------------------------------------------------------------------------------
+# 2. System Dependencies
+# ------------------------------------------------------------------------------
+# Install required transport and system utilities:
+# - openssh-client, rsync: Transport and file synchronization for Chia cluster nodes.
+# - curl, ca-certificates: TLS verification and resource downloads.
+# - git: Source control and dependency installation from repositories.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssh-client \
+        rsync \
+        curl \
+        ca-certificates \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------------------------
+# 3. Python 3.10.19 & Ray 2.54.0 Worker Environment (py_worker)
+# ------------------------------------------------------------------------------
+# Ray requires exact Python minor version parity (3.10) with the cluster head.
+# We create an isolated conda environment `py_worker` using the base image's Conda
+# installation (/opt/conda).
+ARG PYTHON_VERSION=3.10.19
+ARG RAY_VERSION=2.54.0
+
+RUN /opt/conda/bin/conda create -n py_worker python=${PYTHON_VERSION} -y -q \
+    && /opt/conda/bin/conda clean -afy
+
+# ------------------------------------------------------------------------------
+# 4. Simulation & ML Dependencies Installation
+# ------------------------------------------------------------------------------
+# Install CUDA-enabled PyTorch 2.4.0, Ray 2.54.0, and required ML simulation libraries:
+# - ray[default]==2.54.0: Head-compatible Ray runtime for distributed worker actors.
+# - torch 2.4.0 + cu121: CUDA 12.1 accelerated tensor operations.
+# - torchdiffeq: Numerical ODE integration engine for analog Kuramoto simulations.
+# - scipy, numpy, matplotlib: Numerical analysis, scientific ODE routines, and plotting.
+# - pydantic, anyio: Configuration data schemas and asynchronous I/O primitives.
+# - chialoops (chia): UC Berkeley Chia swarm framework for node orchestration & MCP.
+RUN /opt/conda/envs/py_worker/bin/pip install --no-cache-dir \
+        "ray[default]==${RAY_VERSION}" \
+        torch==2.4.0 torchvision --index-url https://download.pytorch.org/whl/cu121 \
+        torchdiffeq \
+        scipy \
+        numpy \
+        matplotlib \
+        pydantic \
+        anyio \
+        chialoops
+
+# ------------------------------------------------------------------------------
+# 5. User Permissions & Chia Worker Provisioning Alignment
+# ------------------------------------------------------------------------------
+# Chia's worker_provisioner.py checks for a pre-baked environment at:
+#   /home/ray/anaconda3/envs/py_worker/bin/ray
+# We create user `ray`, link the conda env to that canonical location, and grant
+# universal read/write permissions for arbitrary UID execution (--user $(id -u):$(id -g)).
+RUN id -u ray >/dev/null 2>&1 || useradd -m -s /bin/bash -u 1000 ray \
+    && mkdir -p /home/ray/anaconda3/envs /workspace \
+    && ln -s /opt/conda/envs/py_worker /home/ray/anaconda3/envs/py_worker \
+    && chown -R ray:ray /home/ray /workspace 2>/dev/null || true \
+    && chmod -R a+rwX /home/ray /workspace \
+    && chmod a+rw /etc/passwd
+
+# Expose py_worker binaries on PATH for both login and interactive shells
+ENV PATH="/opt/conda/envs/py_worker/bin:/home/ray/anaconda3/envs/py_worker/bin:${PATH}"
+ENV HOME=/home/ray
+
+USER ray
+WORKDIR /workspace
+
+# ------------------------------------------------------------------------------
+# 6. Container Execution Defaults
+# ------------------------------------------------------------------------------
+# Chia cluster orchestrator keeps the worker container alive with `sleep infinity`
+# and executes `ray start` via login shell commands. Standalone runs default to bash.
+CMD ["/bin/bash"]

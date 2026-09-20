@@ -31,7 +31,21 @@ from agentic_ml_analog_sim.nodes.node3_phase0_validate_proposal import (
     validate_proposal,
 )
 
+try:
+    from chia.base.ChiaFunction import get
+except ImportError:
+    get = None
+import ray
+
 logger = logging.getLogger("agentic_ml_analog_sim.phase_0")
+
+
+def _dispatch_node(node_fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Dispatch a node function via chia_remote if Ray is initialized, else local."""
+    if ray.is_initialized() and hasattr(node_fn, "chia_remote") and get is not None:
+        ref = node_fn.chia_remote(*args, **kwargs)
+        return get(ref)
+    return node_fn(*args, **kwargs)
 
 
 @dataclass
@@ -146,7 +160,7 @@ def run_phase_0(
                 logger.debug("Could not bind Un0ContextTool for %s: %s", repo_root, e)
 
         # 4. Node 1: Check Baseline Reference Data Completeness
-        has_reference = check_reference_data(db=database, config=config)
+        has_reference = _dispatch_node(node1_phase0_check_reference, db=database, config=config)
         if not has_reference:
             logger.info("Node 1: Reference data incomplete. Preparing Phase 1 reference evaluation.")
             existing_ref = database.get_reference_proposal()
@@ -193,7 +207,8 @@ def run_phase_0(
             logger.info("Phase 0 loop cycle %d/%d starting", cycle_count, max_retries)
 
             # Node 2: Propose Candidate
-            proposal_dict = propose_candidate(
+            proposal_dict = _dispatch_node(
+                node2_phase0_propose_candidate,
                 db=database,
                 config=config,
                 llm=llm,
@@ -207,7 +222,8 @@ def run_phase_0(
             phase_1_prompt = proposal_dict.get("phase_1_prompt")
 
             # Node 3: Validate Candidate
-            is_valid, reason, updated_cycle = validate_proposal(
+            is_valid, reason, updated_cycle = _dispatch_node(
+                node3_phase0_validate_proposal,
                 candidate_id=candidate_id,
                 db=database,
                 config=config,

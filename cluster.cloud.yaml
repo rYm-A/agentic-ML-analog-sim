@@ -20,7 +20,7 @@ head_setup_commands:
 
 head_start_ray_commands:
   - "source ~/.zshrc && conda activate chia_env && ray stop"
-  - "source ~/.zshrc && conda activate chia_env && ray start --head --port=6379 --node-ip-address=${THIS_MACHINE} --resources='{\"antigravity_creds\": 1, \"metal_gpu\": 1, \"sqlite_db\": 1, \"python_worker\": 4}' --include-dashboard=False"
+  - "source ~/.zshrc && conda activate chia_env && ray start --head --port=6379 --node-ip-address=${THIS_MACHINE} --resources='{\"control_worker\": 1, \"agent_worker\": 1, \"antigravity_creds\": 1, \"metal_gpu\": 1, \"sqlite_db\": 1, \"python_worker\": 4}' --include-dashboard=False"
 
 worker_start_ray_commands:
   - "ray stop"
@@ -38,15 +38,24 @@ gcp_nodes:
 
 available_node_types:
   local_orchestrator:
-    resources: {"antigravity_creds": 1, "sqlite_db": 1}
+    resources: {"control_worker": 1, "agent_worker": 1, "antigravity_creds": 1, "sqlite_db": 1}
     num_workers: 1
     compatible_ips: ["${THIS_MACHINE}"]
     worker_env_commands:
       - "source ~/.zshrc && conda activate chia_env"
 
   gpu_simulation_worker:
-    resources: {"nvidia_gpu": 1, "sim_worker": 1}
+    resources: {"sim_worker": 1, "compile_worker": 1, "nvidia_gpu": 1}
     num_workers: 2
     compatible_ips: ["@sim_gpu_pool:0", "@sim_gpu_pool:1"]
+    docker:
+      image: "ghcr.io/ucb-bar/chia-simulation-worker:latest"
+      container_name: "chia-sim-worker-${USER}"
+      pull_before_run: false
+      run_options:
+        - --gpus=all
+        - --shm-size=16gb
+        - --ulimit nofile=65536:65536
+        - -v ${PWD}:/workspace
     worker_env_commands:
       - "source ~/.bashrc && conda activate chia_env"

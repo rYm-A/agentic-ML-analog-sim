@@ -30,7 +30,7 @@ except ImportError:
 logger = logging.getLogger("agentic_ml_analog_sim.nodes.node7_phase1_evaluation_gate")
 
 
-@ChiaFunction()
+@ChiaFunction(resources={"control_worker": 1})
 def node7_phase1_evaluation_gate(
     db: ResultDatabase,
     config: SimulationConfig,

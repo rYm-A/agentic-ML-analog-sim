@@ -26,7 +26,21 @@ from agentic_ml_analog_sim.nodes import (
 )
 from agentic_ml_analog_sim.reporting.interactive_session import InteractiveReportSession
 
+try:
+    from chia.base.ChiaFunction import get
+except ImportError:
+    get = None
+import ray
+
 logger = logging.getLogger("agentic_ml_analog_sim.phase_2")
+
+
+def _dispatch_node(node_fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Dispatch a node function via chia_remote if Ray is initialized, else local."""
+    if ray.is_initialized() and hasattr(node_fn, "chia_remote") and get is not None:
+        ref = node_fn.chia_remote(*args, **kwargs)
+        return get(ref)
+    return node_fn(*args, **kwargs)
 
 
 @dataclass
@@ -100,7 +114,8 @@ def run_phase_2(
         db = ResultDatabase(db_path=db_path)
 
     # 3. Check Experiment Limits
-    limit_check = phase2_check_experiment_limit(
+    limit_check = _dispatch_node(
+        node1_phase2_check_experiment_limit,
         db=db,
         config=config,
         current_iteration=current_iteration,
@@ -123,7 +138,8 @@ def run_phase_2(
 
     # 4. Limit reached (or forced) -> Generate final report
     logger.info("Phase 2: Limit reached or report forced (%s). Generating final report...", reason)
-    report_res = phase2_generate_final_report(
+    report_res = _dispatch_node(
+        node2_phase2_generate_final_report,
         db=db,
         config=config,
         output_dir=output_dir,

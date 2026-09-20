@@ -64,7 +64,7 @@ def _sync_device(device: str) -> None:
             pass
 
 
-@ChiaFunction(num_cpus=2)
+@ChiaFunction(num_cpus=4, resources={"compile_worker": 1})
 def node4_phase1_compilation_runner(
     db: ResultDatabase,
     config: SimulationConfig,

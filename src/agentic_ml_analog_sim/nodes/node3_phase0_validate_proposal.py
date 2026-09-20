@@ -402,7 +402,7 @@ def _check_duplicate(candidate_id: str, proposal: dict[str, Any], db: Any) -> tu
     return (False, None)
 
 
-@ChiaFunction()
+@ChiaFunction(resources={"control_worker": 1})
 def node3_phase0_validate_proposal(
     candidate_id: str,
     db: Any,

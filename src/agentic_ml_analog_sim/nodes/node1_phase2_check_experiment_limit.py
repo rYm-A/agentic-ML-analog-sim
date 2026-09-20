@@ -78,7 +78,7 @@ def _get_completed_count(db: Any) -> int:
     return 0
 
 
-@ChiaFunction()
+@ChiaFunction(resources={"control_worker": 1})
 def node1_phase2_check_experiment_limit(
     db: Any,
     config: Any,

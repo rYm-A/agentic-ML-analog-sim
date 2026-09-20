@@ -92,7 +92,7 @@ def _find_reference_entry(db: Any, config: Any) -> Any:
     return None
 
 
-@ChiaFunction()
+@ChiaFunction(resources={"control_worker": 1})
 def node1_phase0_check_reference(db: Any, config: Any) -> bool:
     """Programmatically verify whether the reference design evaluation is complete in DB.
 

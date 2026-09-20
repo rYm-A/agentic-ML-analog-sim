@@ -637,7 +637,7 @@ The empirical results established in this optimization run provide actionable tr
     return doc
 
 
-@ChiaFunction()
+@ChiaFunction(resources={"agent_worker": 1, "antigravity_creds": 0.01})
 def node2_phase2_generate_final_report(
     db: Any,
     config: Any,

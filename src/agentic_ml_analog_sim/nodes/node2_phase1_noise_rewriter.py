@@ -95,7 +95,7 @@ def _extract_registered_noise_from_text(raw_text: str) -> Optional[str]:
     return None
 
 
-@ChiaFunction()
+@ChiaFunction(resources={"agent_worker": 1, "antigravity_creds": 0.01})
 def node2_phase1_noise_rewriter(
     db: ResultDatabase,
     config: SimulationConfig,

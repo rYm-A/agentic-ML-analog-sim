@@ -87,7 +87,7 @@ def _parse_llm_json(raw_text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-@ChiaFunction()
+@ChiaFunction(resources={"agent_worker": 1, "antigravity_creds": 0.01})
 def node8_phase1_diagnostic_proposal(
     db: ResultDatabase,
     config: SimulationConfig,

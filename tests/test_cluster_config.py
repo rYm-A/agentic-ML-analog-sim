@@ -19,7 +19,14 @@ def test_cluster_yaml_loads():
     assert cfg.cluster_name == "agentic-ml-analog-sim-mac"
     assert cfg.head_ip is not None and len(cfg.head_ip) > 0
     assert "local_worker" in cfg.node_types
-    assert cfg.node_types["local_worker"].resources == {"antigravity_creds": 1, "sqlite_db": 1}
+    assert cfg.node_types["local_worker"].resources == {
+        "control_worker": 1,
+        "agent_worker": 1,
+        "compile_worker": 1,
+        "sim_worker": 1,
+        "antigravity_creds": 1,
+        "sqlite_db": 1,
+    }
     assert any("ray start" in cmd for cmd in cfg.worker_start_ray_commands)
     assert any("conda activate chia_env" in cmd for cmd in cfg.node_types["local_worker"].worker_env_commands)
     assert cfg.node_types["local_worker"].docker is None
@@ -31,7 +38,14 @@ def test_cluster_bare_yaml_loads():
     assert cfg.cluster_name == "agentic-ml-analog-sim-mac"
     assert cfg.head_ip is not None and len(cfg.head_ip) > 0
     assert "local_worker" in cfg.node_types
-    assert cfg.node_types["local_worker"].resources == {"antigravity_creds": 1, "sqlite_db": 1}
+    assert cfg.node_types["local_worker"].resources == {
+        "control_worker": 1,
+        "agent_worker": 1,
+        "compile_worker": 1,
+        "sim_worker": 1,
+        "antigravity_creds": 1,
+        "sqlite_db": 1,
+    }
     assert any("ray start" in cmd for cmd in cfg.worker_start_ray_commands)
     assert any("conda activate chia_env" in cmd for cmd in cfg.node_types["local_worker"].worker_env_commands)
     assert cfg.node_types["local_worker"].docker is None
@@ -47,8 +61,17 @@ def test_cluster_cloud_yaml_loads(monkeypatch):
     assert cfg.head_ip is not None and len(cfg.head_ip) > 0
     assert "local_orchestrator" in cfg.node_types
     assert "gpu_simulation_worker" in cfg.node_types
-    assert cfg.node_types["local_orchestrator"].resources == {"antigravity_creds": 1, "sqlite_db": 1}
-    assert cfg.node_types["gpu_simulation_worker"].resources == {"nvidia_gpu": 1, "sim_worker": 1}
+    assert cfg.node_types["local_orchestrator"].resources == {
+        "control_worker": 1,
+        "agent_worker": 1,
+        "antigravity_creds": 1,
+        "sqlite_db": 1,
+    }
+    assert cfg.node_types["gpu_simulation_worker"].resources == {
+        "sim_worker": 1,
+        "compile_worker": 1,
+        "nvidia_gpu": 1,
+    }
     assert any("conda activate chia_env" in cmd for cmd in cfg.node_types["gpu_simulation_worker"].worker_env_commands)
 
 
