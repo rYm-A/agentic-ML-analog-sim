@@ -72,7 +72,7 @@ def _format_reference_instructions(config: SimulationConfig, ref_id: str) -> str
         f"Crossbar Sparsity: {ref.sparsity_ratio}\n\n"
         f"## Action Items for Phase 1:\n"
         f"1. Run unperturbed full-precision reference evaluation on Un-0 Kuramoto dynamics.\n"
-        f"2. Record baseline accuracy (FID metric) and simulation latency (ms).\n"
+        f"2. Record baseline numerical trajectory accuracy (relative_error = 0.0 against golden RK4) and simulation latency (ms).\n"
         f"3. Mark candidate '{ref_id}' as COMPLETED in the results database."
     )
 

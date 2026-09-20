@@ -197,7 +197,7 @@ def _build_pareto_table_tex(pareto_front: List[Dict[str, Any]], ref_proposal: Op
             sp_ratio = sp_cfg.get("sparsity_ratio", 0.0)
 
         lat = p.get("latency_ms", 0.0) or 0.0
-        err = p.get("relative_error") if p.get("relative_error") is not None else p.get("accuracy_fid", 0.0)
+        err = p.get("relative_error") if p.get("relative_error") is not None else p.get("absolute_error", 0.0)
         err = err or 0.0
         speedup = (ref_lat / lat) if lat and lat > 0 else 1.0
 
@@ -296,7 +296,7 @@ def _generate_dynamic_pareto_analysis(
 
     latencies = [(p.get("latency_ms", 0.0) or 0.0) for p in points_to_analyze]
     errors = [
-        ((p.get("relative_error") if p.get("relative_error") is not None else p.get("accuracy_fid", 0.0)) or 0.0)
+        ((p.get("relative_error") if p.get("relative_error") is not None else p.get("absolute_error", 0.0)) or 0.0)
         for p in points_to_analyze
     ]
 
@@ -425,7 +425,7 @@ def _generate_dynamic_recommendations(
     if len(pts) >= 2:
         latencies = [(p.get("latency_ms", 0.0) or 0.0) for p in pts]
         errors = [
-            ((p.get("relative_error") if p.get("relative_error") is not None else p.get("accuracy_fid", 0.0)) or 0.0)
+            ((p.get("relative_error") if p.get("relative_error") is not None else p.get("absolute_error", 0.0)) or 0.0)
             for p in pts
         ]
         lat_span = max(latencies) - min(latencies)
@@ -582,7 +582,7 @@ Figure~\\ref{{fig:pareto}} illustrates the empirical Pareto frontier contrasting
 \\centering
 \\begin{{tabular}}{{llcccrr}}
 \\toprule
-\\textbf{{Candidate ID}} & \\textbf{{Solver}} & \\textbf{{Noise}} & \\textbf{{Sparsity}} & \\textbf{{Latency (ms)}} & \\textbf{{Error}} & \\textbf{{Speedup}} \\\\
+\\textbf{{Candidate ID}} & \\textbf{{Solver}} & \\textbf{{Noise}} & \\textbf{{Sparsity}} & \\textbf{{Latency (ms)}} & \\textbf{{Relative Error (L2)}} & \\textbf{{Speedup}} \\\\
 \\midrule
 {pareto_table}
 \\bottomrule

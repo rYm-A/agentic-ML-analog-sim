@@ -104,7 +104,7 @@ class ResultDBTool(ChiaTool):
 
         Returns:
             JSON string containing all existing proposals, their configurations, parameters,
-            evaluation metrics (latency_ms, accuracy_fid, relative_error), status, and comments.
+            evaluation metrics (latency_ms, relative_error, absolute_error), status, and comments.
         """
         try:
             proposals = self.db.get_proposals(status=status, limit=limit)
@@ -161,7 +161,7 @@ class ResultDBTool(ChiaTool):
 
         Returns:
             JSON string with a list of explored configurations (solver, num_steps, noise_model,
-            sparsity_ratio, status, latency_ms, accuracy_fid).
+            sparsity_ratio, status, latency_ms, relative_error, absolute_error).
         """
         try:
             proposals = self.db.get_proposals(limit=limit)
@@ -207,6 +207,7 @@ class ResultDBTool(ChiaTool):
                     "latency_ms": p.get("latency_ms"),
                     "accuracy_fid": p.get("accuracy_fid"),
                     "relative_error": p.get("relative_error"),
+                    "absolute_error": p.get("absolute_error"),
                 })
 
             return json.dumps(
@@ -575,9 +576,9 @@ class ResultDBTool(ChiaTool):
             candidate_id: Proposal candidate ID.
             status: New proposal status.
             latency_ms: Measured inference latency in milliseconds.
-            accuracy_fid: Accuracy FID metric.
-            relative_error: Relative numerical error.
-            absolute_error: Absolute numerical error.
+            accuracy_fid: Deprecated legacy FID metric (retained for backward compatibility).
+            relative_error: Relative numerical error vs golden baseline trajectory.
+            absolute_error: Absolute numerical error vs golden baseline trajectory.
             wall_clock_s: Wall clock elapsed time in seconds.
             worker_utilization: Estimated worker utilization.
             **kwargs: Extra fields passed to database mark_proposal_status.

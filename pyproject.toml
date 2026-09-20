@@ -20,3 +20,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["Un-0", "submodules", ".git", ".pytest_cache"]
+markers = [
+    "node1_phase0: marks tests related to node1_phase0",
+    "node2_phase0: marks tests related to node2_phase0",
+]

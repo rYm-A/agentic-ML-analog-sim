@@ -64,7 +64,7 @@ def _find_reference_entry(db: Any, config: Any) -> Any:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT candidate_id, status, is_reference, accuracy_fid, latency_ms
+                SELECT candidate_id, status, is_reference, relative_error, latency_ms, accuracy_fid
                 FROM proposals
                 WHERE is_reference = 1 OR is_reference = '1'
                 ORDER BY updated_at DESC
@@ -100,7 +100,6 @@ def node1_phase0_check_reference(db: Any, config: Any) -> bool:
     Verifies that a record exists with:
       - `status == 'COMPLETED'`
       - `is_reference == True` (or truthy)
-      - `accuracy_fid is not None`
       - `latency_ms is not None`
 
     Args:
@@ -118,7 +117,7 @@ def node1_phase0_check_reference(db: Any, config: Any) -> bool:
 
     status = _get_val(entry, "status")
     is_ref = _get_val(entry, "is_reference")
-    accuracy_fid = _get_val(entry, "accuracy_fid")
+    relative_error = _get_val(entry, "relative_error")
     latency_ms = _get_val(entry, "latency_ms")
 
     # Status must be strictly 'COMPLETED'
@@ -134,20 +133,15 @@ def node1_phase0_check_reference(db: Any, config: Any) -> bool:
         logger.info("Node 1: Reference design flag is False or unset. Routing to Phase 1.")
         return False
 
-    # Accuracy FID metric must be present
-    if accuracy_fid is None:
-        logger.info("Node 1: Reference design accuracy_fid is None. Routing to Phase 1.")
-        return False
-
     # Latency metric must be present
     if latency_ms is None:
         logger.info("Node 1: Reference design latency_ms is None. Routing to Phase 1.")
         return False
 
     logger.info(
-        "Node 1: Reference design data complete (status=%s, accuracy_fid=%s, latency_ms=%s). Proceeding to Node 2.",
+        "Node 1: Reference design data complete (status=%s, relative_error=%s, latency_ms=%s). Proceeding to Node 2.",
         status,
-        accuracy_fid,
+        relative_error,
         latency_ms,
     )
     return True

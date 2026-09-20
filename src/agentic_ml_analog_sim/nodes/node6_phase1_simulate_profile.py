@@ -244,7 +244,6 @@ def node6_phase1_simulate_profile(
         is_ref = bool(proposal.get("is_reference"))
         latency_ms = 4.2 if is_ref else 5.8
         peak_memory_mb = 128.0 if is_ref else 142.5
-        accuracy_fid = 0.05 if is_ref else 0.12
         relative_error = 0.0 if is_ref else 0.015
         accuracy_mean = 0.925 if is_ref else 0.900
         accuracy_std = 0.005 if is_ref else 0.012
@@ -260,7 +259,7 @@ def node6_phase1_simulate_profile(
             "accuracy_ci95": accuracy_ci95,
             "accuracy_std": accuracy_std,
             "accuracy_worst_pct": accuracy_worst_pct,
-            "accuracy_fid": accuracy_fid,
+            "accuracy_fid": None,
             "relative_error": relative_error,
             "wall_clock_s": wall_clock_s,
             "sample_count": sample_count,
@@ -272,7 +271,7 @@ def node6_phase1_simulate_profile(
             candidate_id=candidate_id,
             status="EVALUATING",
             latency_ms=latency_ms,
-            accuracy_fid=accuracy_fid,
+            accuracy_fid=None,
             relative_error=relative_error,
             wall_clock_s=wall_clock_s,
             worker_utilization=0.85,
@@ -418,7 +417,6 @@ def node6_phase1_simulate_profile(
         # Natural measurements:
         is_ref = bool(proposal.get("is_reference"))
         relative_error = 0.0 if is_ref else 0.005
-        accuracy_fid = 0.05 if is_ref else 0.10
         accuracy_mean = 0.95 if is_ref else 0.93
         accuracy_worst_pct = accuracy_mean - 2 * (latency_std / max(latency_ms, 1e-4) * 0.01)
         accuracy_ci95 = 0.002
@@ -432,7 +430,7 @@ def node6_phase1_simulate_profile(
             "accuracy_ci95": round(accuracy_ci95, 4),
             "accuracy_std": round(latency_std, 4),
             "accuracy_worst_pct": round(accuracy_worst_pct, 4),
-            "accuracy_fid": accuracy_fid,
+            "accuracy_fid": None,
             "relative_error": relative_error,
             "wall_clock_s": round(wall_clock_s, 4),
             "sample_count": sample_count,
@@ -447,7 +445,7 @@ def node6_phase1_simulate_profile(
             candidate_id=candidate_id,
             status="EVALUATING",
             latency_ms=latency_ms,
-            accuracy_fid=accuracy_fid,
+            accuracy_fid=None,
             relative_error=relative_error,
             wall_clock_s=wall_clock_s,
             worker_utilization=0.90,

@@ -222,12 +222,12 @@ def test_mock_llm_response_queue():
 # Tests for Node 1: check_reference_data
 # ==============================================================================
 
-def test_node1_check_reference_empty_db(test_db, config):
+def test_node1_phase0_check_reference_empty_db(test_db, config):
     # Empty DB -> should return False
     assert check_reference_data(test_db, config) is False
 
 
-def test_node1_check_reference_incomplete(test_db, config):
+def test_node1_phase0_check_reference_incomplete(test_db, config):
     cursor = test_db.conn.cursor()
     # Insert reference with status PENDING
     cursor.execute(
@@ -249,7 +249,7 @@ def test_node1_check_reference_incomplete(test_db, config):
     assert check_reference_data(test_db, config) is False
 
 
-def test_node1_check_reference_completed(test_db, config):
+def test_node1_phase0_check_reference_completed(test_db, config):
     cursor = test_db.conn.cursor()
     cursor.execute(
         """
@@ -264,11 +264,26 @@ def test_node1_check_reference_completed(test_db, config):
     assert check_reference_data(test_db, config) is True
 
 
+def test_node1_phase0_check_reference_completed_without_fid(test_db, config):
+    cursor = test_db.conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO proposals (
+            candidate_id, iteration, solver, noise_model, solver_params, noise_params,
+            status, is_reference, relative_error, latency_ms
+        ) VALUES ('ref_02', 0, 'rk4', 'none', '{}', '{}', 'COMPLETED', 1, 0.0, 12.4)
+        """
+    )
+    test_db.conn.commit()
+    # Reference is COMPLETED, is_reference=True, with relative_error and latency_ms, accuracy_fid is None
+    assert check_reference_data(test_db, config) is True
+
+
 # ==============================================================================
 # Tests for Node 2: propose_candidate
 # ==============================================================================
 
-def test_node2_propose_candidate(test_db, config):
+def test_node2_phase0_propose_candidate(test_db, config):
     llm = MockAntigravityLLM(mode="valid")
     result = propose_candidate(db=test_db, config=config, llm=llm, iteration=1)
 
@@ -297,7 +312,7 @@ def test_node2_propose_candidate(test_db, config):
     assert t_row["completion_tokens"] > 0
 
 
-def test_node2_propose_candidate_with_rejection_feedback(test_db, config):
+def test_node2_phase0_propose_candidate_with_rejection_feedback(test_db, config):
     llm = MockAntigravityLLM(mode="valid")
     result = propose_candidate(
         db=test_db,
@@ -515,23 +530,28 @@ def test_node3_validate_noise_sigma(test_db, config):
     assert next_cycle == 1
 
 
-def test_node1_with_dict_and_list_db(config):
-    # Dict mock with completed reference
+def test_node1_phase0_with_dict_and_list_db(config):
+    # Dict mock with completed reference (accuracy_fid can be None)
     dict_db = {
         "ref": {
             "is_reference": True,
             "status": "COMPLETED",
-            "accuracy_fid": 28.5,
+            "accuracy_fid": None,
+            "relative_error": 0.0,
             "latency_ms": 10.2,
         }
     }
     assert check_reference_data(dict_db, config) is True
 
-    # List mock with incomplete reference
+    # List mock with incomplete reference (missing latency_ms)
     list_db = [
-        {"is_reference": True, "status": "COMPLETED", "accuracy_fid": None, "latency_ms": 10.2}
+        {"is_reference": True, "status": "COMPLETED", "accuracy_fid": None, "latency_ms": None}
     ]
     assert check_reference_data(list_db, config) is False
+
+
+# Backwards compatibility alias
+test_node1_with_dict_and_list_db = test_node1_phase0_with_dict_and_list_db
 
 
 def test_mock_llm_tolerance_mode():

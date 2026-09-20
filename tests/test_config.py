@@ -115,3 +115,21 @@ def test_reject_negative_budget_values():
         f.flush()
         with pytest.raises(ValidationError):
             load_simulation_config(f.name)
+
+
+def test_solver_accuracy_tolerance_optional_max_fid():
+    """Verify max_fid_degradation is optional and defaults to 2.0."""
+    from agentic_ml_analog_sim.config import SolverAccuracyTolerance
+
+    # Omitted max_fid_degradation
+    tol = SolverAccuracyTolerance(rtol=0.01, atol=0.01)
+    assert tol.max_fid_degradation == 2.0
+
+    # Provided max_fid_degradation (backward compatibility with existing YAMLs)
+    tol2 = SolverAccuracyTolerance(rtol=0.01, atol=0.01, max_fid_degradation=1.5)
+    assert tol2.max_fid_degradation == 1.5
+
+    # Explicit None max_fid_degradation
+    tol3 = SolverAccuracyTolerance(rtol=0.01, atol=0.01, max_fid_degradation=None)
+    assert tol3.max_fid_degradation is None
+

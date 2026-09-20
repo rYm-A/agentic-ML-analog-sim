@@ -417,7 +417,7 @@ class ResultDatabase:
         """Compute the Pareto front among COMPLETED evaluations and update pareto_optimal flags in DB.
 
         Objectives minimized:
-            1. Error / quality: accuracy_fid (or relative_error if accuracy_fid is null)
+            1. Error / quality: relative_error (or absolute_error / accuracy_fid fallback if relative_error is null)
             2. Cost / runtime: latency_ms (or wall_clock_s if latency_ms is null)
 
         Returns:
@@ -433,7 +433,9 @@ class ResultDatabase:
             # Extract objective vector (error, cost) for each completed candidate
             candidates_with_objs = []
             for item in completed:
-                err = item["accuracy_fid"] if item["accuracy_fid"] is not None else item["relative_error"]
+                err = item["relative_error"] if item["relative_error"] is not None else (
+                    item["absolute_error"] if item.get("absolute_error") is not None else item.get("accuracy_fid")
+                )
                 cost = item["latency_ms"] if item["latency_ms"] is not None else item["wall_clock_s"]
                 if err is not None and cost is not None:
                     candidates_with_objs.append((item, float(err), float(cost)))

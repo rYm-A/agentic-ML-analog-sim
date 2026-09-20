@@ -7,7 +7,7 @@ Coordinates Nodes 0 through 8:
   - Node 3: Agentic compiler rewriter functionalizing model for torch.compile and HOPs.
   - Node 4: Programmatic AOT compilation runner on target device worker (MPS / CUDA / CPU).
   - Node 5: Programmatic numerical verification gate comparing compiled vs eager mode outputs on 100 samples.
-  - Node 6: Programmatic simulation & profiling (latency, peak memory, accuracy + CI + std + worst-percentile, FID).
+  - Node 6: Programmatic simulation & profiling (latency, peak memory, accuracy + CI + std + worst-percentile).
   - Node 7: Programmatic evaluation gate checking tolerances, retry counters, debug loop invariants, and Pareto front.
   - Node 8: Agentic diagnostic agent emitting fix rewrite proposals or debug mode requests on error/out-of-tolerance.
 """
@@ -106,7 +106,7 @@ def run_phase_1(
     4. Executes required rewriters (Node 1 solver, Node 2 noise, Node 3 compiler).
     5. Node 4 compiles model on target hardware device (MPS default, CUDA, CPU).
     6. Node 5 verifies numerical correctness vs eager mode (100 samples). On failure -> Node 8 diagnostic -> Node 0.
-    7. Node 6 runs single-batch simulation and profiles metrics (latency, memory, accuracy, FID).
+    7. Node 6 runs single-batch simulation and profiles metrics (latency, memory, accuracy).
     8. Node 7 evaluates metrics vs tolerances. On pass -> PROCEED_TO_PHASE_2. On failure -> Node 8 diagnostic -> Node 0.
 
     Args:

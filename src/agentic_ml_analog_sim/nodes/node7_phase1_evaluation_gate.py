@@ -1,6 +1,6 @@
 """Node 7: Evaluation Gate Node (Phase 1, Programmatic).
 
-Evaluates simulation metrics against accuracy and FID tolerances.
+Evaluates simulation metrics against trajectory tolerances (rtol, atol).
 Manages Counter ID 2 (counter_2_rewrite) and Counter ID 4 (counter_4_debug_loop).
 Enforces Debug Mode invariants and blocks invalid transition to Phase 2.
 """
@@ -228,13 +228,11 @@ def node7_phase1_evaluation_gate(
     solver_acc = getattr(config.tolerances, "solver_accuracy", None)
     rtol = getattr(solver_acc, "rtol", 5e-2)
     atol = getattr(solver_acc, "atol", 5e-2)
-    max_fid_deg = getattr(solver_acc, "max_fid_degradation", 2.0)
 
     rel_error = proposal.get("relative_error")
     abs_error = proposal.get("absolute_error")
     if abs_error is None:
         abs_error = proposal.get("abs_error")
-    accuracy_fid = proposal.get("accuracy_fid")
     sim_status = proposal.get("simulation_status")
 
     # Evaluate metric tolerance bounds
@@ -247,9 +245,9 @@ def node7_phase1_evaluation_gate(
         reasons.append(f"simulation_status is FAILED ({err_m})")
 
     # Require at least one valid evaluation metric
-    if rel_error is None and abs_error is None and accuracy_fid is None:
+    if rel_error is None and abs_error is None:
         within_tolerance = False
-        reasons.append("Missing required simulation metrics: relative_error, absolute_error, and accuracy_fid are all None")
+        reasons.append("Missing required simulation metrics: relative_error and absolute_error are both None")
 
     if rel_error is not None and rel_error > rtol:
         within_tolerance = False
@@ -258,10 +256,6 @@ def node7_phase1_evaluation_gate(
     if abs_error is not None and abs_error > atol:
         within_tolerance = False
         reasons.append(f"absolute_error ({abs_error:.4f}) > atol ({atol:.4f})")
-
-    if accuracy_fid is not None and accuracy_fid > max_fid_deg:
-        within_tolerance = False
-        reasons.append(f"accuracy_fid ({accuracy_fid:.4f}) > max_fid_degradation ({max_fid_deg:.4f})")
 
     if within_tolerance:
         # Success: reset counter 2, mark COMPLETED, compute Pareto front, route to Phase 2

@@ -28,7 +28,7 @@ You are equipped with the `result_db_read` MCP tool which provides JUST READ acc
 You CANNOT and MUST NOT perform write/mutation operations via this tool; candidate insertion is handled safely by programmatic validation.
 
 Available Read-Only MCP Tools:
-- `read_prior_proposals(status=None, limit=50)`: Reads all candidate proposals that have already been made in the database, including solver, noise model, parameters, sparsity, evaluation metrics (latency_ms, accuracy_fid, relative_error), status, and cross-phase comments.
+- `read_prior_proposals(status=None, limit=50)`: Reads all candidate proposals that have already been made in the database, including solver, noise model, parameters, sparsity, evaluation metrics (latency_ms, relative_error, absolute_error), status, and cross-phase comments.
 - `get_candidate_history_summary(limit=50)`: Concise summary of all parameter configurations already explored.
 - `get_pareto_front()`: Current Pareto-optimal frontier of completed evaluations (latency vs accuracy).
 - `get_reference_result()`: Baseline reference simulation result.

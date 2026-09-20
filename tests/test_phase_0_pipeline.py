@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 import pytest
 
+pytestmark = [pytest.mark.node1_phase0, pytest.mark.node2_phase0]
+
 from agentic_ml_analog_sim.config import load_simulation_config
 from agentic_ml_analog_sim.db import ResultDatabase
 from agentic_ml_analog_sim.mock import MockAntigravityLLM

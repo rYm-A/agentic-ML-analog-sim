@@ -172,7 +172,7 @@ Task Instructions:
 1. Carefully reason about the failure root cause:
    - Was it a PyTorch / Inductor compilation failure (syntax, unsupported dynamic shape, lowering exception)?
    - Was it a numerical correctness verification failure between eager and compiled models?
-   - Was it a simulation profiling failure or numerical divergence / out of tolerance on accuracy or relative error?
+   - Was it a simulation profiling failure or numerical divergence / out of tolerance on trajectory relative_error or absolute_error?
    - Has this candidate failed multiple rewrites already (counter_2 >= 2)?
 2. Formulate a diagnostic strategy:
    - If multiple rewrites have failed (e.g. counter_2 >= 2) and the candidate is not already in debug mode, recommend "debug_request" to isolate whether solver or noise caused the issue by deactivating noise (`"deactivate": "deactivate_noise"`).

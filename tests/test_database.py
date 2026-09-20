@@ -117,15 +117,15 @@ def test_duplicate_proposal_detection(temp_db):
 def test_pareto_front_computation(temp_db):
     # Candidate 1: baseline
     c1 = temp_db.insert_proposal(solver="rk4", noise_model="none", status="COMPLETED")
-    temp_db.mark_proposal_status(c1, "COMPLETED", accuracy_fid=12.0, latency_ms=100.0)
+    temp_db.mark_proposal_status(c1, "COMPLETED", relative_error=0.01, latency_ms=100.0)
 
-    # Candidate 2: faster with slightly worse FID (Pareto frontier)
+    # Candidate 2: faster with slightly worse relative error (Pareto frontier)
     c2 = temp_db.insert_proposal(solver="euler", noise_model="none", status="COMPLETED")
-    temp_db.mark_proposal_status(c2, "COMPLETED", accuracy_fid=15.0, latency_ms=40.0)
+    temp_db.mark_proposal_status(c2, "COMPLETED", relative_error=0.03, latency_ms=40.0)
 
     # Candidate 3: dominated by c2 (higher error and higher latency)
     c3 = temp_db.insert_proposal(solver="euler_backward", noise_model="none", status="COMPLETED")
-    temp_db.mark_proposal_status(c3, "COMPLETED", accuracy_fid=18.0, latency_ms=50.0)
+    temp_db.mark_proposal_status(c3, "COMPLETED", relative_error=0.05, latency_ms=50.0)
 
     front = temp_db.compute_pareto_front()
     front_ids = {p["candidate_id"] for p in front}
@@ -133,6 +133,33 @@ def test_pareto_front_computation(temp_db):
     assert c1 in front_ids
     assert c2 in front_ids
     assert c3 not in front_ids
+
+
+def test_pareto_front_metric_precedence(temp_db):
+    # Candidate where relative_error takes precedence over accuracy_fid
+    # If accuracy_fid (100.0) were used, c1 would be dominated by c2 (accuracy_fid 10.0, latency 30).
+    # But with relative_error (0.01 vs 0.05), c1 is NOT dominated by c2!
+    c1 = temp_db.insert_proposal(solver="rk4", noise_model="none", status="COMPLETED")
+    temp_db.mark_proposal_status(c1, "COMPLETED", relative_error=0.01, accuracy_fid=100.0, latency_ms=50.0)
+
+    c2 = temp_db.insert_proposal(solver="euler", noise_model="none", status="COMPLETED")
+    temp_db.mark_proposal_status(c2, "COMPLETED", relative_error=0.05, accuracy_fid=10.0, latency_ms=30.0)
+
+    # Candidate 3 uses absolute_error fallback when relative_error is None
+    c3 = temp_db.insert_proposal(solver="parareal", noise_model="none", status="COMPLETED")
+    temp_db.mark_proposal_status(c3, "COMPLETED", absolute_error=0.02, accuracy_fid=50.0, latency_ms=40.0)
+
+    # Candidate 4 uses accuracy_fid legacy fallback when both relative and absolute are None
+    c4 = temp_db.insert_proposal(solver="par_ode", noise_model="none", status="COMPLETED")
+    temp_db.mark_proposal_status(c4, "COMPLETED", accuracy_fid=0.005, latency_ms=60.0)
+
+    front = temp_db.compute_pareto_front()
+    front_ids = {p["candidate_id"] for p in front}
+
+    assert c1 in front_ids  # rel_error=0.01, latency=50
+    assert c2 in front_ids  # rel_error=0.05, latency=30
+    assert c3 in front_ids  # abs_error=0.02, latency=40
+    assert c4 in front_ids  # accuracy_fid=0.005, latency=60
 
 
 def test_comments(temp_db):

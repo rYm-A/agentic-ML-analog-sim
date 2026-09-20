@@ -70,12 +70,22 @@ class CompileCheckTolerance(BaseModel):
 
 
 class SolverAccuracyTolerance(BaseModel):
-    """Accuracy tolerances for solver evaluations and fidelity degradation."""
+    """Accuracy tolerances for solver evaluations and fidelity degradation.
+
+    Attributes:
+        rtol: Relative error tolerance vs baseline reference trajectory.
+        atol: Absolute error tolerance vs baseline reference trajectory.
+        max_fid_degradation: Deprecated: FID is no longer used for evaluation gating.
+            Retained as optional for backward compatibility with existing YAML configurations.
+    """
     model_config = ConfigDict(extra="forbid")
 
     rtol: float = 5e-2
     atol: float = 5e-2
-    max_fid_degradation: float = 2.0
+    max_fid_degradation: Optional[float] = Field(
+        default=2.0,
+        description="Deprecated: FID is no longer used for evaluation gating. Retained for backward compatibility.",
+    )
 
 
 class TolerancesConfig(BaseModel):

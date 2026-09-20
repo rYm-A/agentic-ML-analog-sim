@@ -21,7 +21,7 @@ def generate_pareto_plot(
     output_dir: Union[str, Path],
     filename_prefix: str = "pareto_frontier",
 ) -> Dict[str, str]:
-    """Generate publication-grade Pareto frontier plot (Latency vs. Accuracy Error / FID).
+    """Generate publication-grade Pareto frontier plot (Latency vs. Trajectory Relative Error).
 
     Args:
         db: ResultDatabase instance to query.
@@ -53,7 +53,7 @@ def generate_pareto_plot(
     for c in candidates:
         if c.get("status") == "COMPLETED" and c["candidate_id"] not in pareto_cids:
             lat = c.get("latency_ms")
-            err = c.get("relative_error") if c.get("relative_error") is not None else c.get("accuracy_fid")
+            err = c.get("relative_error") if c.get("relative_error") is not None else c.get("absolute_error", 0.0)
             if lat is not None and err is not None:
                 other_x.append(lat)
                 other_y.append(err)
@@ -74,7 +74,7 @@ def generate_pareto_plot(
     pareto_pts: List[Tuple[float, float, Dict[str, Any]]] = []
     for p in pareto_front:
         lat = p.get("latency_ms")
-        err = p.get("relative_error") if p.get("relative_error") is not None else p.get("accuracy_fid")
+        err = p.get("relative_error") if p.get("relative_error") is not None else p.get("absolute_error", 0.0)
         if lat is not None and err is not None:
             pareto_pts.append((lat, err, p))
 
