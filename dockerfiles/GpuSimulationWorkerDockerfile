@@ -37,16 +37,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Python 3.10.19 & Ray 2.54.0 Worker Environment (py_worker)
+# Adopting the canonical Chia pattern (docker_images.rst) using standalone CPython:
 ARG PYTHON_VERSION=3.10.19
+ARG PBS_TAG=20260203
 ARG RAY_VERSION=2.54.0
 
-RUN /opt/conda/bin/conda create -n py_worker python=${PYTHON_VERSION} -y -q \
-    && /opt/conda/bin/conda clean -afy
+RUN curl -fsSL \
+        "https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/cpython-${PYTHON_VERSION}+${PBS_TAG}-x86_64-unknown-linux-gnu-install_only.tar.gz" \
+        | tar -xzf - -C /opt \
+    && mkdir -p /home/ray/anaconda3/envs \
+    && /opt/python/bin/python3 -m venv /home/ray/anaconda3/envs/py_worker
 
 # 3. Compilation & Simulation Dependencies
-RUN /opt/conda/envs/py_worker/bin/pip install --no-cache-dir \
+RUN /home/ray/anaconda3/envs/py_worker/bin/pip install --no-cache-dir \
         torch==2.14.0 torchvision --extra-index-url https://download.pytorch.org/whl/cu130 \
-    && /opt/conda/envs/py_worker/bin/pip install --no-cache-dir \
+    && /home/ray/anaconda3/envs/py_worker/bin/pip install --no-cache-dir \
         "ray[default]==${RAY_VERSION}" \
         torchdiffeq \
         scipy \
@@ -56,15 +61,14 @@ RUN /opt/conda/envs/py_worker/bin/pip install --no-cache-dir \
         anyio \
         chialoops
 
-# 4. User permissions & Chia worker discovery symlink
+# 4. User permissions & Chia worker discovery
 RUN id -u ray >/dev/null 2>&1 || useradd -m -s /bin/bash -u 1000 ray \
-    && mkdir -p /home/ray/anaconda3/envs /workspace \
-    && ln -s /opt/conda/envs/py_worker /home/ray/anaconda3/envs/py_worker \
+    && mkdir -p /workspace \
     && chown -R ray:ray /home/ray /workspace 2>/dev/null || true \
     && chmod -R a+rwX /home/ray /workspace \
     && chmod a+rw /etc/passwd
 
-ENV PATH="/opt/conda/envs/py_worker/bin:/home/ray/anaconda3/envs/py_worker/bin:${PATH}"
+ENV PATH="/home/ray/anaconda3/envs/py_worker/bin:${PATH}"
 ENV HOME=/home/ray
 
 USER ray
