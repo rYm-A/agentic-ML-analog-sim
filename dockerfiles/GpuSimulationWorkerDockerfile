@@ -62,7 +62,7 @@ RUN /home/ray/anaconda3/envs/py_worker/bin/pip install --no-cache-dir \
         chialoops
 
 # 4. User permissions & Chia worker discovery
-RUN id -u ray >/dev/null 2>&1 || useradd -m -s /bin/bash -u 1000 ray \
+RUN useradd -m -s /bin/bash ray \
     && mkdir -p /workspace \
     && chown -R ray:ray /home/ray /workspace 2>/dev/null || true \
     && chmod -R a+rwX /home/ray /workspace \
