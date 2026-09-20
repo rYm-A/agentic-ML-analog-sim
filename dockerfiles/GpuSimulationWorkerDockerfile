@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1
+# ==============================================================================
+# Un-0 Analog ML Swarm - Unified GPU Simulation & Compilation Worker
+# ==============================================================================
+# Target Platform: Linux x86_64 (linux/amd64) with NVIDIA CUDA 12.1 Devel
+# Tag: ghcr.io/rym-a/analog-sim-worker:latest
+#
+# Capabilities:
+#   - PyTorch 2.4.0 + CUDA 12.1 + cuDNN 9 (Devel)
+#   - C++ Compilation toolchain (g++, gcc, ninja-build) for PyTorch Inductor
+#   - Python 3.10.19 and Ray 2.54.0 pinned to cluster head
+#   - torchdiffeq, scipy, numpy, matplotlib for ODE simulations
+#   - chialoops framework with pre-provisioned /home/ray/anaconda3/envs/py_worker
+# ==============================================================================
+
+ARG BASE_IMAGE=pytorch/pytorch:2.4.0-cuda12.1-cudnn9-devel
+FROM --platform=linux/amd64 ${BASE_IMAGE}
+
+SHELL ["/bin/bash", "-cl"]
+
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1. System toolchains & C++ headers for Inductor AOT/JIT and Ray transport
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        g++ \
+        gcc \
+        ninja-build \
+        git \
+        python3-dev \
+        pkg-config \
+        openssh-client \
+        rsync \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Python 3.10.19 & Ray 2.54.0 Worker Environment (py_worker)
+ARG PYTHON_VERSION=3.10.19
+ARG RAY_VERSION=2.54.0
+
+RUN /opt/conda/bin/conda create -n py_worker python=${PYTHON_VERSION} -y -q \
+    && /opt/conda/bin/conda clean -afy
+
+# 3. Compilation & Simulation Dependencies
+RUN /opt/conda/envs/py_worker/bin/pip install --no-cache-dir \
+        "ray[default]==${RAY_VERSION}" \
+        torch==2.4.0 torchvision --index-url https://download.pytorch.org/whl/cu121 \
+        torchdiffeq \
+        scipy \
+        numpy \
+        matplotlib \
+        pydantic \
+        anyio \
+        chialoops
+
+# 4. User permissions & Chia worker discovery symlink
+RUN id -u ray >/dev/null 2>&1 || useradd -m -s /bin/bash -u 1000 ray \
+    && mkdir -p /home/ray/anaconda3/envs /workspace \
+    && ln -s /opt/conda/envs/py_worker /home/ray/anaconda3/envs/py_worker \
+    && chown -R ray:ray /home/ray /workspace 2>/dev/null || true \
+    && chmod -R a+rwX /home/ray /workspace \
+    && chmod a+rw /etc/passwd
+
+ENV PATH="/opt/conda/envs/py_worker/bin:/home/ray/anaconda3/envs/py_worker/bin:${PATH}"
+ENV HOME=/home/ray
+
+USER ray
+WORKDIR /workspace
+
+CMD ["/bin/bash"]

@@ -70,7 +70,6 @@ def test_cluster_cloud_yaml_loads(monkeypatch):
     assert cfg.node_types["gpu_simulation_worker"].resources == {
         "sim_worker": 1,
         "compile_worker": 1,
-        "nvidia_gpu": 1,
     }
     assert any("conda activate chia_env" in cmd for cmd in cfg.node_types["gpu_simulation_worker"].worker_env_commands)
 

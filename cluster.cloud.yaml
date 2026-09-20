@@ -45,11 +45,11 @@ available_node_types:
       - "source ~/.zshrc && conda activate chia_env"
 
   gpu_simulation_worker:
-    resources: {"sim_worker": 1, "compile_worker": 1, "nvidia_gpu": 1}
+    resources: {"sim_worker": 1, "compile_worker": 1}
     num_workers: 2
     compatible_ips: ["@sim_gpu_pool:0", "@sim_gpu_pool:1"]
     docker:
-      image: "ghcr.io/ucb-bar/chia-simulation-worker:latest"
+      image: "ghcr.io/rym-a/analog-sim-worker:latest"
       container_name: "chia-sim-worker-${USER}"
       pull_before_run: false
       run_options:
