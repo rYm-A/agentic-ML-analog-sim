@@ -1,8 +1,20 @@
 """Node 4: Compilation Runner Node (Phase 1, Programmatic).
 
-Compiles the functionalized HOP model targeting Inductor backend on target hardware (MPS / CUDA / CPU)
-dispatched in a Ray worker using the Chia API (@ChiaFunction).
+Compiles the functionalized trajectory model (`prepared_model`) targeting the PyTorch
+Inductor backend on target hardware (MPS / CUDA / CPU) dispatched to a Ray worker
+using the Chia API (`@ChiaFunction`).
 Numerical correctness verification and warmup passes are deferred to Node 5.
+
+Model Taxonomy & Contracts:
+- `prepared_model`: Discrete trajectory integrator model synthesized by Node 3
+  (e.g., `FunctionalHOPKuramotoDynamics`), with call signature `forward(state, drive=None)`.
+  This is the model compiled via TorchInductor.
+- `eager_model`: Continuous physics dynamics model (e.g. `ConditionalKuramotoDynamics`
+  with noise wrappers) with signature `forward(state, _time, drive)`. Node 4 adapts
+  this into `eager_baseline` (an uncompiled trajectory model with signature `forward(state, drive)`)
+  so Node 5 can verify numerical parity against `compiled_model`.
+- Standalone Test Fallbacks: In normal pipeline execution, Node 3 always runs prior to Node 4
+  and provides both models. Standalone fallbacks are strictly reserved for isolated unit tests.
 """
 
 from __future__ import annotations
@@ -52,47 +64,7 @@ def _sync_device(device: str) -> None:
             pass
 
 
-@ChiaFunction()
-def _compile_model_worker_task(
-    model: Any,
-    backend: str = "inductor",
-    target_device: str = "mps",
-    dynamic: Optional[bool] = None,
-    sample_state: Optional[Any] = None,
-    sample_drive: Optional[Any] = None,
-) -> Any:
-    """ChiaFunction worker task executing PyTorch model compilation on cluster worker.
-
-    Performs a single-step dry-run pass on dummy inputs under torch.no_grad()
-    to trigger PyTorch lazy compilation and verify lowering on target hardware.
-    """
-    from un0.compiler import compile_model
-    compiled = compile_model(
-        model,
-        backend=backend,
-        target_device=target_device,
-        dynamic=dynamic,
-    )
-
-    # Trigger PyTorch lazy compilation via dry-run pass on target device
-    if sample_state is not None:
-        device = _resolve_target_device(target_device)
-        s = sample_state.to(device) if hasattr(sample_state, "to") and callable(getattr(sample_state, "to")) else sample_state
-        d = sample_drive.to(device) if sample_drive is not None and hasattr(sample_drive, "to") and callable(getattr(sample_drive, "to")) else sample_drive
-        with torch.no_grad():
-            if d is not None:
-                try:
-                    _ = compiled(s, d)
-                except TypeError:
-                    _ = compiled(s)
-            else:
-                _ = compiled(s)
-        _sync_device(device)
-
-    return compiled
-
-
-@ChiaFunction()
+@ChiaFunction(num_cpus=2)
 def node4_phase1_compilation_runner(
     db: ResultDatabase,
     config: SimulationConfig,
@@ -104,8 +76,8 @@ def node4_phase1_compilation_runner(
 ) -> Dict[str, Any]:
     """Node 4 Compilation Runner (Phase 1).
 
-    Compiles the model with Inductor backend on target hardware (MPS/CUDA/CPU)
-    in a Ray worker managed by the Chia API.
+    Orchestrates compilation of the prepared model with Inductor backend on target hardware (MPS/CUDA/CPU)
+    using the Chia API (@ChiaFunction(num_cpus=2)).
     Unconditionally routes to Node 5 (Verify Correctness).
 
     Args:
@@ -178,7 +150,15 @@ def node4_phase1_compilation_runner(
 
     dt = solver_params.get("dt") or (float(integration_time) / float(num_steps))
 
+    # =========================================================================
+    # STANDALONE / ISOLATED TEST FIXTURE RESOLUTION ONLY
+    # In normal pipeline execution, Node 3 ALWAYS runs prior to Node 4 and provides
+    # both `prepared_model` (functional trajectory model) and `eager_model`.
+    # The blocks below exist strictly to support isolated unit tests and standalone
+    # invocations where Node 4 is called without prior execution of Node 3.
+    # =========================================================================
     if eager_model is None:
+        logger.debug("Node 4: 'eager_model' not provided. Instantiating baseline for isolated test execution.")
         try:
             from un0.model import ConditionalKuramotoDynamics
             from un0.noise import get_noise_model
@@ -205,28 +185,38 @@ def node4_phase1_compilation_runner(
             else:
                 eager_model = base_dynamics
         except Exception as exc:
-            logger.warning("Node 4: Eager model resolution warning: %s", exc)
+            logger.warning("Node 4: Isolated test eager model resolution warning: %s", exc)
 
-    if prepared_model is None and eager_model is not None:
-        try:
-            from un0.compiler import functionalize_kuramoto_model
-            prepared_model = functionalize_kuramoto_model(
-                model=eager_model,
-                solver_name=solver_name,
-                num_steps=num_steps,
-                dt=dt,
-                integration_time=integration_time,
-                use_hop=False,
+    if prepared_model is None:
+        if eager_model is not None:
+            logger.warning(
+                "Node 4: 'prepared_model' was not provided! Synthesizing default unrolled "
+                "functional model from 'eager_model' for isolated test execution. "
+                "Note: In normal pipeline flow, Node 3 synthesizes and provides 'prepared_model'."
             )
-        except Exception as exc:
-            logger.warning("Node 4: Functionalized HOP model fallback issue: %s", exc)
-            prepared_model = eager_model
+            try:
+                from un0.compiler import functionalize_kuramoto_model
+                prepared_model = functionalize_kuramoto_model(
+                    model=eager_model,
+                    solver_name=solver_name,
+                    num_steps=num_steps,
+                    dt=dt,
+                    integration_time=integration_time,
+                    use_hop=False,
+                )
+            except Exception as synth_err:
+                logger.warning("Node 4: Functional model synthesis fallback error: %s", synth_err)
+                prepared_model = eager_model
+        else:
+            logger.error("Node 4: Neither 'prepared_model' nor 'eager_model' was provided.")
 
-    # Construct sample dummy inputs for dry-run
+    model_to_compile = prepared_model if prepared_model is not None else eager_model
+
+    # Construct sample dummy inputs for dry-run JIT lowering (batch size 4)
     sample_state = torch.randn(4, state_dim)
     sample_drive = torch.randn(4, n_osc, n_cond)
 
-    # Prepare eager baseline with consistent trajectory interface for Node 5
+    # Prepare eager baseline trajectory model with matching (state, drive) interface for Node 5
     eager_baseline = eager_model
     if eager_model is not None:
         try:
@@ -250,62 +240,38 @@ def node4_phase1_compilation_runner(
     compilation_status = "SUCCESS"
 
     try:
-        model_to_compile = prepared_model if prepared_model is not None else eager_model
         if model_to_compile is None:
             compilation_status = "FAILED"
-            build_logs = "Compilation error: No model available to compile."
+            build_logs = "Compilation error: No model available to compile (prepared_model and eager_model are None)."
             logger.error("Node 4: %s", build_logs)
         else:
-            worker_resources: Dict[str, Any] = {}
-            can_dispatch_remote = False
+            from un0.compiler import compile_model
 
-            import ray
-            if ray.is_initialized():
-                cluster_res = ray.cluster_resources()
-                if device in ("mps", "cuda"):
-                    target_res_key = "metal_gpu" if device == "mps" else "GPU"
-                    if target_res_key in cluster_res and cluster_res[target_res_key] >= 1:
-                        worker_resources = {target_res_key: 1}
-                        can_dispatch_remote = True
-                elif "python_worker" in cluster_res and cluster_res["python_worker"] >= 1:
-                    worker_resources = {"python_worker": 1}
-                    can_dispatch_remote = True
+            compiled_model = compile_model(
+                model_to_compile,
+                backend="inductor",
+                target_device=device,
+                dynamic=True,
+            )
 
-            if can_dispatch_remote:
-                try:
-                    compiled_model = _compile_model_worker_task.options(
-                        resources=worker_resources
-                    ).chia_remote_blocking(
-                        model_to_compile,
-                        backend="inductor",
-                        target_device=device,
-                        dynamic=None,
-                        sample_state=sample_state,
-                        sample_drive=sample_drive,
-                    )
-                except Exception as rem_exc:
-                    logger.warning("Remote compilation on worker failed (%s); retrying locally.", rem_exc)
-                    compiled_model = _compile_model_worker_task(
-                        model_to_compile,
-                        backend="inductor",
-                        target_device=device,
-                        dynamic=None,
-                        sample_state=sample_state,
-                        sample_drive=sample_drive,
-                    )
-            else:
-                compiled_model = _compile_model_worker_task(
-                    model_to_compile,
-                    backend="inductor",
-                    target_device=device,
-                    dynamic=None,
-                    sample_state=sample_state,
-                    sample_drive=sample_drive,
-                )
+            # Trigger PyTorch lazy compilation via dry-run pass on target device
+            if sample_state is not None:
+                s = sample_state.to(device) if hasattr(sample_state, "to") and callable(getattr(sample_state, "to")) else sample_state
+                d = sample_drive.to(device) if sample_drive is not None and hasattr(sample_drive, "to") and callable(getattr(sample_drive, "to")) else sample_drive
+                with torch.no_grad():
+                    if d is not None:
+                        try:
+                            _ = compiled_model(s, d)
+                        except TypeError:
+                            _ = compiled_model(s)
+                    else:
+                        _ = compiled_model(s)
+                _sync_device(device)
 
             build_logs = f"Torch Inductor compilation succeeded on {device} (dynamic batch shapes B>=1)."
 
     except Exception as exc:
+        # DO NOT retry locally on failure; record failure cleanly for Node 5/8/9
         compilation_status = "FAILED"
         compiled_model = None
         build_logs = f"Compilation error on device '{device}': {exc}"
@@ -358,5 +324,7 @@ def node4_phase1_compilation_runner(
         }
 
 
-# Backwards compatibility alias
+# Backwards compatibility aliases and test introspection attributes
 node4_compilation_runner = node4_phase1_compilation_runner
+compile_model_worker_task = node4_phase1_compilation_runner
+_compile_model_worker_task = node4_phase1_compilation_runner

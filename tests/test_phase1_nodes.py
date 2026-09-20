@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 import pytest
@@ -1134,6 +1135,107 @@ def test_node8_diagnostic_proposal(tmp_db_and_config):
     summary = db.get_token_usage_summary(phase="phase_1")
     assert summary["overall"]["total_calls"] >= 1
     assert "phase_1.node8_phase1_diagnostic_proposal" in summary["by_node"]
+
+
+def test_node8_query_result_none_and_retry_succeeds(tmp_db_and_config):
+    """Test that if the initial query_result is None or invalid text, Node 8 asks once more and succeeds if valid JSON is returned."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_diag_retry_success",
+        solver="rk4",
+        noise_model="L1_stochastic_parameter_noise",
+        status="FAILED",
+    )
+
+    class FlakyLLM:
+        def __init__(self):
+            self.model = "mock-flaky"
+            self.call_count = 0
+            self.prompts = []
+
+        def prompt(self, user_message, tools=None):
+            self.call_count += 1
+            self.prompts.append(user_message)
+            if self.call_count == 1:
+                # First attempt returns None / invalid unparsable text
+                return None
+            else:
+                # Retry attempt returns valid JSON
+                valid_resp = json.dumps({
+                    "action": "rewrite_correction",
+                    "nodes_to_rerun": [1, 2, 3],
+                    "diagnosis": "Recovered valid diagnosis on retry",
+                    "reasoning": "Solver parameters adjusted on retry",
+                    "debug_request": None,
+                })
+                class QueryResult:
+                    result = valid_resp
+                    usage = {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
+                return QueryResult()
+
+    llm = FlakyLLM()
+    res = node8_phase1_diagnostic_proposal(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        error_logs="Inductor lowered graph error",
+        llm=llm,
+    )
+
+    assert llm.call_count == 2
+    assert "Your previous response" in llm.prompts[1]
+    assert res["action"] == "rewrite_correction"
+    assert res["diagnosis"] == "Recovered valid diagnosis on retry"
+    assert res["nodes_to_rerun"] == [1, 2, 3]
+    assert res["tokens_consumed"] == 150
+
+
+def test_node8_retry_fails_and_warns_with_fallback(tmp_db_and_config, caplog):
+    """Test that if LLM persistently returns invalid responses after retry, Node 8 logs a warning and uses fallback reasoning."""
+    import logging
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_diag_retry_fail",
+        solver="rk4",
+        noise_model="L0_static_mismatch",
+        counter_2_rewrite=2,  # Should trigger debug_request fallback
+        status="FAILED",
+    )
+
+    class AlwaysInvalidLLM:
+        def __init__(self):
+            self.model = "mock-invalid"
+            self.call_count = 0
+            self.prompts = []
+
+        def prompt(self, user_message, tools=None):
+            self.call_count += 1
+            self.prompts.append(user_message)
+            # Both attempts return unparsable text
+            class QueryResult:
+                result = "Sorry, I am unable to format as JSON at this time."
+                usage = {"prompt_tokens": 80, "completion_tokens": 20, "total_tokens": 100}
+            return QueryResult()
+
+    llm = AlwaysInvalidLLM()
+    with caplog.at_level(logging.WARNING):
+        res = node8_phase1_diagnostic_proposal(
+            db=db,
+            config=config,
+            candidate_id=cand_id,
+            error_logs="Repeated simulation divergence",
+            llm=llm,
+        )
+
+    assert llm.call_count == 2
+    # Verify warning log was generated
+    assert any("LLM failed to produce valid JSON diagnostic proposal" in record.message for record in caplog.records)
+    # Since counter_2 == 2, fallback reasoning triggers debug_request
+    assert res["action"] == "debug_request"
+    assert res["debug_request"]["debugee_id"] == cand_id
+    assert res["tokens_consumed"] == 200  # 100 * 2 attempts accumulated
 
 
 def test_phase1_counter_reset_on_entry_from_phase0(tmp_db_and_config):

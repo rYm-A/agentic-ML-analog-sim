@@ -204,9 +204,7 @@ Note: "debug_request" field must be null or omitted if action is "rewrite_correc
     except Exception as exc:
         logger.warning("Node 8 LLM prompt failed: %s", exc)
 
-    elapsed = max(0.1, time.time() - start_time)
-
-    # Extract raw response text
+    # Extract raw response text from attempt 1
     raw_response = ""
     if query_result is not None:
         raw_response = getattr(query_result, "result", None) or getattr(query_result, "stream_result", None) or str(query_result)
@@ -215,7 +213,46 @@ Note: "debug_request" field must be null or omitted if action is "rewrite_correc
 
     parsed_json = _parse_llm_json(raw_response)
 
-    # Reasoning Fallback: if LLM didn't produce valid JSON, derive based on error context
+    # Re-prompt trial: If attempt 1 returned None, empty, or non-parsable output, ask the LLM once more to return valid JSON
+    retry_query_result = None
+    if not (parsed_json and isinstance(parsed_json, dict) and "action" in parsed_json):
+        logger.info(
+            "Node 8: Initial LLM response for candidate %s was not valid JSON. Requesting a retry with strict JSON formatting...",
+            candidate_id,
+        )
+        retry_prompt = (
+            f"Your previous response for candidate {candidate_id} could not be parsed as valid JSON.\n"
+            f"Previous output snippet: {raw_response[:200] if raw_response else '(empty / None)'}\n\n"
+            f"Please re-generate your diagnostic proposal now. You MUST output ONLY a valid JSON object matching this schema:\n"
+            f"{{\n"
+            f'  "action": "rewrite_correction" | "debug_request",\n'
+            f'  "nodes_to_rerun": [1, 2, 3] | [3] | [2, 3],\n'
+            f'  "diagnosis": "<Concise summary of the root cause>",\n'
+            f'  "reasoning": "<Technical reasoning explaining root cause and resolution>",\n'
+            f'  "debug_request": null\n'
+            f"}}\n"
+            f'Do not include markdown or text outside the JSON object. "debug_request" must be null or omitted if action is "rewrite_correction".'
+        )
+        try:
+            if hasattr(active_llm, "prompt") and callable(active_llm.prompt):
+                retry_query_result = active_llm.prompt(retry_prompt, tools=[result_db_tool])
+        except Exception as exc:
+            logger.warning("Node 8 LLM retry prompt failed: %s", exc)
+
+        retry_raw_response = ""
+        if retry_query_result is not None:
+            retry_raw_response = getattr(retry_query_result, "result", None) or getattr(retry_query_result, "stream_result", None) or str(retry_query_result)
+        elif hasattr(active_llm, "history") and active_llm.history:
+            retry_raw_response = str(active_llm.history[-1].get("response", ""))
+
+        if retry_raw_response:
+            parsed_json = _parse_llm_json(retry_raw_response)
+            if parsed_json and isinstance(parsed_json, dict) and "action" in parsed_json:
+                raw_response = retry_raw_response
+
+    elapsed = max(0.1, time.time() - start_time)
+
+    # Process parsed JSON or apply reasoning fallback with warning log
     if parsed_json and isinstance(parsed_json, dict) and "action" in parsed_json:
         action = str(parsed_json.get("action", "rewrite_correction")).lower()
         if action not in ("rewrite_correction", "debug_request"):
@@ -227,6 +264,14 @@ Note: "debug_request" field must be null or omitted if action is "rewrite_correc
         reasoning_text = str(parsed_json.get("reasoning") or diagnosis_text)
         debug_request_dict = parsed_json.get("debug_request")
     else:
+        # LLM continues to generate non-parsable format after retry: alert with a warning log
+        logger.warning(
+            "Node 8: LLM failed to produce valid JSON diagnostic proposal for candidate %s after 2 trials. "
+            "Falling back to rule-based diagnostic reasoning. Raw response: %s",
+            candidate_id,
+            raw_response[:300] if raw_response else "(empty / None)",
+        )
+
         # Fallback reasoning
         if c2 >= 2 and not is_debug:
             action = "debug_request"
@@ -271,20 +316,38 @@ Note: "debug_request" field must be null or omitted if action is "rewrite_correc
         comment=f"Action: {action}. Diagnosis: {diagnosis_text}\nReasoning: {reasoning_text}",
     )
 
-    # Extract Token Metrics per Node 1 convention
-    usage = getattr(query_result, "usage", None) if query_result is not None else None
-    if not usage and hasattr(active_llm, "history") and active_llm.history:
-        usage = active_llm.history[-1].get("usage")
-
+    # Extract Token Metrics per Node 1 convention (accumulating across initial and retry attempts if applicable)
     model_name = getattr(active_llm, "model", "gemini-2.5-flash")
     prompt_tokens = 0
     completion_tokens = 0
     total_tokens = 0
 
-    if isinstance(usage, dict):
-        prompt_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
-        completion_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or usage.get("candidates_tokens") or 0
-        total_tokens = usage.get("total_tokens") or (prompt_tokens + completion_tokens)
+    def _extract_usage(res: Any) -> Dict[str, int]:
+        u = getattr(res, "usage", None) if res is not None else None
+        p, c, t = 0, 0, 0
+        if isinstance(u, dict):
+            p = u.get("prompt_tokens") or u.get("input_tokens") or 0
+            c = u.get("completion_tokens") or u.get("output_tokens") or u.get("candidates_tokens") or 0
+            t = u.get("total_tokens") or (p + c)
+        return {"prompt": p, "completion": c, "total": t}
+
+    u1 = _extract_usage(query_result)
+    prompt_tokens += u1["prompt"]
+    completion_tokens += u1["completion"]
+    total_tokens += u1["total"]
+
+    if retry_query_result is not None:
+        u2 = _extract_usage(retry_query_result)
+        prompt_tokens += u2["prompt"]
+        completion_tokens += u2["completion"]
+        total_tokens += u2["total"]
+    elif total_tokens == 0 and hasattr(active_llm, "history") and active_llm.history:
+        # Fallback to history if query_result did not directly attach usage dict
+        u_hist = active_llm.history[-1].get("usage")
+        if isinstance(u_hist, dict):
+            prompt_tokens = u_hist.get("prompt_tokens") or u_hist.get("input_tokens") or 0
+            completion_tokens = u_hist.get("completion_tokens") or u_hist.get("output_tokens") or u_hist.get("candidates_tokens") or 0
+            total_tokens = u_hist.get("total_tokens") or (prompt_tokens + completion_tokens)
 
     logger.info(
         "Node 8: Tokens consumed - prompt: %d, completion: %d, total: %d (model: %s)",
@@ -308,12 +371,17 @@ Note: "debug_request" field must be null or omitted if action is "rewrite_correc
         )
 
     # Profiler registration
+    aggregated_usage = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
     try:
         from chia.base.profiling import get_profiler
         get_profiler().add_info({
             "node": "node8_phase1_diagnostic_proposal",
             "candidate_id": candidate_id,
-            "usage": usage,
+            "usage": aggregated_usage,
         })
     except Exception:
         pass
