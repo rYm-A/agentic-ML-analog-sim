@@ -69,6 +69,32 @@ from agentic_ml_analog_sim.phase_2 import run_phase_2
 logger = logging.getLogger("run_loop")
 
 
+def _configure_tailnet_proxy_if_present() -> None:
+    """If a Chia tailnet CONNECT relay is listening locally, configure Ray gRPC proxying."""
+    import os
+    import socket
+    if "grpc_proxy" in os.environ:
+        return
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.5)
+    try:
+        if sock.connect_ex(("127.0.0.1", 13129)) == 0:
+            os.environ["RAY_grpc_enable_http_proxy"] = "1"
+            os.environ["grpc_proxy"] = "http://127.0.0.1:13129"
+            try:
+                local_ip = socket.gethostbyname(socket.gethostname())
+            except Exception:
+                local_ip = "127.0.0.1"
+            current = os.environ.get("no_grpc_proxy", "")
+            additions = [local_ip, "127.0.0.1", "localhost"]
+            os.environ["no_grpc_proxy"] = ",".join(filter(None, [current] + additions))
+            logger.info("Auto-configured Ray gRPC proxy via local Chia relay (127.0.0.1:13129)")
+    except Exception:
+        pass
+    finally:
+        sock.close()
+
+
 def ensure_ray_initialized(
     address: Optional[str] = "auto",
     auto_init_local: bool = True,
@@ -77,11 +103,12 @@ def ensure_ray_initialized(
 
     Args:
         address: Ray cluster address. Defaults to "auto" to attach to an active Chia cluster.
-        auto_init_local: Fallback to initializing a local Ray instance if cluster is unavailable.
+        auto_init_local: Fallback to initializing a local Ray runtime fallback if cluster is unavailable.
 
     Returns:
         True if Ray is initialized, False otherwise.
     """
+    _configure_tailnet_proxy_if_present()
     if not ray.is_initialized():
         logger.info("Ray is not initialized. Attempting connection to Ray cluster (address=%s)...", address)
         try:

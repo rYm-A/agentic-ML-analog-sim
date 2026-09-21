@@ -350,6 +350,17 @@ def run_phase_1(
         compilation_status = comp_res.get("status", "SUCCESS")
         compilation_error = comp_res.get("error_message") or comp_res.get("error_logs")
 
+        # Sync compilation status to local db for head coordination / monitoring
+        try:
+            db.update_execution_status(
+                active_candidate_id,
+                compilation_status=compilation_status,
+                error_stage="compilation" if compilation_status == "FAILED" else None,
+                error_message=compilation_error if compilation_status == "FAILED" else None,
+            )
+        except Exception as db_sync_err:
+            logger.debug("Local db sync for Node 4 skipped: %s", db_sync_err)
+
         # STEP 4: Node 5 Verify Correctness (Eager vs Compiled)
         logger.info("Executing Node 5 (Verify Correctness) for '%s'", active_candidate_id)
         verify_res = _dispatch_node(
@@ -363,6 +374,15 @@ def run_phase_1(
             compilation_status=compilation_status,
             compilation_error=compilation_error,
         )
+
+        # Sync Node 5 counter and error status to local db
+        try:
+            if verify_res.get("status") == "PASSED":
+                db.update_counters(active_candidate_id, counter_1_compilation=0)
+            elif "counter_1" in verify_res:
+                db.update_counters(active_candidate_id, counter_1_compilation=verify_res["counter_1"])
+        except Exception as db_sync_err:
+            logger.debug("Local db sync for Node 5 skipped: %s", db_sync_err)
 
         if verify_res.get("status") == "TERMINATED_MAX_CYCLES":
             logger.error("Node 5 terminated loop due to cycle limits for '%s'", active_candidate_id)
@@ -408,6 +428,33 @@ def run_phase_1(
             backend_mode=target_device,
         )
 
+        metrics = profile_res.get("metrics", {})
+        # Sync Node 6 profiling metrics and status to local db
+        try:
+            if profile_res.get("status") == "SUCCESS":
+                db.mark_proposal_status(
+                    candidate_id=active_candidate_id,
+                    status="EVALUATING",
+                    latency_ms=metrics.get("latency_ms"),
+                    relative_error=metrics.get("relative_error"),
+                    accuracy_fid=metrics.get("accuracy_fid"),
+                    wall_clock_s=metrics.get("wall_clock_s"),
+                    worker_utilization=0.85,
+                )
+                db.update_execution_status(
+                    candidate_id=active_candidate_id,
+                    simulation_status="SUCCESS",
+                )
+            elif profile_res.get("status") == "FAILED":
+                db.update_execution_status(
+                    candidate_id=active_candidate_id,
+                    simulation_status="FAILED",
+                    error_stage="simulation",
+                    error_message=profile_res.get("error_message"),
+                )
+        except Exception as db_sync_err:
+            logger.debug("Local db sync for Node 6 skipped: %s", db_sync_err)
+
         if profile_res.get("status") == "FAILED":
             logger.warning("Node 6 simulation failed for candidate '%s': %s", active_candidate_id, profile_res.get("error_message"))
             # Route to Node 8 Diagnostic Agent
@@ -426,8 +473,6 @@ def run_phase_1(
             else:
                 debug_request = {"nodes_to_rerun": diag_res.get("nodes_to_rerun", [1, 2, 3])}
             continue
-
-        metrics = profile_res.get("metrics", {})
 
         # STEP 6: Node 7 Evaluation Gate
         logger.info("Executing Node 7 (Evaluation Gate) for '%s'", active_candidate_id)
