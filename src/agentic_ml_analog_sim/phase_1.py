@@ -71,11 +71,57 @@ import ray
 logger = logging.getLogger("agentic_ml_analog_sim.phase_1")
 
 
-def _dispatch_node(node_fn: Any, *args: Any, **kwargs: Any) -> Any:
-    """Dispatch a node function via chia_remote if Ray is initialized, else local."""
+def _dispatch_node(
+    node_fn: Any,
+    *args: Any,
+    timeout: Optional[float] = None,
+    **kwargs: Any,
+) -> Any:
+    """Dispatch a node function via chia_remote if Ray is initialized, else local.
+
+    Guarded with an effective timeout to prevent synchronous driver deadlocks.
+    """
     if ray.is_initialized() and hasattr(node_fn, "chia_remote") and get is not None:
+        config = kwargs.get("config")
+        if config is None:
+            for arg in args:
+                if hasattr(arg, "node_timeout") or hasattr(arg, "experiment_limits"):
+                    config = arg
+                    break
+        effective_timeout = timeout or getattr(config, "node_timeout", None)
+        if effective_timeout is None and hasattr(config, "experiment_limits"):
+            effective_timeout = getattr(config.experiment_limits, "timeout_seconds_per_eval", None)
+        if effective_timeout is None:
+            effective_timeout = 600.0
+        try:
+            effective_timeout = float(effective_timeout)
+        except (TypeError, ValueError):
+            effective_timeout = 600.0
+
         ref = node_fn.chia_remote(*args, **kwargs)
-        return get(ref)
+        try:
+            return get(ref, timeout=effective_timeout)
+        except (ray.exceptions.GetTimeoutError, TimeoutError):
+            node_name = getattr(node_fn, "__name__", str(node_fn))
+            logger.error(
+                "Node %s timed out after %ds; force canceling remote task.",
+                node_name,
+                int(effective_timeout),
+            )
+            try:
+                ray.cancel(ref, force=True)
+            except Exception as cancel_err:
+                logger.warning(
+                    "Failed to force cancel timed-out task %s: %s",
+                    node_name,
+                    cancel_err,
+                )
+            return {
+                "status": "FAILED",
+                "error": f"Node {node_name} timed out after {effective_timeout}s",
+                "details": f"Node {node_name} timed out after {effective_timeout}s",
+                "error_message": f"Node {node_name} timed out after {effective_timeout}s",
+            }
     return node_fn(*args, **kwargs)
 
 
@@ -148,6 +194,9 @@ def run_phase_1(
         config = config_path
     else:
         config = load_simulation_config(config_path)
+
+    if target_device == "mps" and hasattr(config, "device") and config.device:
+        target_device = config.device
 
     # 2. Resolve Database
     if isinstance(db_path, ResultDatabase):
@@ -414,6 +463,7 @@ def run_phase_1(
             compilation_status=compilation_status,
             compilation_error=compilation_error,
             proposal=active_candidate,
+            timeout=300.0,
         )
 
         # Sync Node 5 counter and error status to local db
@@ -438,14 +488,15 @@ def run_phase_1(
             )
 
         if verify_res.get("status") == "FAILED":
-            logger.warning("Node 5 verification failed for candidate '%s': %s", active_candidate_id, verify_res.get("details"))
+            verify_error = verify_res.get("details") or verify_res.get("error") or "Unknown verification error"
+            logger.warning("Node 5 verification failed for candidate '%s': %s", active_candidate_id, verify_error)
             # Route to Node 8 Diagnostic Agent
             diag_res = _dispatch_node(
                 node8_phase1_diagnostic_proposal,
                 db=db,
                 config=config,
                 candidate_id=active_candidate_id,
-                error_logs=f"Numerical verification failed: {verify_res.get('details')}",
+                error_logs=f"Numerical verification failed: {verify_error}",
                 llm=llm,
             )
             current_trigger = "node_8"
@@ -468,6 +519,7 @@ def run_phase_1(
             target_device=target_device,
             backend_mode=target_device,
             proposal=active_candidate,
+            timeout=300.0,
         )
 
         metrics = profile_res.get("metrics", {})
@@ -485,7 +537,7 @@ def run_phase_1(
                 )
                 db.update_execution_status(
                     candidate_id=active_candidate_id,
-                    simulation_status="SUCCESS",
+                    profiling_status="SUCCESS",
                 )
             elif profile_res.get("status") == "FAILED":
                 db.update_execution_status(
@@ -498,14 +550,15 @@ def run_phase_1(
             logger.debug("Local db sync for Node 6 skipped: %s", db_sync_err)
 
         if profile_res.get("status") == "FAILED":
-            logger.warning("Node 6 simulation failed for candidate '%s': %s", active_candidate_id, profile_res.get("error_message"))
+            profile_error = profile_res.get("error_message") or profile_res.get("error") or "Unknown simulation error"
+            logger.warning("Node 6 simulation failed for candidate '%s': %s", active_candidate_id, profile_error)
             # Route to Node 8 Diagnostic Agent
             diag_res = _dispatch_node(
                 node8_phase1_diagnostic_proposal,
                 db=db,
                 config=config,
                 candidate_id=active_candidate_id,
-                error_logs=f"Simulation profiling failed: {profile_res.get('error_message')}",
+                error_logs=f"Simulation profiling failed: {profile_error}",
                 llm=llm,
             )
             current_trigger = "node_8"

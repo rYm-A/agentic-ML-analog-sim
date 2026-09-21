@@ -77,6 +77,42 @@ def _sync_device(device: str) -> None:
             pass
 
 
+def _is_remote_or_readonly(db: Optional[Any] = None) -> tuple[bool, bool]:
+    """Check whether node is executing on a remote worker or db is unavailable/read-only."""
+    is_remote = False
+    if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
+        try:
+            curr_ip = ray.util.get_node_ip_address()
+            if curr_ip in ("127.0.0.1", "localhost"):
+                is_remote = False
+            else:
+                ctx = ray.get_runtime_context()
+                gcs_addr = getattr(ctx, "gcs_address", None)
+                if gcs_addr:
+                    head_ip = gcs_addr.split(":")[0]
+                    is_remote = (curr_ip != head_ip)
+                else:
+                    is_remote = (curr_ip != "127.0.0.1")
+        except Exception:
+            is_remote = False
+
+    is_readonly = False
+    if db is None:
+        is_readonly = True
+    else:
+        underlying_db = getattr(db, "_db", db)
+        db_path = getattr(underlying_db, "db_path", None)
+        if db_path is not None:
+            try:
+                import os
+                p = str(db_path)
+                if os.path.exists(p) and not os.access(p, os.W_OK):
+                    is_readonly = True
+            except Exception:
+                pass
+    return is_remote, is_readonly
+
+
 @ChiaFunction(resources={"sim_worker": 1})
 def node5_phase1_verify_correctness(
     db: ResultDatabase,
@@ -143,12 +179,19 @@ def node5_phase1_verify_correctness(
         max_abs: float = 0.0,
         max_rel: float = 0.0,
     ) -> Dict[str, Any]:
-        """Helper to centralize Counter 1 increment, limit check, and DB updates."""
+        is_remote, is_readonly = _is_remote_or_readonly(db)
         new_counter_1 = curr_counter_1 + 1
-        try:
-            db.update_counters(candidate_id, counter_1_compilation=new_counter_1)
-        except Exception as exc:
-            logger.debug("Node 5: remote db counter update skipped (%s)", exc)
+        if db is not None and not is_remote and not is_readonly:
+            try:
+                db.update_counters(candidate_id, counter_1_compilation=new_counter_1)
+            except Exception as exc:
+                logger.debug("Node 5: remote db counter update skipped (%s)", exc)
+        else:
+            logger.debug(
+                "Node 5: Skipping direct DB counter update (remote=%s, readonly=%s, driver will sync)",
+                is_remote,
+                is_readonly,
+            )
 
         counter_limits = getattr(config, "counter_limits", None)
         max_counter_1 = None
@@ -181,15 +224,22 @@ def node5_phase1_verify_correctness(
                 details=error_msg,
             )
 
-        try:
-            db.update_execution_status(
-                candidate_id,
-                compilation_status="FAILED",
-                error_stage=error_stage,
-                error_message=error_msg,
+        if db is not None and not is_remote and not is_readonly:
+            try:
+                db.update_execution_status(
+                    candidate_id,
+                    compilation_status="FAILED",
+                    error_stage=error_stage,
+                    error_message=error_msg,
+                )
+            except Exception as exc:
+                logger.debug("Node 5: remote db status update skipped (%s)", exc)
+        else:
+            logger.debug(
+                "Node 5: Skipping direct DB status update (remote=%s, readonly=%s, driver will sync)",
+                is_remote,
+                is_readonly,
             )
-        except Exception as exc:
-            logger.debug("Node 5: remote db status update skipped (%s)", exc)
         logger.warning("Node 5: Verification FAILED for %s (Counter 1 = %d)", candidate_id, new_counter_1)
 
         # Attach telemetry to profiler if available
@@ -401,10 +451,18 @@ def node5_phase1_verify_correctness(
         )
 
     # Reset Counter ID 1 on success
-    try:
-        db.update_counters(candidate_id, counter_1_compilation=0)
-    except Exception as db_exc:
-        logger.warning("Node 5: Non-critical failure updating DB counters (driver will sync): %s", db_exc)
+    is_remote, is_readonly = _is_remote_or_readonly(db)
+    if db is not None and not is_remote and not is_readonly:
+        try:
+            db.update_counters(candidate_id, counter_1_compilation=0)
+        except Exception as db_exc:
+            logger.debug("Node 5: Non-critical failure updating DB counters (driver will sync): %s", db_exc)
+    else:
+        logger.debug(
+            "Node 5: Skipping direct DB counter reset (remote=%s, readonly=%s, driver will sync)",
+            is_remote,
+            is_readonly,
+        )
     logger.info("Node 5: Verification PASSED for candidate %s (Counter 1 reset to 0)", candidate_id)
 
     # Attach verification metadata to Chia profiler if available

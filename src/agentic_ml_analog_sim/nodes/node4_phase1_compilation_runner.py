@@ -69,6 +69,42 @@ def _sync_device(device: str) -> None:
             pass
 
 
+def _is_remote_or_readonly(db: Optional[Any] = None) -> tuple[bool, bool]:
+    """Check whether node is executing on a remote worker or db is unavailable/read-only."""
+    is_remote = False
+    if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
+        try:
+            curr_ip = ray.util.get_node_ip_address()
+            if curr_ip in ("127.0.0.1", "localhost"):
+                is_remote = False
+            else:
+                ctx = ray.get_runtime_context()
+                gcs_addr = getattr(ctx, "gcs_address", None)
+                if gcs_addr:
+                    head_ip = gcs_addr.split(":")[0]
+                    is_remote = (curr_ip != head_ip)
+                else:
+                    is_remote = (curr_ip != "127.0.0.1")
+        except Exception:
+            is_remote = False
+
+    is_readonly = False
+    if db is None:
+        is_readonly = True
+    else:
+        underlying_db = getattr(db, "_db", db)
+        db_path = getattr(underlying_db, "db_path", None)
+        if db_path is not None:
+            try:
+                import os
+                p = str(db_path)
+                if os.path.exists(p) and not os.access(p, os.W_OK):
+                    is_readonly = True
+            except Exception:
+                pass
+    return is_remote, is_readonly
+
+
 @ChiaFunction(num_cpus=4, resources={"compile_worker": 1})
 def node4_phase1_compilation_runner(
     db: ResultDatabase,
@@ -310,15 +346,23 @@ def node4_phase1_compilation_runner(
         logger.error("Node 4 compilation failed for candidate %s: %s", candidate_id, exc)
 
     # Update DB status (Node 4 never increments Counter 1; Counter 1 is owned by Node 5)
-    try:
-        db.update_execution_status(
-            candidate_id,
-            compilation_status=compilation_status,
-            error_stage="compilation" if compilation_status == "FAILED" else None,
-            error_message=build_logs if compilation_status == "FAILED" else None,
+    is_remote, is_readonly = _is_remote_or_readonly(db)
+    if db is not None and not is_remote and not is_readonly:
+        try:
+            db.update_execution_status(
+                candidate_id,
+                compilation_status=compilation_status,
+                error_stage="compilation" if compilation_status == "FAILED" else None,
+                error_message=build_logs if compilation_status == "FAILED" else None,
+            )
+        except Exception as db_exc:
+            logger.debug("Node 4: Non-critical failure updating DB status (driver will sync): %s", db_exc)
+    else:
+        logger.debug(
+            "Node 4: Skipping direct DB status update (remote=%s, readonly=%s, driver will sync)",
+            is_remote,
+            is_readonly,
         )
-    except Exception as db_exc:
-        logger.warning("Node 4: Non-critical failure updating DB status (driver will sync): %s", db_exc)
 
     # Attach compilation telemetry to Chia profiler if available
     try:

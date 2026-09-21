@@ -426,6 +426,7 @@ def execute_loop(
                 db_path=db_path,
                 candidate_id=candidate_id,
                 trigger_source="phase_0",
+                target_device=getattr(config, "device", "cpu"),
             )
             logger.info(
                 "Phase 1 action=%s, candidate_id=%s, mode=%s, details=%s",

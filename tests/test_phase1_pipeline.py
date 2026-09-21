@@ -223,3 +223,78 @@ def test_phase1_pipeline_reset_counters_on_entry_from_phase0(test_db, test_confi
     assert prop_after["counter_3_debug_gate"] == 0
     assert prop_after["counter_4_debug_loop"] == 0
 
+
+def test_dispatch_node_local_fallback():
+    from agentic_ml_analog_sim.phase_1 import _dispatch_node
+
+    def dummy_node(x, y):
+        return {"sum": x + y}
+
+    # Should execute locally and not pass timeout to dummy_node
+    res = _dispatch_node(dummy_node, 3, 5, timeout=10.0)
+    assert res == {"sum": 8}
+
+
+def test_dispatch_node_ray_timeout_and_cancel(monkeypatch):
+    import ray
+    from agentic_ml_analog_sim.phase_1 import _dispatch_node
+
+    # Mock remote function and ref
+    fake_ref = "fake_ref_123"
+    cancelled = []
+
+    class MockRemoteNode:
+        __name__ = "mock_slow_node"
+
+        def chia_remote(self, *args, **kwargs):
+            return fake_ref
+
+    def fake_get(ref, timeout=None):
+        assert ref == fake_ref
+        assert timeout == 42.0
+        raise ray.exceptions.GetTimeoutError("Task timed out")
+
+    def fake_cancel(ref, force=True):
+        cancelled.append((ref, force))
+
+    monkeypatch.setattr("agentic_ml_analog_sim.phase_1.ray.is_initialized", lambda: True)
+    monkeypatch.setattr("agentic_ml_analog_sim.phase_1.get", fake_get)
+    monkeypatch.setattr(ray, "cancel", fake_cancel)
+
+    res = _dispatch_node(MockRemoteNode(), timeout=42.0)
+    assert res["status"] == "FAILED"
+    assert "mock_slow_node timed out after 42.0s" in res["error"]
+    assert cancelled == [(fake_ref, True)]
+
+
+def test_dispatch_node_effective_timeout_from_config(monkeypatch):
+    import ray
+    from agentic_ml_analog_sim.phase_1 import _dispatch_node
+
+    observed_timeouts = []
+
+    class MockNode:
+        __name__ = "mock_node"
+        def chia_remote(self, *args, **kwargs):
+            return "ref"
+
+    def fake_get(ref, timeout=None):
+        observed_timeouts.append(timeout)
+        return {"status": "SUCCESS"}
+
+    monkeypatch.setattr("agentic_ml_analog_sim.phase_1.ray.is_initialized", lambda: True)
+    monkeypatch.setattr("agentic_ml_analog_sim.phase_1.get", fake_get)
+
+    class DummyConfig:
+        node_timeout = 150.0
+
+    # 1. Timeout from config
+    res = _dispatch_node(MockNode(), config=DummyConfig())
+    assert res == {"status": "SUCCESS"}
+    assert observed_timeouts[-1] == 150.0
+
+    # 2. Explicit timeout overrides config
+    _dispatch_node(MockNode(), config=DummyConfig(), timeout=45.0)
+    assert observed_timeouts[-1] == 45.0
+
+

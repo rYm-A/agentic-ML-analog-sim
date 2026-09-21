@@ -25,6 +25,25 @@ from agentic_ml_analog_sim.config import SimulationConfig
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.tools.result_db_tool import ResultDBTool
 
+try:
+    from chia.base.tools.ChiaTool import cleanup_tools
+except ImportError:  # pragma: no cover
+    def cleanup_tools(tools: Any) -> None:
+        if not tools:
+            return
+        for tool in tools:
+            if hasattr(tool, "stop") and callable(tool.stop):
+                try:
+                    tool.stop()
+                except Exception:
+                    pass
+            elif hasattr(tool, "_server_actor") and getattr(tool, "_server_actor", None) is not None:
+                try:
+                    import ray
+                    ray.kill(tool._server_actor)
+                except Exception:
+                    pass
+
 logger = logging.getLogger("agentic_ml_analog_sim.nodes.node8_phase1_diagnostic_proposal")
 
 
@@ -198,57 +217,61 @@ Note: "debug_request" field must be null or omitted if action is "rewrite_correc
 
     start_time = time.time()
     query_result = None
-    try:
-        if hasattr(active_llm, "prompt") and callable(active_llm.prompt):
-            query_result = active_llm.prompt(prompt_text, tools=[result_db_tool])
-    except Exception as exc:
-        logger.warning("Node 8 LLM prompt failed: %s", exc)
-
-    # Extract raw response text from attempt 1
-    raw_response = ""
-    if query_result is not None:
-        raw_response = getattr(query_result, "result", None) or getattr(query_result, "stream_result", None) or str(query_result)
-    elif hasattr(active_llm, "history") and active_llm.history:
-        raw_response = str(active_llm.history[-1].get("response", ""))
-
-    parsed_json = _parse_llm_json(raw_response)
-
-    # Re-prompt trial: If attempt 1 returned None, empty, or non-parsable output, ask the LLM once more to return valid JSON
     retry_query_result = None
-    if not (parsed_json and isinstance(parsed_json, dict) and "action" in parsed_json):
-        logger.info(
-            "Node 8: Initial LLM response for candidate %s was not valid JSON. Requesting a retry with strict JSON formatting...",
-            candidate_id,
-        )
-        retry_prompt = (
-            f"Your previous response for candidate {candidate_id} could not be parsed as valid JSON.\n"
-            f"Previous output snippet: {raw_response[:200] if raw_response else '(empty / None)'}\n\n"
-            f"Please re-generate your diagnostic proposal now. You MUST output ONLY a valid JSON object matching this schema:\n"
-            f"{{\n"
-            f'  "action": "rewrite_correction" | "debug_request",\n'
-            f'  "nodes_to_rerun": [1, 2, 3] | [3] | [2, 3],\n'
-            f'  "diagnosis": "<Concise summary of the root cause>",\n'
-            f'  "reasoning": "<Technical reasoning explaining root cause and resolution>",\n'
-            f'  "debug_request": null\n'
-            f"}}\n"
-            f'Do not include markdown or text outside the JSON object. "debug_request" must be null or omitted if action is "rewrite_correction".'
-        )
+    tools = [result_db_tool]
+    try:
         try:
             if hasattr(active_llm, "prompt") and callable(active_llm.prompt):
-                retry_query_result = active_llm.prompt(retry_prompt, tools=[result_db_tool])
+                query_result = active_llm.prompt(prompt_text, tools=tools)
         except Exception as exc:
-            logger.warning("Node 8 LLM retry prompt failed: %s", exc)
+            logger.warning("Node 8 LLM prompt failed: %s", exc)
 
-        retry_raw_response = ""
-        if retry_query_result is not None:
-            retry_raw_response = getattr(retry_query_result, "result", None) or getattr(retry_query_result, "stream_result", None) or str(retry_query_result)
+        # Extract raw response text from attempt 1
+        raw_response = ""
+        if query_result is not None:
+            raw_response = getattr(query_result, "result", None) or getattr(query_result, "stream_result", None) or str(query_result)
         elif hasattr(active_llm, "history") and active_llm.history:
-            retry_raw_response = str(active_llm.history[-1].get("response", ""))
+            raw_response = str(active_llm.history[-1].get("response", ""))
 
-        if retry_raw_response:
-            parsed_json = _parse_llm_json(retry_raw_response)
-            if parsed_json and isinstance(parsed_json, dict) and "action" in parsed_json:
-                raw_response = retry_raw_response
+        parsed_json = _parse_llm_json(raw_response)
+
+        # Re-prompt trial: If attempt 1 returned None, empty, or non-parsable output, ask the LLM once more to return valid JSON
+        if not (parsed_json and isinstance(parsed_json, dict) and "action" in parsed_json):
+            logger.info(
+                "Node 8: Initial LLM response for candidate %s was not valid JSON. Requesting a retry with strict JSON formatting...",
+                candidate_id,
+            )
+            retry_prompt = (
+                f"Your previous response for candidate {candidate_id} could not be parsed as valid JSON.\n"
+                f"Previous output snippet: {raw_response[:200] if raw_response else '(empty / None)'}\n\n"
+                f"Please re-generate your diagnostic proposal now. You MUST output ONLY a valid JSON object matching this schema:\n"
+                f"{{\n"
+                f'  "action": "rewrite_correction" | "debug_request",\n'
+                f'  "nodes_to_rerun": [1, 2, 3] | [3] | [2, 3],\n'
+                f'  "diagnosis": "<Concise summary of the root cause>",\n'
+                f'  "reasoning": "<Technical reasoning explaining root cause and resolution>",\n'
+                f'  "debug_request": null\n'
+                f"}}\n"
+                f'Do not include markdown or text outside the JSON object. "debug_request" must be null or omitted if action is "rewrite_correction".'
+            )
+            try:
+                if hasattr(active_llm, "prompt") and callable(active_llm.prompt):
+                    retry_query_result = active_llm.prompt(retry_prompt, tools=tools)
+            except Exception as exc:
+                logger.warning("Node 8 LLM retry prompt failed: %s", exc)
+
+            retry_raw_response = ""
+            if retry_query_result is not None:
+                retry_raw_response = getattr(retry_query_result, "result", None) or getattr(retry_query_result, "stream_result", None) or str(retry_query_result)
+            elif hasattr(active_llm, "history") and active_llm.history:
+                retry_raw_response = str(active_llm.history[-1].get("response", ""))
+
+            if retry_raw_response:
+                parsed_json = _parse_llm_json(retry_raw_response)
+                if parsed_json and isinstance(parsed_json, dict) and "action" in parsed_json:
+                    raw_response = retry_raw_response
+    finally:
+        cleanup_tools(tools)
 
     elapsed = max(0.1, time.time() - start_time)
 

@@ -1,4 +1,5 @@
 experiment_name: "first_run_trial_un0_analog_acceleration"
+device: cpu
 
 reference_design:
   name: "imagenet64/n6656"

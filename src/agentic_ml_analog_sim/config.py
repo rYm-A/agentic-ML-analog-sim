@@ -166,6 +166,7 @@ class SimulationConfig(BaseModel):
     budget: Optional[ExperimentLimitsConfig] = None
     counter_limits: CounterLimitsConfig = Field(default_factory=CounterLimitsConfig)
     agent_efforts: AgentEffortsConfig = Field(default_factory=AgentEffortsConfig)
+    device: Optional[str] = Field(default="cpu", description="Execution device ('cpu', 'cuda', 'mps')")
 
     @model_validator(mode="before")
     @classmethod

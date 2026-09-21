@@ -30,6 +30,25 @@ from torch import nn
 
 from chia.base.ChiaFunction import ChiaFunction
 
+try:
+    from chia.base.tools.ChiaTool import cleanup_tools
+except ImportError:  # pragma: no cover
+    def cleanup_tools(tools: Any) -> None:
+        if not tools:
+            return
+        for tool in tools:
+            if hasattr(tool, "stop") and callable(tool.stop):
+                try:
+                    tool.stop()
+                except Exception:
+                    pass
+            elif hasattr(tool, "_server_actor") and getattr(tool, "_server_actor", None) is not None:
+                try:
+                    import ray
+                    ray.kill(tool._server_actor)
+                except Exception:
+                    pass
+
 from agentic_ml_analog_sim.config import SimulationConfig
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.tools.compilation_info_tool import CompilationInfoTool
@@ -409,6 +428,8 @@ def node3_phase1_compiler_rewriter(
             )
     except Exception as llm_err:
         logger.error("Node 3: LLM prompt failed: %s", llm_err)
+    finally:
+        cleanup_tools(tools)
 
     elapsed = max(0.1, time.time() - start_time)
 

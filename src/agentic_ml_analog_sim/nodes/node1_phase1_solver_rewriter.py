@@ -30,6 +30,25 @@ except ImportError:  # pragma: no cover
             return func
         return decorator
 
+try:
+    from chia.base.tools.ChiaTool import cleanup_tools
+except ImportError:  # pragma: no cover
+    def cleanup_tools(tools: Any) -> None:
+        if not tools:
+            return
+        for tool in tools:
+            if hasattr(tool, "stop") and callable(tool.stop):
+                try:
+                    tool.stop()
+                except Exception:
+                    pass
+            elif hasattr(tool, "_server_actor") and getattr(tool, "_server_actor", None) is not None:
+                try:
+                    import ray
+                    ray.kill(tool._server_actor)
+                except Exception:
+                    pass
+
 from agentic_ml_analog_sim.config import SimulationConfig
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.tools.result_db_tool import ResultDBTool
@@ -335,14 +354,17 @@ def node1_phase1_solver_rewriter(
     active_llm = _resolve_llm(llm, config)
     start_time = time.time()
     query_result = None
+    tools = [result_db_tool, solver_papers_tool, un0_rewriter_tool]
     try:
         if hasattr(active_llm, "prompt") and callable(active_llm.prompt):
             query_result = active_llm.prompt(
                 prompt_text,
-                tools=[result_db_tool, solver_papers_tool, un0_rewriter_tool],
+                tools=tools,
             )
     except Exception as exc:
         logger.warning("Node 1: LLM prompt call failed: %s", exc)
+    finally:
+        cleanup_tools(tools)
 
     elapsed = max(0.1, time.time() - start_time)
 

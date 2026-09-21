@@ -197,6 +197,42 @@ def _simulate_batch1_worker(
     }
 
 
+def _is_remote_or_readonly(db: Optional[Any] = None) -> tuple[bool, bool]:
+    """Check whether node is executing on a remote worker or db is unavailable/read-only."""
+    is_remote = False
+    if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
+        try:
+            curr_ip = ray.util.get_node_ip_address()
+            if curr_ip in ("127.0.0.1", "localhost"):
+                is_remote = False
+            else:
+                ctx = ray.get_runtime_context()
+                gcs_addr = getattr(ctx, "gcs_address", None)
+                if gcs_addr:
+                    head_ip = gcs_addr.split(":")[0]
+                    is_remote = (curr_ip != head_ip)
+                else:
+                    is_remote = (curr_ip != "127.0.0.1")
+        except Exception:
+            is_remote = False
+
+    is_readonly = False
+    if db is None:
+        is_readonly = True
+    else:
+        underlying_db = getattr(db, "_db", db)
+        db_path = getattr(underlying_db, "db_path", None)
+        if db_path is not None:
+            try:
+                import os
+                p = str(db_path)
+                if os.path.exists(p) and not os.access(p, os.W_OK):
+                    is_readonly = True
+            except Exception:
+                pass
+    return is_remote, is_readonly
+
+
 @ChiaFunction(resources={"sim_worker": 1})
 def node6_phase1_simulate_profile(
     db: Union[ResultDatabase, ResultDBTool],
@@ -295,7 +331,8 @@ def node6_phase1_simulate_profile(
             "mode": "test",
         }
 
-        if result_db_tool is not None:
+        is_remote, is_readonly = _is_remote_or_readonly(db)
+        if result_db_tool is not None and not is_remote and not is_readonly:
             try:
                 result_db_tool.mark_proposal_status(
                     candidate_id=candidate_id,
@@ -311,7 +348,13 @@ def node6_phase1_simulate_profile(
                     simulation_status="SUCCESS",
                 )
             except Exception as e:
-                logger.warning("Node 6 test mode DB update skipped: %s", e)
+                logger.debug("Node 6 test mode DB update skipped: %s", e)
+        else:
+            logger.debug(
+                "Node 6: Skipping test mode DB update (remote=%s, readonly=%s, driver will sync)",
+                is_remote,
+                is_readonly,
+            )
 
         try:
             from chia.base.profiling import get_profiler
@@ -342,7 +385,8 @@ def node6_phase1_simulate_profile(
             "For unit tests without a compiled model, pass test_mode=True."
         )
         logger.error("Node 6 real execution failed: %s", err_msg)
-        if result_db_tool is not None:
+        is_remote, is_readonly = _is_remote_or_readonly(db)
+        if result_db_tool is not None and not is_remote and not is_readonly:
             try:
                 result_db_tool.update_execution_status(
                     candidate_id=candidate_id,
@@ -350,8 +394,8 @@ def node6_phase1_simulate_profile(
                     error_stage="simulation",
                     error_message=err_msg,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Node 6: DB status update skipped: %s", e)
         return {
             "candidate_id": candidate_id,
             "status": "FAILED",
@@ -363,7 +407,8 @@ def node6_phase1_simulate_profile(
     if not callable(compiled_model):
         err_msg = f"compiled_model must be a callable model in real execution, got {type(compiled_model)}"
         logger.error("Node 6 real execution failed: %s", err_msg)
-        if result_db_tool is not None:
+        is_remote, is_readonly = _is_remote_or_readonly(db)
+        if result_db_tool is not None and not is_remote and not is_readonly:
             try:
                 result_db_tool.update_execution_status(
                     candidate_id=candidate_id,
@@ -371,8 +416,8 @@ def node6_phase1_simulate_profile(
                     error_stage="simulation",
                     error_message=err_msg,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Node 6: DB status update skipped: %s", e)
         return {
             "candidate_id": candidate_id,
             "status": "FAILED",
@@ -469,7 +514,8 @@ def node6_phase1_simulate_profile(
         }
 
         # Store metrics in database proposal record via Chia Tool MCP API (driver will also sync)
-        if result_db_tool is not None:
+        is_remote, is_readonly = _is_remote_or_readonly(db)
+        if result_db_tool is not None and not is_remote and not is_readonly:
             try:
                 result_db_tool.mark_proposal_status(
                     candidate_id=candidate_id,
@@ -485,7 +531,13 @@ def node6_phase1_simulate_profile(
                     simulation_status="SUCCESS",
                 )
             except Exception as e:
-                logger.warning("Node 6: Non-critical failure updating DB status (driver will sync): %s", e)
+                logger.debug("Node 6: Non-critical failure updating DB status (driver will sync): %s", e)
+        else:
+            logger.debug(
+                "Node 6: Skipping direct DB status update (remote=%s, readonly=%s, driver will sync)",
+                is_remote,
+                is_readonly,
+            )
 
         # Attach usage/profiling metadata to Chia profiler if available
         try:
@@ -512,7 +564,8 @@ def node6_phase1_simulate_profile(
         err_logs = traceback.format_exc()
         logger.error("Node 6 hardware simulation failed for candidate '%s': %s", candidate_id, err_msg)
 
-        if result_db_tool is not None:
+        is_remote, is_readonly = _is_remote_or_readonly(db)
+        if result_db_tool is not None and not is_remote and not is_readonly:
             try:
                 result_db_tool.update_execution_status(
                     candidate_id=candidate_id,
@@ -520,8 +573,14 @@ def node6_phase1_simulate_profile(
                     error_stage="simulation",
                     error_message=err_msg,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Node 6: DB status update on failure skipped: %s", e)
+        else:
+            logger.debug(
+                "Node 6: Skipping direct DB status update on failure (remote=%s, readonly=%s, driver will sync)",
+                is_remote,
+                is_readonly,
+            )
 
         return {
             "candidate_id": candidate_id,
