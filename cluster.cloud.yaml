@@ -20,7 +20,7 @@ head_setup_commands:
 
 head_start_ray_commands:
   - "source ~/.zshrc && conda activate chia_env && ray stop"
-  - "source ~/.zshrc && conda activate chia_env && ray start --head --port=6379 --resources='{\"control_worker\": 1, \"agent_worker\": 1, \"antigravity_creds\": 1, \"metal_gpu\": 1, \"sqlite_db\": 1, \"python_worker\": 4}' --include-dashboard=False"
+  - "source ~/.zshrc && conda activate chia_env && ray start --head --port=6379 --disable-usage-stats --resources='{\"control_worker\": 1, \"agent_worker\": 1, \"antigravity_creds\": 1, \"metal_gpu\": 1, \"sqlite_db\": 1, \"python_worker\": 4}' --include-dashboard=False"
 
 worker_start_ray_commands:
   - "ray stop"
@@ -39,7 +39,7 @@ gcp_nodes:
 available_node_types:
   local_orchestrator:
     resources: {"control_worker": 1, "agent_worker": 1, "antigravity_creds": 1, "sqlite_db": 1}
-    num_workers: 1
+    num_workers: 0
     compatible_ips: ["${THIS_MACHINE}"]
     worker_env_commands:
       - "source ~/.zshrc && conda activate chia_env"
