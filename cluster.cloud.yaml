@@ -4,6 +4,7 @@ cluster_name: "agentic-ml-analog-sim-cloud"
 tailnet:
   manage_all: true
   auth_key: ${TS_AUTHKEY}
+  head_advertise_ip: ${THIS_MACHINE}
 
 provider:
   head_ip: ${THIS_MACHINE}
