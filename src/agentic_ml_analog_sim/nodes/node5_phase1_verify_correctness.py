@@ -261,12 +261,15 @@ def node5_phase1_verify_correctness(
             except Exception as dev_err:
                 logger.warning("Node 5: compiled_model.to(%s) failed: %s; running on current device.", device, dev_err)
 
-        if hasattr(compiled_model, "eval") and callable(getattr(compiled_model, "eval")):
+        raw_compiled = getattr(compiled_model, "_orig_mod", compiled_model)
+        if hasattr(raw_compiled, "eval") and callable(getattr(raw_compiled, "eval")):
+            raw_compiled.eval()
+        elif hasattr(compiled_model, "eval") and callable(getattr(compiled_model, "eval")):
             compiled_model.eval()
 
-        # Warmup and execute model on sample inputs under torch.no_grad() and frozen noise
+        # Warmup and execute model on sample inputs under torch.inference_mode() and frozen noise
         num_samples = 100
-        with torch.no_grad(), _freeze_noise([compiled_model, eager_model]):
+        with torch.inference_mode(), _freeze_noise([compiled_model, eager_model]):
             if sample_input is not None:
                 if isinstance(sample_input, (tuple, list)):
                     inp = [x.to(device) if hasattr(x, "to") and callable(getattr(x, "to")) else x for x in sample_input]
@@ -321,7 +324,7 @@ def node5_phase1_verify_correctness(
                     sample_state = torch.randn(batch_size, state_dim, device=device)
                     sample_drive = torch.randn(batch_size, n_osc, n_cond, device=device)
 
-                    # Warmup (2 passes under no_grad)
+                    # Warmup (2 passes under inference_mode)
                     for _ in range(2):
                         try:
                             _ = compiled_model(sample_state, sample_drive)
@@ -349,7 +352,7 @@ def node5_phase1_verify_correctness(
                     state_dim = getattr(eager_model, "state_dim", 1024)
                     inp = torch.randn(num_samples, state_dim, device=device)
 
-                    # Warmup (2 passes under no_grad)
+                    # Warmup (2 passes under inference_mode)
                     for _ in range(2):
                         if callable(compiled_model):
                             _ = compiled_model(inp)

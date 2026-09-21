@@ -274,6 +274,9 @@ def node4_phase1_compilation_runner(
             build_logs = "Compilation error: No model available to compile (prepared_model and eager_model are None)."
             logger.error("Node 4: %s", build_logs)
         else:
+            if hasattr(model_to_compile, "eval") and callable(getattr(model_to_compile, "eval")):
+                model_to_compile.eval()
+
             from un0.compiler import compile_model
 
             compiled_model = compile_model(
@@ -287,7 +290,7 @@ def node4_phase1_compilation_runner(
             if sample_state is not None:
                 s = sample_state.to(device) if hasattr(sample_state, "to") and callable(getattr(sample_state, "to")) else sample_state
                 d = sample_drive.to(device) if sample_drive is not None and hasattr(sample_drive, "to") and callable(getattr(sample_drive, "to")) else sample_drive
-                with torch.no_grad():
+                with torch.inference_mode():
                     if d is not None:
                         try:
                             _ = compiled_model(s, d)
