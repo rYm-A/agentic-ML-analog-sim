@@ -33,6 +33,7 @@ gcp_nodes:
   sim_gpu_pool:
     machine_type: "g2-standard-8"
     count: 1
+    disk_size_gb: 100
     spot: false
     ssh_user: "chia"
     ssh_private_key: "${HOME}/.ssh/id_ed25519"
@@ -52,7 +53,7 @@ available_node_types:
     docker:
       image: "ghcr.io/rym-a/analog-sim-worker:latest"
       container_name: "chia-sim-worker-${USER}"
-      pull_before_run: false
+      pull_before_run: true
       run_options:
         - --gpus=all
         - --shm-size=16gb

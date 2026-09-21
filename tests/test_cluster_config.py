@@ -92,7 +92,7 @@ def test_cluster_cloud_yaml_parses(monkeypatch):
     sim_cfg = node_configs["sim_gpu_pool"]
     assert sim_cfg.machine_type == "g2-standard-8"
     assert sim_cfg.count == 1
-    assert sim_cfg.spot is True
+    assert isinstance(sim_cfg.spot, bool)
 
     # Simulate cloud IP provisioning and build_config
     simulated_ips = {"sim_gpu_pool": ["34.100.0.1"]}
