@@ -71,6 +71,32 @@ import ray
 logger = logging.getLogger("agentic_ml_analog_sim.phase_1")
 
 
+def _configure_tailnet_proxy_if_present() -> None:
+    """If a Chia tailnet relay is listening on 127.0.0.1:13129, configure Ray's gRPC proxy."""
+    import os
+    import socket
+    if "grpc_proxy" in os.environ:
+        return
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.5)
+    try:
+        if sock.connect_ex(("127.0.0.1", 13129)) == 0:
+            os.environ["RAY_grpc_enable_http_proxy"] = "1"
+            os.environ["grpc_proxy"] = "http://127.0.0.1:13129"
+            try:
+                local_ip = socket.gethostbyname(socket.gethostname())
+            except Exception:
+                local_ip = "127.0.0.1"
+            current = os.environ.get("no_grpc_proxy", "")
+            additions = [local_ip, "127.0.0.1", "localhost"]
+            os.environ["no_grpc_proxy"] = ",".join(filter(None, [current] + additions))
+            logger.info("Auto-configured Ray gRPC proxy via local Chia relay (127.0.0.1:13129)")
+    except Exception:
+        pass
+    finally:
+        sock.close()
+
+
 def _dispatch_node(
     node_fn: Any,
     *args: Any,
@@ -81,16 +107,19 @@ def _dispatch_node(
 
     Guarded with an effective timeout to prevent synchronous driver deadlocks.
     """
+    _configure_tailnet_proxy_if_present()
     if ray.is_initialized() and hasattr(node_fn, "chia_remote") and get is not None:
         config = kwargs.get("config")
         if config is None:
             for arg in args:
-                if hasattr(arg, "node_timeout") or hasattr(arg, "experiment_limits"):
+                if hasattr(arg, "node_timeout") or hasattr(arg, "experiment_limits") or hasattr(arg, "budget"):
                     config = arg
                     break
         effective_timeout = timeout or getattr(config, "node_timeout", None)
         if effective_timeout is None and hasattr(config, "experiment_limits"):
             effective_timeout = getattr(config.experiment_limits, "timeout_seconds_per_eval", None)
+        if effective_timeout is None and hasattr(config, "budget"):
+            effective_timeout = getattr(config.budget, "timeout_seconds_per_eval", None)
         if effective_timeout is None:
             effective_timeout = 600.0
         try:
@@ -183,6 +212,7 @@ def run_phase_1(
     Returns:
         Phase1Result.
     """
+    _configure_tailnet_proxy_if_present()
     if dry_run and llm is None:
         llm = MockAntigravityLLM(mode="valid")
 
