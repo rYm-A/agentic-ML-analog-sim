@@ -13,11 +13,14 @@ and fails fast with a RuntimeError when the agent fails to register a valid solv
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
+from pathlib import Path
+import sys
 import time
+from typing import Any, Dict, List, Optional
 import warnings
-from typing import Any, Dict, Optional
 
 try:
     from chia.base.ChiaFunction import ChiaFunction
@@ -31,9 +34,70 @@ from agentic_ml_analog_sim.config import SimulationConfig
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.tools.result_db_tool import ResultDBTool
 from agentic_ml_analog_sim.tools.solver_papers_tool import SolverPapersTool
+from agentic_ml_analog_sim.tools.un0_context_tool import resolve_un0_root
 from agentic_ml_analog_sim.tools.un0_rewriter_tool import Un0RewriterTool
 
 logger = logging.getLogger("agentic_ml_analog_sim.nodes.node1_phase1_solver_rewriter")
+
+
+def _sync_solver_rewrites_from_disk(un0_dir: Path, candidate_id: Optional[str] = None) -> List[str]:
+    """Scan Un-0 solver directory for newly written modules and load them into SOLVER_REGISTRY."""
+    solvers_dir = un0_dir / "un0" / "solver"
+    if not solvers_dir.is_dir():
+        return []
+
+    discovered = []
+    clean_cand = candidate_id.strip().replace(" ", "_") if candidate_id else None
+
+    from un0.solver import SOLVER_REGISTRY
+
+    all_files = [p for p in solvers_dir.glob("*.py") if p.name != "__init__.py"]
+    if clean_cand:
+        matching = [p for p in all_files if p.name.startswith(f"{clean_cand}_") or clean_cand in p.name]
+        others = [p for p in all_files if p not in matching]
+        ordered_files = sorted(matching, key=lambda p: p.stat().st_mtime, reverse=True) + sorted(others, key=lambda p: p.stat().st_mtime, reverse=True)
+    else:
+        ordered_files = sorted(all_files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+    for fpath in ordered_files:
+        stem = fpath.stem
+        module_name = f"un0.solver.{stem}"
+        try:
+            if module_name in sys.modules:
+                mod = sys.modules[module_name]
+            else:
+                spec = importlib.util.spec_from_file_location(module_name, fpath)
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = mod
+                    spec.loader.exec_module(mod)
+                else:
+                    continue
+
+            potential_name = stem[len(clean_cand) + 1:] if clean_cand and stem.startswith(f"{clean_cand}_") else stem
+
+            if potential_name not in SOLVER_REGISTRY:
+                candidate_fn = (
+                    getattr(mod, potential_name, None)
+                    or getattr(mod, f"{potential_name}_step", None)
+                    or getattr(mod, "solve", None)
+                    or getattr(mod, "step", None)
+                )
+                if candidate_fn is None:
+                    for attr_name in dir(mod):
+                        val = getattr(mod, attr_name)
+                        if callable(val) and not attr_name.startswith("_") and getattr(val, "__module__", "") == module_name:
+                            candidate_fn = val
+                            break
+                if candidate_fn is not None:
+                    SOLVER_REGISTRY[potential_name] = candidate_fn
+
+            if potential_name in SOLVER_REGISTRY:
+                discovered.append(potential_name)
+        except Exception as err:
+            logger.debug("Node 1: Error syncing solver %s from disk: %s", fpath, err)
+
+    return discovered
 
 
 def _resolve_llm(llm: Optional[Any] = None, config: Optional[SimulationConfig] = None) -> Any:
@@ -232,9 +296,11 @@ def node1_phase1_solver_rewriter(
     )
 
     # 1. Instantiate the 3 Chia Tools specified in prompts/phase-1.md
+    un0_dir = resolve_un0_root()
+
     result_db_tool = ResultDBTool(name="result_db", db=db, deploy=False)
     solver_papers_tool = SolverPapersTool(name="solver_papers", auto_start=False)
-    un0_rewriter_tool = Un0RewriterTool(name="un0_rewriter", auto_start=False)
+    un0_rewriter_tool = Un0RewriterTool(name="un0_rewriter", repo_root=un0_dir, auto_start=False)
 
     # 2. Formulate Agentic Prompt
     prompt_text = (
@@ -329,10 +395,30 @@ def node1_phase1_solver_rewriter(
         pass
 
     # 5. Extract Registered Solver Name Directly from un0_rewriter_tool (Strict check, NO hardcoded fallback!)
+    _sync_solver_rewrites_from_disk(un0_dir, candidate_id=candidate_id)
     registered_solver_name = un0_rewriter_tool.get_registered_solver(candidate_id=candidate_id)
 
-    # Secondary lookup if direct tool registration wasn't returned
+    # Secondary lookup: check filesystem matching candidate_id directly
     if not registered_solver_name:
+        solvers_dir = un0_dir / "un0" / "solver"
+        clean_cand = candidate_id.strip().replace(" ", "_")
+        from un0.solver import SOLVER_REGISTRY
+        if solvers_dir.is_dir():
+            matching_files = sorted(
+                [p for p in solvers_dir.glob(f"{clean_cand}_*.py") if p.name != "__init__.py"],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for fpath in matching_files:
+                stem = fpath.stem
+                pot_name = stem[len(clean_cand) + 1:] if stem.startswith(f"{clean_cand}_") else stem
+                if pot_name in SOLVER_REGISTRY:
+                    registered_solver_name = pot_name
+                    break
+
+    # Tertiary lookup if direct tool registration wasn't returned
+    if not registered_solver_name:
+        from un0.solver import SOLVER_REGISTRY
         if solver_name in SOLVER_REGISTRY:
             registered_solver_name = solver_name
         else:
@@ -342,12 +428,7 @@ def node1_phase1_solver_rewriter(
             if cand_solvers:
                 registered_solver_name = cand_solvers[-1]
 
-    # Re-import SOLVER_REGISTRY to pick up any dynamic registrations
-    try:
-        from un0.solver import SOLVER_REGISTRY as UPDATED_REGISTRY
-        SOLVER_REGISTRY = UPDATED_REGISTRY
-    except Exception:
-        pass
+    from un0.solver import SOLVER_REGISTRY
 
     if not registered_solver_name or registered_solver_name not in SOLVER_REGISTRY:
         raw_result = getattr(query_result, "result", "") if query_result is not None else ""

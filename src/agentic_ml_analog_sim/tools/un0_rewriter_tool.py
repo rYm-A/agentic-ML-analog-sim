@@ -64,6 +64,10 @@ class Un0RewriterTool(ChiaTool):
                     "Operating in direct local execution mode."
                 )
 
+        if not getattr(self, "hostname", None):
+            self.hostname = "localhost"
+            self.port = getattr(self, "port", None) or 8000
+
     def setup(self, repo_root: Optional[Union[str, Path]] = None) -> None:
         """Initialize repository context and register FastMCP tool methods per Chia documentation."""
         self.repo_root = resolve_un0_root(repo_root)
@@ -466,7 +470,7 @@ class Un0RewriterTool(ChiaTool):
         return res
 
     def get_registered_noise(self, candidate_id: Optional[str] = None) -> Optional[str]:
-        """Retrieve registered noise model name directly from tool state."""
+        """Retrieve registered noise model name directly from tool state or filesystem fallback."""
         if candidate_id:
             cand_clean = candidate_id.strip().replace(" ", "_")
             cand_records = self.registrations_by_candidate.get(cand_clean)
@@ -474,10 +478,40 @@ class Un0RewriterTool(ChiaTool):
                 for rec in reversed(cand_records):
                     if "noise_name" in rec:
                         return rec["noise_name"]
+
+            # Cross-process fallback: check filesystem in self.repo_root / "un0" / "noise" / "rewrites"
+            noise_dir = self.repo_root / "un0" / "noise" / "rewrites"
+            if noise_dir.is_dir():
+                from un0.noise import NOISE_REGISTRY
+                matching_files = sorted(
+                    [p for p in noise_dir.glob(f"{cand_clean}_*.py") if p.name != "__init__.py"],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                for fpath in matching_files:
+                    try:
+                        stem = fpath.stem
+                        potential_name = stem[len(cand_clean) + 1:] if stem.startswith(f"{cand_clean}_") else stem
+                        module_name = f"un0.noise.rewrites.{stem}"
+                        spec = importlib.util.spec_from_file_location(module_name, fpath)
+                        if spec and spec.loader:
+                            mod = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                            if potential_name in NOISE_REGISTRY:
+                                return potential_name
+                            for attr_name in dir(mod):
+                                val = getattr(mod, attr_name)
+                                if isinstance(val, type) and hasattr(val, "forward"):
+                                    NOISE_REGISTRY[potential_name] = val
+                                    return potential_name
+                    except Exception as err:
+                        logger.debug("Failed loading noise from disk %s: %s", fpath, err)
+            return None
+
         return self.last_registered_noise
 
     def get_registered_solver(self, candidate_id: Optional[str] = None) -> Optional[str]:
-        """Retrieve registered solver name directly from tool state."""
+        """Retrieve registered solver name directly from tool state or filesystem fallback."""
         if candidate_id:
             cand_clean = candidate_id.strip().replace(" ", "_")
             cand_records = self.registrations_by_candidate.get(cand_clean)
@@ -485,10 +519,44 @@ class Un0RewriterTool(ChiaTool):
                 for rec in reversed(cand_records):
                     if "solver_name" in rec:
                         return rec["solver_name"]
+
+            # Cross-process fallback: check filesystem in self.repo_root / "un0" / "solver"
+            solvers_dir = self.repo_root / "un0" / "solver"
+            if solvers_dir.is_dir():
+                from un0.solver import SOLVER_REGISTRY
+                matching_files = sorted(
+                    [p for p in solvers_dir.glob(f"{cand_clean}_*.py") if p.name != "__init__.py"],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                for fpath in matching_files:
+                    try:
+                        stem = fpath.stem
+                        potential_name = stem[len(cand_clean) + 1:] if stem.startswith(f"{cand_clean}_") else stem
+                        module_name = f"un0.solver.{stem}"
+                        spec = importlib.util.spec_from_file_location(module_name, fpath)
+                        if spec and spec.loader:
+                            mod = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                            if potential_name in SOLVER_REGISTRY:
+                                return potential_name
+                            candidate_fn = (
+                                getattr(mod, potential_name, None)
+                                or getattr(mod, f"{potential_name}_step", None)
+                                or getattr(mod, "solve", None)
+                                or getattr(mod, "step", None)
+                            )
+                            if candidate_fn is not None:
+                                SOLVER_REGISTRY[potential_name] = candidate_fn
+                                return potential_name
+                    except Exception as err:
+                        logger.debug("Failed loading solver from disk %s: %s", fpath, err)
+            return None
+
         return self.last_registered_solver
 
     def get_registered_rewrite(self, candidate_id: Optional[str] = None) -> Optional[str]:
-        """Retrieve registered compiler rewrite name directly from tool state.
+        """Retrieve registered compiler rewrite name directly from tool state or filesystem fallback.
 
         Args:
             candidate_id: Optional proposal candidate ID.
@@ -503,10 +571,77 @@ class Un0RewriterTool(ChiaTool):
                 for rec in reversed(cand_records):
                     if "rewrite_name" in rec:
                         return rec["rewrite_name"]
-        return self.last_registered_rewrite
+
+            # Cross-process fallback: check filesystem in self.repo_root / "un0" / "compiler" / "rewrites"
+            rewrites_dir = self.repo_root / "un0" / "compiler" / "rewrites"
+            if rewrites_dir.is_dir():
+                from un0.compiler.registry import COMPILER_REGISTRY
+                matching_files = sorted(
+                    [p for p in rewrites_dir.glob(f"{cand_clean}_*.py") if p.name != "__init__.py"],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                for fpath in matching_files:
+                    try:
+                        stem = fpath.stem
+                        potential_name = stem[len(cand_clean) + 1:] if stem.startswith(f"{cand_clean}_") else stem
+                        module_name = f"un0.compiler.rewrites.{stem}"
+                        spec = importlib.util.spec_from_file_location(module_name, fpath)
+                        if spec and spec.loader:
+                            mod = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                            if potential_name in COMPILER_REGISTRY:
+                                return potential_name
+                            candidate_fn = (
+                                getattr(mod, potential_name, None)
+                                or getattr(mod, "rewrite", None)
+                                or getattr(mod, "rewrite_fn", None)
+                            )
+                            if candidate_fn is None:
+                                for attr_name in dir(mod):
+                                    val = getattr(mod, attr_name)
+                                    if callable(val) and not attr_name.startswith("_") and getattr(val, "__module__", "") == module_name:
+                                        candidate_fn = val
+                                        break
+                            if candidate_fn is not None:
+                                COMPILER_REGISTRY[potential_name] = candidate_fn
+                                return potential_name
+                    except Exception as err:
+                        logger.debug("Failed loading compiler rewrite from disk %s: %s", fpath, err)
+            return None
+
+        if self.last_registered_rewrite:
+            return self.last_registered_rewrite
+
+        # If still None, check any recently modified rewrite files on disk
+        rewrites_dir = self.repo_root / "un0" / "compiler" / "rewrites"
+        if rewrites_dir.is_dir():
+            from un0.compiler.registry import COMPILER_REGISTRY
+            recent_files = sorted(
+                [p for p in rewrites_dir.glob("*.py") if p.name != "__init__.py"],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for fpath in recent_files[:5]:
+                try:
+                    module_name = f"un0.compiler.rewrites.{fpath.stem}"
+                    spec = importlib.util.spec_from_file_location(module_name, fpath)
+                    if spec and spec.loader:
+                        mod = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(mod)
+                        for k in COMPILER_REGISTRY:
+                            if k in fpath.stem:
+                                return k
+                except Exception as err:
+                    logger.debug("Failed inspecting rewrite file %s: %s", fpath, err)
+
+        return None
 
     def un0_list_registered_rewrites(self, axis: str = "compiler") -> List[str]:
         """List currently registered rewrites in Un-0 across solver, noise, or compiler.
+
+        Scans the filesystem as a cross-process fallback if rewrites were persisted
+        by a remote FastMCP server process.
 
         Args:
             axis: One of 'compiler', 'solver', or 'noise'.
@@ -517,12 +652,51 @@ class Un0RewriterTool(ChiaTool):
         clean_axis = axis.strip().lower()
         if clean_axis == "compiler":
             from un0.compiler.registry import COMPILER_REGISTRY
+            rewrites_dir = self.repo_root / "un0" / "compiler" / "rewrites"
+            if rewrites_dir.is_dir():
+                for fpath in rewrites_dir.glob("*.py"):
+                    if fpath.name == "__init__.py":
+                        continue
+                    try:
+                        module_name = f"un0.compiler.rewrites.{fpath.stem}"
+                        spec = importlib.util.spec_from_file_location(module_name, fpath)
+                        if spec and spec.loader:
+                            mod = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                    except Exception:
+                        pass
             return sorted(list(COMPILER_REGISTRY.keys()))
         elif clean_axis == "solver":
             from un0.solver import SOLVER_REGISTRY
+            solvers_dir = self.repo_root / "un0" / "solver"
+            if solvers_dir.is_dir():
+                for fpath in solvers_dir.glob("*.py"):
+                    if fpath.name == "__init__.py":
+                        continue
+                    try:
+                        module_name = f"un0.solver.{fpath.stem}"
+                        spec = importlib.util.spec_from_file_location(module_name, fpath)
+                        if spec and spec.loader:
+                            mod = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                    except Exception:
+                        pass
             return sorted(list(SOLVER_REGISTRY.keys()))
         elif clean_axis == "noise":
             from un0.noise import NOISE_REGISTRY
+            noise_dir = self.repo_root / "un0" / "noise" / "rewrites"
+            if noise_dir.is_dir():
+                for fpath in noise_dir.glob("*.py"):
+                    if fpath.name == "__init__.py":
+                        continue
+                    try:
+                        module_name = f"un0.noise.rewrites.{fpath.stem}"
+                        spec = importlib.util.spec_from_file_location(module_name, fpath)
+                        if spec and spec.loader:
+                            mod = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                    except Exception:
+                        pass
             return sorted(list(NOISE_REGISTRY.keys()))
         else:
             return []

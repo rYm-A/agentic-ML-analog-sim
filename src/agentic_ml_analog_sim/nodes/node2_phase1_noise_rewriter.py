@@ -8,11 +8,14 @@ when noise model is unregistered or forced, capturing real token metrics.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
+from pathlib import Path
 import re
+import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from chia.base.ChiaFunction import ChiaFunction
 
@@ -20,9 +23,64 @@ from agentic_ml_analog_sim.config import SimulationConfig
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.tools.noise_papers_tool import NoisePapersTool
 from agentic_ml_analog_sim.tools.result_db_tool import ResultDBTool
+from agentic_ml_analog_sim.tools.un0_context_tool import resolve_un0_root
 from agentic_ml_analog_sim.tools.un0_rewriter_tool import Un0RewriterTool
 
 logger = logging.getLogger("agentic_ml_analog_sim.nodes.node2_phase1_noise_rewriter")
+
+
+def _sync_noise_rewrites_from_disk(un0_dir: Path, candidate_id: Optional[str] = None) -> List[str]:
+    """Scan Un-0 noise rewrites directory for newly written modules and load them into NOISE_REGISTRY."""
+    noise_dir = un0_dir / "un0" / "noise" / "rewrites"
+    if not noise_dir.is_dir():
+        return []
+
+    discovered = []
+    clean_cand = candidate_id.strip().replace(" ", "_") if candidate_id else None
+
+    try:
+        from un0.noise import NOISE_REGISTRY
+    except ImportError:
+        return []
+
+    all_files = [p for p in noise_dir.glob("*.py") if p.name != "__init__.py"]
+    if clean_cand:
+        matching = [p for p in all_files if p.name.startswith(f"{clean_cand}_") or clean_cand in p.name]
+        others = [p for p in all_files if p not in matching]
+        ordered_files = sorted(matching, key=lambda p: p.stat().st_mtime, reverse=True) + sorted(others, key=lambda p: p.stat().st_mtime, reverse=True)
+    else:
+        ordered_files = sorted(all_files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+    for fpath in ordered_files:
+        stem = fpath.stem
+        module_name = f"un0.noise.rewrites.{stem}"
+        try:
+            if module_name in sys.modules:
+                mod = sys.modules[module_name]
+            else:
+                spec = importlib.util.spec_from_file_location(module_name, fpath)
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = mod
+                    spec.loader.exec_module(mod)
+                else:
+                    continue
+
+            potential_name = stem[len(clean_cand) + 1:] if clean_cand and stem.startswith(f"{clean_cand}_") else stem
+
+            if potential_name not in NOISE_REGISTRY:
+                for attr_name in dir(mod):
+                    val = getattr(mod, attr_name)
+                    if isinstance(val, type) and hasattr(val, "forward"):
+                        NOISE_REGISTRY[potential_name] = val
+                        break
+
+            if potential_name in NOISE_REGISTRY:
+                discovered.append(potential_name)
+        except Exception as err:
+            logger.debug("Node 2: Error syncing noise rewrite %s from disk: %s", fpath, err)
+
+    return discovered
 
 
 def _resolve_llm(llm: Optional[Any] = None, config: Optional[SimulationConfig] = None) -> Any:
@@ -189,9 +247,11 @@ def node2_phase1_noise_rewriter(
     )
 
     # 1. Instantiate the 3 Chia Tools
+    un0_dir = resolve_un0_root()
+
     result_db_tool = ResultDBTool(name="result_db", db=db, deploy=False)
     noise_papers_tool = NoisePapersTool(name="noise_papers", auto_start=False)
-    un0_rewriter_tool = Un0RewriterTool(name="un0_rewriter", auto_start=False)
+    un0_rewriter_tool = Un0RewriterTool(name="un0_rewriter", repo_root=un0_dir, auto_start=False)
 
     # Extract proposal parameters and instructions from previous nodes
     noise_params = proposal.get("noise_params") or {}
@@ -290,11 +350,30 @@ def node2_phase1_noise_rewriter(
             duration_seconds=elapsed,
         )
 
-    # 4. Resolve registered noise model from tool or registry
-    registered_noise_name = (
-        un0_rewriter_tool.get_registered_noise(candidate_id=candidate_id)
-        or un0_rewriter_tool.last_registered_noise
-    )
+    # 4. Resolve registered noise model from tool, disk sync, or registry
+    _sync_noise_rewrites_from_disk(un0_dir, candidate_id=candidate_id)
+    registered_noise_name = un0_rewriter_tool.get_registered_noise(candidate_id=candidate_id)
+
+    # Secondary lookup: check filesystem matching candidate_id directly
+    if not registered_noise_name:
+        noise_dir = un0_dir / "un0" / "noise" / "rewrites"
+        clean_cand = candidate_id.strip().replace(" ", "_")
+        try:
+            from un0.noise import NOISE_REGISTRY
+            if noise_dir.is_dir():
+                matching_files = sorted(
+                    [p for p in noise_dir.glob(f"{clean_cand}_*.py") if p.name != "__init__.py"],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                for fpath in matching_files:
+                    stem = fpath.stem
+                    pot_name = stem[len(clean_cand) + 1:] if stem.startswith(f"{clean_cand}_") else stem
+                    if pot_name in NOISE_REGISTRY:
+                        registered_noise_name = pot_name
+                        break
+        except Exception:
+            pass
 
     if not registered_noise_name and query_result is not None:
         raw_res = getattr(query_result, "result", str(query_result))

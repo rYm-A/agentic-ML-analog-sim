@@ -261,16 +261,76 @@ def run_phase_1(
 
         if 3 in nodes_to_run:
             logger.info("Executing Node 3 (Compiler Rewriter) for '%s'", active_candidate_id)
-            node3_res = _dispatch_node(
-                node3_phase1_compiler_rewriter,
-                db=db,
-                config=config,
-                candidate_id=active_candidate_id,
-                target_device=target_device,
-                llm=llm,
-            )
+            try:
+                node3_res = _dispatch_node(
+                    node3_phase1_compiler_rewriter,
+                    db=db,
+                    config=config,
+                    candidate_id=active_candidate_id,
+                    target_device=target_device,
+                    llm=llm,
+                )
+            except Exception as err:
+                logger.error("Node 3 encountered exception: %s. Routing to Node 9 error handler / Node 8 diagnostic recovery.", err)
+                node3_res = {"status": "FAILED", "error": str(err)}
+
             if node3_res.get("status") == "FAILED":
-                logger.warning("Node 3 compiler rewriter failed: %s", node3_res.get("error"))
+                node3_err = node3_res.get("error", "Unknown Node 3 failure")
+                logger.warning("Node 3 compiler rewriter failed: %s", node3_err)
+
+                # Check / increment compilation retry counter (Counter 1)
+                proposal = db.get_proposal(active_candidate_id) or {}
+                curr_counter_1 = proposal.get("counter_1_compilation", 0) + 1
+                db.update_counters(active_candidate_id, counter_1_compilation=curr_counter_1)
+
+                counter_limits = getattr(config, "counter_limits", None)
+                max_counter_1 = getattr(counter_limits, "max_counter_1_compilation", 3) if counter_limits else 3
+
+                if curr_counter_1 > max_counter_1:
+                    logger.error(
+                        "Node 3 failure caused counter_1_compilation to exceed limit (%d > %d) for candidate '%s'",
+                        curr_counter_1,
+                        max_counter_1,
+                        active_candidate_id,
+                    )
+                    node9_res = _dispatch_node(
+                        node9_phase1_error_handler,
+                        db=db,
+                        config=config,
+                        candidate_id=active_candidate_id,
+                        counter_name="counter_1_compilation",
+                        current_count=curr_counter_1,
+                        max_count=max_counter_1,
+                        execution_mode=execution_mode,
+                        error_stage="node3_phase1_compiler_rewriter",
+                        details=str(node3_err),
+                    )
+                    return Phase1Result(
+                        action="TERMINATED_MAX_CYCLES",
+                        candidate_id=active_candidate_id,
+                        is_reference=is_reference,
+                        execution_mode=execution_mode,
+                        metrics={},
+                        cycle_count=cycle_count,
+                        details=f"Node 3 compiler rewrite exceeded retry limit: {node3_err}",
+                    )
+
+                # Route cleanly to Node 8 Diagnostic Agent
+                diag_res = _dispatch_node(
+                    node8_phase1_diagnostic_proposal,
+                    db=db,
+                    config=config,
+                    candidate_id=active_candidate_id,
+                    error_logs=f"Compiler rewriter failed: {node3_err}",
+                    llm=llm,
+                )
+                current_trigger = "node_8"
+                previous_node_id = "node8_phase1_diagnostic_proposal"
+                if diag_res.get("type") == "DEBUG_MODE_REQUEST" or diag_res.get("action") == "debug_request":
+                    debug_request = diag_res.get("debug_request") or diag_res
+                else:
+                    debug_request = {"nodes_to_rerun": diag_res.get("nodes_to_rerun", [1, 2, 3])}
+                continue
 
         # STEP 3: Node 4 Compilation Runner
         logger.info("Executing Node 4 (Compilation Runner) on '%s' for '%s'", target_device, active_candidate_id)

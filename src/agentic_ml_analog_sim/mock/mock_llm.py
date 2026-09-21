@@ -318,7 +318,9 @@ class MockAntigravityLLM(AntigravityLLM):
                 result_json = result_text
             else:
                 import re
-                m = re.search(r"candidate[_ ]*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
+                m = re.search(r"candidate(?:[ _]*(?:id|ID))?\s*[:=]\s*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
+                if not m:
+                    m = re.search(r"candidate[_ ]*['\"]?(?!into\b|specifications\b)([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
                 cand = m.group(1) if m else f"cand_mock_{self.call_count}"
                 rewrite_name = f"hop_while_loop_{cand}"
                 custom_code = f'''from un0.compiler.functional_hop import functionalize_kuramoto_model
@@ -366,7 +368,9 @@ def {rewrite_name}(model, solver_name="rk4", num_steps=25, dt=0.04, integration_
                 result_json = result_text
             else:
                 import re
-                m_cand = re.search(r"candidate[_ ]*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
+                m_cand = re.search(r"candidate(?:[ _]*(?:id|ID))?\s*[:=]\s*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
+                if not m_cand:
+                    m_cand = re.search(r"candidate[_ ]*['\"]?(?!into\b|specifications\b)([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
                 cand = m_cand.group(1) if m_cand else f"cand_mock_{self.call_count}"
 
                 m_solver = re.search(r"named\s+['\"]([a-zA-Z0-9_\-]+)['\"]", user_message, re.IGNORECASE)
@@ -428,7 +432,9 @@ def {solver_name}_step(
                 result_json = result_text
             else:
                 import re
-                m_cand = re.search(r"candidate[_ ]*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
+                m_cand = re.search(r"candidate(?:[ _]*(?:id|ID))?\s*[:=]\s*['\"]?([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
+                if not m_cand:
+                    m_cand = re.search(r"candidate[_ ]*['\"]?(?!into\b|specifications\b)([a-zA-Z0-9_\-]+)['\"]?", user_message, re.IGNORECASE)
                 cand = m_cand.group(1) if m_cand else f"cand_mock_{self.call_count}"
 
                 m_noise = re.search(r"named\s+['\"]([a-zA-Z0-9_\-]+)['\"]", user_message, re.IGNORECASE)

@@ -16,9 +16,12 @@ can handle diagnostic recovery.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
+from pathlib import Path
 import re
+import sys
 import time
 from typing import Any, Dict, Optional
 
@@ -31,8 +34,9 @@ from agentic_ml_analog_sim.config import SimulationConfig
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.tools.compilation_info_tool import CompilationInfoTool
 from agentic_ml_analog_sim.tools.result_db_tool import ResultDBTool
+from agentic_ml_analog_sim.tools.un0_context_tool import resolve_un0_root
 from agentic_ml_analog_sim.tools.un0_rewriter_tool import Un0RewriterTool
-from un0.compiler.registry import COMPILER_REGISTRY, get_compiler_rewrite
+from un0.compiler import registry as compiler_registry
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +113,85 @@ def _extract_rewrite_name(raw_text: str) -> Optional[str]:
     if match_key:
         return match_key.group(1).strip()
 
+    # 5. Regex for natural language markdown bold/backtick definitions
+    match_nlp = re.search(
+        r'(?:registered under the name|rewrite name is|rewrite name:?|registered rewrite:?)\s*[*`\'"]*([a-zA-Z0-9_\-]+)[*`\'"]*',
+        raw_text,
+        re.IGNORECASE,
+    )
+    if match_nlp:
+        return match_nlp.group(1).strip()
+
+    # 6. Candidate pattern matches against compiler_registry.COMPILER_REGISTRY
+    try:
+        for reg_name in sorted(compiler_registry.COMPILER_REGISTRY.keys(), key=len, reverse=True):
+            if re.search(r'[`\'"]' + re.escape(reg_name) + r'[`\'"]', raw_text) or re.search(r'\b' + re.escape(reg_name) + r'\b', raw_text):
+                return reg_name
+    except Exception:
+        pass
+
     return None
+
+
+def _sync_compiler_rewrites_from_disk(un0_dir: Path, candidate_id: Optional[str] = None) -> List[str]:
+    """Scan Un-0 compiler rewrites directory for newly written modules and load them.
+
+    Ensures modules persisted to disk across processes (e.g., FastMCP Ray actor)
+    are loaded into sys.modules and registered in compiler_registry.COMPILER_REGISTRY.
+    """
+    rewrites_dir = un0_dir / "un0" / "compiler" / "rewrites"
+    if not rewrites_dir.is_dir():
+        return []
+
+    discovered = []
+    clean_cand = candidate_id.strip().replace(" ", "_") if candidate_id else None
+
+    all_files = [p for p in rewrites_dir.glob("*.py") if p.name != "__init__.py"]
+    if clean_cand:
+        matching = [p for p in all_files if p.name.startswith(f"{clean_cand}_") or clean_cand in p.name]
+        others = [p for p in all_files if p not in matching]
+        ordered_files = sorted(matching, key=lambda p: p.stat().st_mtime, reverse=True) + sorted(others, key=lambda p: p.stat().st_mtime, reverse=True)
+    else:
+        ordered_files = sorted(all_files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+    for fpath in ordered_files:
+        stem = fpath.stem
+        module_name = f"un0.compiler.rewrites.{stem}"
+        try:
+            if module_name in sys.modules:
+                mod = sys.modules[module_name]
+            else:
+                spec = importlib.util.spec_from_file_location(module_name, fpath)
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = mod
+                    spec.loader.exec_module(mod)
+                else:
+                    continue
+
+            potential_name = stem[len(clean_cand) + 1:] if clean_cand and stem.startswith(f"{clean_cand}_") else stem
+
+            if potential_name not in compiler_registry.COMPILER_REGISTRY:
+                candidate_fn = (
+                    getattr(mod, potential_name, None)
+                    or getattr(mod, "rewrite", None)
+                    or getattr(mod, "rewrite_fn", None)
+                )
+                if candidate_fn is None:
+                    for attr_name in dir(mod):
+                        val = getattr(mod, attr_name)
+                        if callable(val) and not attr_name.startswith("_") and getattr(val, "__module__", "") == module_name:
+                            candidate_fn = val
+                            break
+                if candidate_fn is not None:
+                    compiler_registry.COMPILER_REGISTRY[potential_name] = candidate_fn
+
+            if potential_name in compiler_registry.COMPILER_REGISTRY:
+                discovered.append(potential_name)
+        except Exception as err:
+            logger.debug("Node 3: Error syncing rewrite %s from disk: %s", fpath, err)
+
+    return discovered
 
 
 @ChiaFunction(resources={"agent_worker": 1, "antigravity_creds": 0.01})
@@ -240,8 +322,14 @@ def node3_phase1_compiler_rewriter(
             raise RuntimeError(error_msg)
 
     # 3. Instantiate Chia Tools
-    result_db_tool = ResultDBTool(name="result_db", db=db, deploy=False)
-    un0_rewriter_tool = Un0RewriterTool(name="un0_rewriter", auto_start=False)
+    un0_dir = resolve_un0_root()
+
+    result_db_tool = ResultDBTool(name="result_db", db=db, deploy=True)
+    un0_rewriter_tool = Un0RewriterTool(
+        name="un0_rewriter",
+        repo_root=un0_dir,
+        auto_start=True,
+    )
 
     tools = [result_db_tool, un0_rewriter_tool]
     compilation_info_tool = CompilationInfoTool(name="compilation_info", auto_start=False)
@@ -352,10 +440,30 @@ def node3_phase1_compiler_rewriter(
     if not isinstance(raw_result, str):
         raw_result = str(raw_result)
 
+    # Cross-process disk synchronization: ensure any module written by remote FastMCP actor is imported
+    _sync_compiler_rewrites_from_disk(un0_dir, candidate_id=candidate_id)
+
     # Primary source of truth: registered rewrite directly from un0_rewriter_tool
     rewrite_name = un0_rewriter_tool.get_registered_rewrite(candidate_id=candidate_id)
 
-    # Secondary lookup: check if any rewrite registered for this candidate exists in registry
+    # Secondary lookup: check filesystem matching candidate_id directly
+    if not rewrite_name:
+        rewrites_dir = un0_dir / "un0" / "compiler" / "rewrites"
+        clean_cand = candidate_id.strip().replace(" ", "_")
+        if rewrites_dir.is_dir():
+            matching_files = sorted(
+                [p for p in rewrites_dir.glob(f"{clean_cand}_*.py") if p.name != "__init__.py"],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for fpath in matching_files:
+                stem = fpath.stem
+                pot_name = stem[len(clean_cand) + 1:] if stem.startswith(f"{clean_cand}_") else stem
+                if pot_name in compiler_registry.COMPILER_REGISTRY:
+                    rewrite_name = pot_name
+                    break
+
+    # Tertiary lookup: check if any rewrite registered for this candidate exists in registry
     if not rewrite_name:
         registered_compilers = un0_rewriter_tool.un0_list_registered_rewrites(axis="compiler")
         cand_matches = [name for name in registered_compilers if candidate_id in name]
@@ -364,13 +472,18 @@ def node3_phase1_compiler_rewriter(
         else:
             # Check if agent referred to a valid registered rewrite in its response
             extracted = _extract_rewrite_name(raw_result)
-            if extracted and extracted in COMPILER_REGISTRY:
+            if extracted and extracted in compiler_registry.COMPILER_REGISTRY:
                 rewrite_name = extracted
+            else:
+                # Also check candidate pattern matches directly against compiler_registry.COMPILER_REGISTRY
+                cand_reg_matches = [name for name in compiler_registry.COMPILER_REGISTRY.keys() if candidate_id in name]
+                if cand_reg_matches:
+                    rewrite_name = cand_reg_matches[-1]
 
-    if not rewrite_name or rewrite_name not in COMPILER_REGISTRY:
+    if not rewrite_name or rewrite_name not in compiler_registry.COMPILER_REGISTRY:
         error_msg = (
             f"Node 3: Agent failed to synthesize or register a valid compiler rewrite in COMPILER_REGISTRY. "
-            f"Returned rewrite name: {rewrite_name!r}. Available in registry: {list(COMPILER_REGISTRY.keys())}"
+            f"Returned rewrite name: {rewrite_name!r}. Available in registry: {list(compiler_registry.COMPILER_REGISTRY.keys())}"
         )
         logger.error(error_msg)
         db.update_execution_status(
@@ -390,7 +503,7 @@ def node3_phase1_compiler_rewriter(
         raise RuntimeError(error_msg)
 
     # 8. Retrieve and Execute Registered Compiler Rewrite
-    rewrite_fn = get_compiler_rewrite(rewrite_name)
+    rewrite_fn = compiler_registry.get_compiler_rewrite(rewrite_name)
     try:
         functional_model = rewrite_fn(
             model=eager_model,
