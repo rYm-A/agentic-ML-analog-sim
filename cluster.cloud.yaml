@@ -20,7 +20,7 @@ head_setup_commands:
 
 head_start_ray_commands:
   - "source ~/.zshrc && conda activate chia_env && ray stop"
-  - "source ~/.zshrc && conda activate chia_env && ray start --head --port=6379 --node-ip-address=${THIS_MACHINE} --resources='{\"control_worker\": 1, \"agent_worker\": 1, \"antigravity_creds\": 1, \"metal_gpu\": 1, \"sqlite_db\": 1, \"python_worker\": 4}' --include-dashboard=False"
+  - "source ~/.zshrc && conda activate chia_env && ray start --head --port=6379 --resources='{\"control_worker\": 1, \"agent_worker\": 1, \"antigravity_creds\": 1, \"metal_gpu\": 1, \"sqlite_db\": 1, \"python_worker\": 4}' --include-dashboard=False"
 
 worker_start_ray_commands:
   - "ray stop"
@@ -31,7 +31,7 @@ gcp_nodes:
   zone: "us-central1-a"
   sim_gpu_pool:
     machine_type: "g2-standard-8"
-    count: 2
+    count: 1
     spot: true
     ssh_user: "chia"
     ssh_private_key: "${HOME}/.ssh/id_ed25519"
@@ -46,8 +46,8 @@ available_node_types:
 
   gpu_simulation_worker:
     resources: {"sim_worker": 1, "compile_worker": 1}
-    num_workers: 2
-    compatible_ips: ["@sim_gpu_pool:0", "@sim_gpu_pool:1"]
+    num_workers: 1
+    compatible_ips: ["@sim_gpu_pool:0"]
     docker:
       image: "ghcr.io/rym-a/analog-sim-worker:latest"
       container_name: "chia-sim-worker-${USER}"
