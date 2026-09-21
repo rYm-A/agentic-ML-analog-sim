@@ -26,6 +26,11 @@ from typing import Any, Dict, Optional
 import torch
 
 try:
+    import ray
+except ImportError:
+    ray = None
+
+try:
     from chia.base.ChiaFunction import ChiaFunction
 except ImportError:
     def ChiaFunction(*args: Any, **kwargs: Any) -> Any:
@@ -73,6 +78,8 @@ def node4_phase1_compilation_runner(
     un0_dir: Optional[str] = None,
     prepared_model: Optional[Any] = None,
     eager_model: Optional[Any] = None,
+    registered_rewrite: Optional[str] = None,
+    proposal: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Node 4 Compilation Runner (Phase 1).
 
@@ -88,14 +95,22 @@ def node4_phase1_compilation_runner(
         un0_dir: Optional Un-0 workspace directory override.
         prepared_model: Functionalized HOP model from Node 3.
         eager_model: Eager reference model with solver & noise rewrites.
+        registered_rewrite: Optional identifier of the registered rewrite.
+        proposal: Optional pre-fetched proposal dictionary.
 
     Returns:
         Dict detailing candidate_id, status, compiled_model, eager_model, target_device,
         build_logs, error_logs, error_message, and next_node ('node5_phase1_verify_correctness').
     """
-    proposal = db.get_proposal(candidate_id)
+    if proposal is None and db is not None:
+        try:
+            proposal = db.get_proposal(candidate_id)
+        except Exception as err:
+            logger.warning("Node 4: Could not read proposal from db (%s)", err)
+            proposal = None
+
     if proposal is None:
-        raise KeyError(f"Proposal '{candidate_id}' not found in database.")
+        raise KeyError(f"Proposal '{candidate_id}' not found in database or arguments.")
 
     device = _resolve_target_device(target_device)
     logger.info("Node 4: Compiling model for candidate %s on target device '%s'", candidate_id, device)
@@ -189,24 +204,38 @@ def node4_phase1_compilation_runner(
 
     if prepared_model is None:
         if eager_model is not None:
-            logger.warning(
-                "Node 4: 'prepared_model' was not provided! Synthesizing default unrolled "
-                "functional model from 'eager_model' for isolated test execution. "
-                "Note: In normal pipeline flow, Node 3 synthesizes and provides 'prepared_model'."
-            )
-            try:
-                from un0.compiler import functionalize_kuramoto_model
-                prepared_model = functionalize_kuramoto_model(
-                    model=eager_model,
-                    solver_name=solver_name,
-                    num_steps=num_steps,
-                    dt=dt,
-                    integration_time=integration_time,
-                    use_hop=False,
+            if registered_rewrite:
+                try:
+                    from un0.compiler.registry import get_compiler_rewrite
+                    rewrite_fn = get_compiler_rewrite(registered_rewrite)
+                    prepared_model = rewrite_fn(
+                        model=eager_model,
+                        solver_name=solver_name,
+                        num_steps=num_steps,
+                        dt=dt,
+                        integration_time=integration_time,
+                        target_device=device,
+                    )
+                    logger.info("Node 4: Applied registered compiler rewrite '%s' on worker.", registered_rewrite)
+                except Exception as rw_err:
+                    logger.warning("Node 4: Failed to load rewrite '%s', falling back to functionalize: %s", registered_rewrite, rw_err)
+            if prepared_model is None:
+                logger.info(
+                    "Node 4: Synthesizing unrolled functional model from 'eager_model' on worker."
                 )
-            except Exception as synth_err:
-                logger.warning("Node 4: Functional model synthesis fallback error: %s", synth_err)
-                prepared_model = eager_model
+                try:
+                    from un0.compiler import functionalize_kuramoto_model
+                    prepared_model = functionalize_kuramoto_model(
+                        model=eager_model,
+                        solver_name=solver_name,
+                        num_steps=num_steps,
+                        dt=dt,
+                        integration_time=integration_time,
+                        use_hop=False,
+                    )
+                except Exception as synth_err:
+                    logger.warning("Node 4: Functional model synthesis fallback error: %s", synth_err)
+                    prepared_model = eager_model
         else:
             logger.error("Node 4: Neither 'prepared_model' nor 'eager_model' was provided.")
 
@@ -278,12 +307,15 @@ def node4_phase1_compilation_runner(
         logger.error("Node 4 compilation failed for candidate %s: %s", candidate_id, exc)
 
     # Update DB status (Node 4 never increments Counter 1; Counter 1 is owned by Node 5)
-    db.update_execution_status(
-        candidate_id,
-        compilation_status=compilation_status,
-        error_stage="compilation" if compilation_status == "FAILED" else None,
-        error_message=build_logs if compilation_status == "FAILED" else None,
-    )
+    try:
+        db.update_execution_status(
+            candidate_id,
+            compilation_status=compilation_status,
+            error_stage="compilation" if compilation_status == "FAILED" else None,
+            error_message=build_logs if compilation_status == "FAILED" else None,
+        )
+    except Exception as db_exc:
+        logger.warning("Node 4: Non-critical failure updating DB status (driver will sync): %s", db_exc)
 
     # Attach compilation telemetry to Chia profiler if available
     try:
@@ -299,11 +331,17 @@ def node4_phase1_compilation_runner(
 
     # Node 4 UNCONDITIONALLY routes to Node 5 (Verify Correctness)
     if compilation_status == "SUCCESS":
+        if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
+            compiled_model_ref = ray.put(compiled_model)
+            eager_model_ref = ray.put(eager_baseline)
+        else:
+            compiled_model_ref = compiled_model
+            eager_model_ref = eager_baseline
         return {
             "candidate_id": candidate_id,
             "status": "SUCCESS",
-            "compiled_model": compiled_model,
-            "eager_model": eager_baseline,
+            "compiled_model": compiled_model_ref,
+            "eager_model": eager_model_ref,
             "target_device": device,
             "build_logs": build_logs,
             "error_logs": "",
@@ -311,11 +349,15 @@ def node4_phase1_compilation_runner(
             "next_node": "node5_phase1_verify_correctness",
         }
     else:
+        if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
+            eager_model_ref = ray.put(eager_baseline) if eager_baseline is not None else None
+        else:
+            eager_model_ref = eager_baseline
         return {
             "candidate_id": candidate_id,
             "status": "FAILED",
             "compiled_model": None,
-            "eager_model": eager_baseline,
+            "eager_model": eager_model_ref,
             "target_device": device,
             "build_logs": build_logs,
             "error_logs": build_logs,

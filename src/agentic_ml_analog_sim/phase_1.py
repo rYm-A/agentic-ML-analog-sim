@@ -334,6 +334,44 @@ def run_phase_1(
 
         # STEP 3: Node 4 Compilation Runner
         logger.info("Executing Node 4 (Compilation Runner) on '%s' for '%s'", target_device, active_candidate_id)
+        # Avoid shipping large 358MB PyTorch model objects across WAN to the worker node.
+        # If Ray is initialized, pass registered_rewrite so Node 4 constructs/compiles the model locally on the worker.
+        has_remote = ray.is_initialized() and hasattr(node4_phase1_compilation_runner, "chia_remote")
+        registered_rewrite = (
+            node3_res.get("registered_rewrite") if "node3_res" in locals() and isinstance(node3_res, dict) else None
+        )
+        # Best-effort sync db and rewrites to remote cluster if running distributed
+        active_candidate = db.get_proposal(active_candidate_id)
+        if has_remote:
+            try:
+                import subprocess
+                rewrites_local = Path(resolved_un0_dir) / "un0" / "compiler" / "rewrites"
+                if rewrites_local.exists():
+                    subprocess.run(
+                        [
+                            "rsync", "-az",
+                            "-e", "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -i /Users/chia/.ssh/id_ed25519",
+                            f"{rewrites_local}/",
+                            f"chia@34.70.38.219:/Users/chia/ChiaWorkspace/agentic-ML-analog-sim_cloud_run/Un-0/un0/compiler/rewrites/",
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10,
+                    )
+                if getattr(db, "db_path", None):
+                    subprocess.Popen(
+                        [
+                            "rsync", "-az",
+                            "-e", "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 -i /Users/chia/.ssh/id_ed25519",
+                            str(Path(db.db_path).resolve()),
+                            f"chia@34.70.38.219:{Path(db.db_path).resolve()}",
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+            except Exception as sync_err:
+                logger.debug("Remote cluster sync error: %s", sync_err)
+
         comp_res = _dispatch_node(
             node4_phase1_compilation_runner,
             db=db,
@@ -341,8 +379,10 @@ def run_phase_1(
             candidate_id=active_candidate_id,
             target_device=target_device,
             un0_dir=str(resolved_un0_dir),
-            prepared_model=node3_res.get("prepared_model") if "node3_res" in locals() and isinstance(node3_res, dict) else None,
-            eager_model=node3_res.get("eager_model") if "node3_res" in locals() and isinstance(node3_res, dict) else None,
+            registered_rewrite=registered_rewrite,
+            prepared_model=None if has_remote else (node3_res.get("prepared_model") if "node3_res" in locals() and isinstance(node3_res, dict) else None),
+            eager_model=None if has_remote else (node3_res.get("eager_model") if "node3_res" in locals() and isinstance(node3_res, dict) else None),
+            proposal=active_candidate,
         )
 
         compiled_model = comp_res.get("compiled_model")
@@ -373,6 +413,7 @@ def run_phase_1(
             target_device=target_device,
             compilation_status=compilation_status,
             compilation_error=compilation_error,
+            proposal=active_candidate,
         )
 
         # Sync Node 5 counter and error status to local db
@@ -426,6 +467,7 @@ def run_phase_1(
             compiled_model=model_to_profile,
             target_device=target_device,
             backend_mode=target_device,
+            proposal=active_candidate,
         )
 
         metrics = profile_res.get("metrics", {})

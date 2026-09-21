@@ -21,6 +21,11 @@ from agentic_ml_analog_sim.tools.result_db_tool import ResultDBTool
 
 logger = logging.getLogger("agentic_ml_analog_sim.nodes.node6_phase1_simulate_profile")
 
+try:
+    import ray
+except ImportError:
+    ray = None
+
 # Chia API integration
 try:
     from chia.base.ChiaFunction import ChiaFunction, get
@@ -190,6 +195,7 @@ def node6_phase1_simulate_profile(
     backend_mode: str = "mps",
     test_mode: bool = False,
     num_profile_samples: int = 50,
+    proposal: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Node 6 Simulate and Profile (Phase 1).
 
@@ -202,22 +208,29 @@ def node6_phase1_simulate_profile(
         backend_mode: Worker backend mode ('mps', 'local', 'cloud').
         test_mode: Explicit flag for test mode without requiring full model execution.
         num_profile_samples: Number of single-sample (batch size 1) forward passes to profile.
+        proposal: Optional proposal dict passed directly to avoid remote SQLite lookup.
 
     Returns:
         Dict detailing simulation status, profiled metrics, and next_node.
     """
-    # Use Chia Tools API to interface with the database registered as an MCP tool/server
-    if isinstance(db, ResultDBTool):
-        result_db_tool = db
-    else:
-        result_db_tool = ResultDBTool(name="result_db", db=db, deploy=False)
+    # If compiled_model is a Ray ObjectRef (in distributed execution), resolve it locally
+    if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
+        if isinstance(compiled_model, ray.ObjectRef):
+            compiled_model = ray.get(compiled_model)
 
-    prop_resp = result_db_tool.get_proposal(candidate_id)
-    try:
-        prop_data = json.loads(prop_resp)
-        proposal = prop_data.get("proposal")
-    except Exception:
-        proposal = None
+    if proposal is None:
+        # Use Chia Tools API to interface with the database registered as an MCP tool/server
+        if isinstance(db, ResultDBTool):
+            result_db_tool = db
+        else:
+            result_db_tool = ResultDBTool(name="result_db", db=db, deploy=False)
+
+        prop_resp = result_db_tool.get_proposal(candidate_id)
+        try:
+            prop_data = json.loads(prop_resp)
+            proposal = prop_data.get("proposal")
+        except Exception:
+            proposal = None
 
     if not proposal:
         raise KeyError(f"Proposal '{candidate_id}' not found in database.")
@@ -377,35 +390,23 @@ def node6_phase1_simulate_profile(
         # Check if running under active Ray cluster for worker dispatch with sim_worker available
         is_ray_active = False
         try:
-            import ray
-            if ray.is_initialized():
+            if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
                 cluster_res = ray.cluster_resources()
                 if "sim_worker" in cluster_res and cluster_res["sim_worker"] >= 1:
                     is_ray_active = True
         except Exception:
             is_ray_active = False
 
-        if is_ray_active and hasattr(_simulate_batch1_worker, "chia_remote"):
-            # Dispatch to Chia logical worker
-            worker_ref = _simulate_batch1_worker.chia_remote(
-                compiled_model=compiled_model,
-                num_eval_samples=num_profile_samples,
-                state_dim=state_dim,
-                device_str=device,
-                n_osc=n_osc,
-                n_cond=n_cond,
-            )
-            worker_res = get(worker_ref)
-        else:
-            # Execute synchronously in local process
-            worker_res = _simulate_batch1_worker(
-                compiled_model=compiled_model,
-                num_eval_samples=num_profile_samples,
-                state_dim=state_dim,
-                device_str=device,
-                n_osc=n_osc,
-                n_cond=n_cond,
-            )
+        # Node 6 is already executing on the target simulation worker node (sim_worker: 1).
+        # Execute the batch 1 worker directly in-process to avoid deadlocks from nested resource acquisition.
+        worker_res = _simulate_batch1_worker(
+            compiled_model=compiled_model,
+            num_eval_samples=num_profile_samples,
+            state_dim=state_dim,
+            device_str=device,
+            n_osc=n_osc,
+            n_cond=n_cond,
+        )
 
         wall_clock_s = time.perf_counter() - start_wall_clock
 

@@ -45,9 +45,28 @@ class ResultDatabase:
         """Provide an active connection for callers expecting db.conn attribute."""
         return self._get_connection()
 
+    def _resolve_db_path(self) -> Path:
+        if self.db_path.exists():
+            return self.db_path
+        # Check if inside container where /workspace is the repo mount
+        if Path("/workspace").is_dir():
+            parts = self.db_path.parts
+            if "reports" in parts:
+                idx = parts.index("reports")
+                cand = Path("/workspace").joinpath(*parts[idx:])
+                if cand.exists() or cand.parent.exists():
+                    self.db_path = cand
+                    return cand
+            cand = Path("/workspace") / self.db_path.name
+            if cand.exists():
+                self.db_path = cand
+                return cand
+        return self.db_path
+
     def _get_connection(self) -> sqlite3.Connection:
         """Create and configure a SQLite connection with WAL mode and foreign keys enabled."""
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        resolved = self._resolve_db_path()
+        conn = sqlite3.connect(str(resolved), timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn

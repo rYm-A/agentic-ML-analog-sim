@@ -115,7 +115,7 @@ def _extract_rewrite_name(raw_text: str) -> Optional[str]:
 
     # 5. Regex for natural language markdown bold/backtick definitions
     match_nlp = re.search(
-        r'(?:registered under the name|rewrite name is|rewrite name:?|registered rewrite:?)\s*[*`\'"]*([a-zA-Z0-9_\-]+)[*`\'"]*',
+        r'(?:registered under(?: the name)?|rewrite name is|rewrite name:?|registered rewrite:?)\s*[*`\'"]*([a-zA-Z0-9_\-]+)[*`\'"]*',
         raw_text,
         re.IGNORECASE,
     )
@@ -134,19 +134,34 @@ def _extract_rewrite_name(raw_text: str) -> Optional[str]:
 
 
 def _sync_compiler_rewrites_from_disk(un0_dir: Path, candidate_id: Optional[str] = None) -> List[str]:
-    """Scan Un-0 compiler rewrites directory for newly written modules and load them.
+    """Scan Un-0 compiler rewrites directories for newly written modules and load them.
 
     Ensures modules persisted to disk across processes (e.g., FastMCP Ray actor)
     are loaded into sys.modules and registered in compiler_registry.COMPILER_REGISTRY.
     """
-    rewrites_dir = un0_dir / "un0" / "compiler" / "rewrites"
-    if not rewrites_dir.is_dir():
+    search_dirs = [
+        un0_dir / "un0" / "compiler" / "rewrites",
+        Path("/Users/chia/ChiaWorkspace/Un-0/un0/compiler/rewrites"),
+        Path("/Users/chia/ChiaWorkspace/agentic-ML-analog-sim-run/Un-0/un0/compiler/rewrites"),
+        Path.cwd() / "Un-0" / "un0" / "compiler" / "rewrites",
+    ]
+    seen_dirs: set[Path] = set()
+    all_files: list[Path] = []
+    for rdir in search_dirs:
+        try:
+            rdir_res = rdir.resolve()
+            if rdir_res.is_dir() and rdir_res not in seen_dirs:
+                seen_dirs.add(rdir_res)
+                all_files.extend([p for p in rdir_res.glob("*.py") if p.name != "__init__.py"])
+        except Exception:
+            pass
+
+    if not all_files:
         return []
 
     discovered = []
     clean_cand = candidate_id.strip().replace(" ", "_") if candidate_id else None
 
-    all_files = [p for p in rewrites_dir.glob("*.py") if p.name != "__init__.py"]
     if clean_cand:
         matching = [p for p in all_files if p.name.startswith(f"{clean_cand}_") or clean_cand in p.name]
         others = [p for p in all_files if p not in matching]

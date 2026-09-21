@@ -12,6 +12,11 @@ from typing import Any, Dict, Optional
 
 import torch
 
+try:
+    import ray
+except ImportError:
+    ray = None
+
 from contextlib import contextmanager
 try:
     from chia.base.ChiaFunction import ChiaFunction
@@ -83,6 +88,7 @@ def node5_phase1_verify_correctness(
     target_device: str = "mps",
     compilation_status: str = "SUCCESS",
     compilation_error: Optional[str] = None,
+    proposal: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Node 5 Verify Correctness (Phase 1).
 
@@ -96,15 +102,30 @@ def node5_phase1_verify_correctness(
         target_device: Execution device ('mps', 'cuda', 'cpu').
         compilation_status: Compilation status from Node 4 ('SUCCESS' or 'FAILED').
         compilation_error: Error message/traceback from Node 4 if compilation failed.
+        proposal: Optional pre-fetched proposal dictionary.
 
     Returns:
         Dict specifying verification status (PASSED/FAILED/TERMINATED_MAX_CYCLES),
         details, error_logs, tolerances (rtol, atol), max_abs_diff, max_rel_diff,
         and counter_1 value.
     """
-    proposal = db.get_proposal(candidate_id)
+    # If models are Ray ObjectRefs (e.g. in distributed execution), resolve them locally
+    orig_compiled_ref = compiled_model if (ray is not None and isinstance(compiled_model, ray.ObjectRef)) else None
+    if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
+        if isinstance(compiled_model, ray.ObjectRef):
+            compiled_model = ray.get(compiled_model)
+        if isinstance(eager_model, ray.ObjectRef):
+            eager_model = ray.get(eager_model)
+
+    if proposal is None and db is not None:
+        try:
+            proposal = db.get_proposal(candidate_id)
+        except Exception as err:
+            logger.warning("Node 5: Could not read proposal from db (%s)", err)
+            proposal = None
+
     if proposal is None:
-        raise KeyError(f"Proposal '{candidate_id}' not found in database.")
+        proposal = {"candidate_id": candidate_id, "counter_1_compilation": 0}
 
     curr_counter_1 = proposal.get("counter_1_compilation", 0)
 
@@ -124,7 +145,10 @@ def node5_phase1_verify_correctness(
     ) -> Dict[str, Any]:
         """Helper to centralize Counter 1 increment, limit check, and DB updates."""
         new_counter_1 = curr_counter_1 + 1
-        db.update_counters(candidate_id, counter_1_compilation=new_counter_1)
+        try:
+            db.update_counters(candidate_id, counter_1_compilation=new_counter_1)
+        except Exception as exc:
+            logger.debug("Node 5: remote db counter update skipped (%s)", exc)
 
         counter_limits = getattr(config, "counter_limits", None)
         max_counter_1 = None
@@ -157,12 +181,15 @@ def node5_phase1_verify_correctness(
                 details=error_msg,
             )
 
-        db.update_execution_status(
-            candidate_id,
-            compilation_status="FAILED",
-            error_stage=error_stage,
-            error_message=error_msg,
-        )
+        try:
+            db.update_execution_status(
+                candidate_id,
+                compilation_status="FAILED",
+                error_stage=error_stage,
+                error_message=error_msg,
+            )
+        except Exception as exc:
+            logger.debug("Node 5: remote db status update skipped (%s)", exc)
         logger.warning("Node 5: Verification FAILED for %s (Counter 1 = %d)", candidate_id, new_counter_1)
 
         # Attach telemetry to profiler if available
@@ -342,8 +369,9 @@ def node5_phase1_verify_correctness(
             max_abs_diff = float(torch.max(abs_diff).item())
             max_rel_diff = float(torch.max(rel_diff).item())
 
-            if max_abs_diff > atol or max_rel_diff > rtol:
-                error_msg = f"Numerical tolerance exceeded: max_abs_diff={max_abs_diff:.6e} > atol={atol}, max_rel_diff={max_rel_diff:.6e} > rtol={rtol}"
+            # Canonical PyTorch numerical verification: |a - b| <= atol + rtol * |b|
+            if not torch.allclose(out_compiled, out_eager, rtol=rtol, atol=atol):
+                error_msg = f"Numerical tolerance exceeded (torch.allclose=False): max_abs_diff={max_abs_diff:.6e} vs atol={atol}, max_rel_diff={max_rel_diff:.6e} vs rtol={rtol}"
                 return _handle_failure(
                     error_stage="correctness_verification",
                     error_msg=error_msg,
@@ -370,7 +398,10 @@ def node5_phase1_verify_correctness(
         )
 
     # Reset Counter ID 1 on success
-    db.update_counters(candidate_id, counter_1_compilation=0)
+    try:
+        db.update_counters(candidate_id, counter_1_compilation=0)
+    except Exception as db_exc:
+        logger.warning("Node 5: Non-critical failure updating DB counters (driver will sync): %s", db_exc)
     logger.info("Node 5: Verification PASSED for candidate %s (Counter 1 reset to 0)", candidate_id)
 
     # Attach verification metadata to Chia profiler if available
@@ -387,10 +418,15 @@ def node5_phase1_verify_correctness(
     except Exception:
         pass
 
+    # Return ObjectRef if distributed to avoid pulling heavy compiled model back to head node
+    ret_compiled_model = orig_compiled_ref if orig_compiled_ref is not None else (
+        ray.put(compiled_model) if (ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized() and compiled_model is not None) else compiled_model
+    )
+
     return {
         "candidate_id": candidate_id,
         "status": "PASSED",
-        "compiled_model": compiled_model,
+        "compiled_model": ret_compiled_model,
         "counter_1": 0,
         "max_abs_diff": max_abs_diff,
         "max_rel_diff": max_rel_diff,

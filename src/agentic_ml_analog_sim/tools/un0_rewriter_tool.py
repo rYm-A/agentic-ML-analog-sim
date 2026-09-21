@@ -174,7 +174,12 @@ class Un0RewriterTool(ChiaTool):
         if not init_file.exists():
             init_file.write_text('"""Dynamic compiler rewrites."""\n', encoding="utf-8")
 
-        target_file = rewrites_dir / f"{clean_cand}_{clean_name}.py"
+        if clean_name.startswith(f"{clean_cand}_"):
+            module_base = clean_name
+        else:
+            module_base = f"{clean_cand}_{clean_name}"
+
+        target_file = rewrites_dir / f"{module_base}.py"
         try:
             target_file.write_text(code, encoding="utf-8")
         except Exception as write_err:
@@ -188,7 +193,7 @@ class Un0RewriterTool(ChiaTool):
         # 3. Import and register into COMPILER_REGISTRY
         from un0.compiler.registry import COMPILER_REGISTRY, register_compiler_rewrite
 
-        module_name = f"un0.compiler.rewrites.{clean_cand}_{clean_name}"
+        module_name = f"un0.compiler.rewrites.{module_base}"
         try:
             spec = importlib.util.spec_from_file_location(module_name, target_file)
             if spec is None or spec.loader is None:
