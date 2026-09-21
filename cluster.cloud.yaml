@@ -33,7 +33,7 @@ gcp_nodes:
   sim_gpu_pool:
     machine_type: "g2-standard-8"
     count: 1
-    spot: true
+    spot: false
     ssh_user: "chia"
     ssh_private_key: "${HOME}/.ssh/id_ed25519"
 
