@@ -218,15 +218,18 @@ def node6_phase1_simulate_profile(
         if isinstance(compiled_model, ray.ObjectRef):
             compiled_model = ray.get(compiled_model)
 
-    if proposal is None:
-        # Use Chia Tools API to interface with the database registered as an MCP tool/server
-        if isinstance(db, ResultDBTool):
-            result_db_tool = db
-        else:
-            result_db_tool = ResultDBTool(name="result_db", db=db, deploy=False)
-
-        prop_resp = result_db_tool.get_proposal(candidate_id)
+    result_db_tool: Optional[ResultDBTool] = None
+    if isinstance(db, ResultDBTool):
+        result_db_tool = db
+    elif db is not None:
         try:
+            result_db_tool = ResultDBTool(name="result_db", db=db, deploy=False)
+        except Exception:
+            result_db_tool = None
+
+    if proposal is None and result_db_tool is not None:
+        try:
+            prop_resp = result_db_tool.get_proposal(candidate_id)
             prop_data = json.loads(prop_resp)
             proposal = prop_data.get("proposal")
         except Exception:
@@ -280,19 +283,23 @@ def node6_phase1_simulate_profile(
             "mode": "test",
         }
 
-        result_db_tool.mark_proposal_status(
-            candidate_id=candidate_id,
-            status="EVALUATING",
-            latency_ms=latency_ms,
-            accuracy_fid=None,
-            relative_error=relative_error,
-            wall_clock_s=wall_clock_s,
-            worker_utilization=0.85,
-        )
-        result_db_tool.update_execution_status(
-            candidate_id=candidate_id,
-            simulation_status="SUCCESS",
-        )
+        if result_db_tool is not None:
+            try:
+                result_db_tool.mark_proposal_status(
+                    candidate_id=candidate_id,
+                    status="EVALUATING",
+                    latency_ms=latency_ms,
+                    accuracy_fid=None,
+                    relative_error=relative_error,
+                    wall_clock_s=wall_clock_s,
+                    worker_utilization=0.85,
+                )
+                result_db_tool.update_execution_status(
+                    candidate_id=candidate_id,
+                    simulation_status="SUCCESS",
+                )
+            except Exception as e:
+                logger.warning("Node 6 test mode DB update skipped: %s", e)
 
         try:
             from chia.base.profiling import get_profiler
@@ -323,12 +330,16 @@ def node6_phase1_simulate_profile(
             "For unit tests without a compiled model, pass test_mode=True."
         )
         logger.error("Node 6 real execution failed: %s", err_msg)
-        result_db_tool.update_execution_status(
-            candidate_id=candidate_id,
-            simulation_status="FAILED",
-            error_stage="simulation",
-            error_message=err_msg,
-        )
+        if result_db_tool is not None:
+            try:
+                result_db_tool.update_execution_status(
+                    candidate_id=candidate_id,
+                    simulation_status="FAILED",
+                    error_stage="simulation",
+                    error_message=err_msg,
+                )
+            except Exception:
+                pass
         return {
             "candidate_id": candidate_id,
             "status": "FAILED",
@@ -340,12 +351,16 @@ def node6_phase1_simulate_profile(
     if not callable(compiled_model):
         err_msg = f"compiled_model must be a callable model in real execution, got {type(compiled_model)}"
         logger.error("Node 6 real execution failed: %s", err_msg)
-        result_db_tool.update_execution_status(
-            candidate_id=candidate_id,
-            simulation_status="FAILED",
-            error_stage="simulation",
-            error_message=err_msg,
-        )
+        if result_db_tool is not None:
+            try:
+                result_db_tool.update_execution_status(
+                    candidate_id=candidate_id,
+                    simulation_status="FAILED",
+                    error_stage="simulation",
+                    error_message=err_msg,
+                )
+            except Exception:
+                pass
         return {
             "candidate_id": candidate_id,
             "status": "FAILED",
@@ -441,20 +456,24 @@ def node6_phase1_simulate_profile(
             "mode": "real",
         }
 
-        # Store metrics in database proposal record via Chia Tool MCP API
-        result_db_tool.mark_proposal_status(
-            candidate_id=candidate_id,
-            status="EVALUATING",
-            latency_ms=latency_ms,
-            accuracy_fid=None,
-            relative_error=relative_error,
-            wall_clock_s=wall_clock_s,
-            worker_utilization=0.90,
-        )
-        result_db_tool.update_execution_status(
-            candidate_id=candidate_id,
-            simulation_status="SUCCESS",
-        )
+        # Store metrics in database proposal record via Chia Tool MCP API (driver will also sync)
+        if result_db_tool is not None:
+            try:
+                result_db_tool.mark_proposal_status(
+                    candidate_id=candidate_id,
+                    status="EVALUATING",
+                    latency_ms=latency_ms,
+                    accuracy_fid=None,
+                    relative_error=relative_error,
+                    wall_clock_s=wall_clock_s,
+                    worker_utilization=0.90,
+                )
+                result_db_tool.update_execution_status(
+                    candidate_id=candidate_id,
+                    simulation_status="SUCCESS",
+                )
+            except Exception as e:
+                logger.warning("Node 6: Non-critical failure updating DB status (driver will sync): %s", e)
 
         # Attach usage/profiling metadata to Chia profiler if available
         try:
@@ -481,12 +500,16 @@ def node6_phase1_simulate_profile(
         err_logs = traceback.format_exc()
         logger.error("Node 6 hardware simulation failed for candidate '%s': %s", candidate_id, err_msg)
 
-        result_db_tool.update_execution_status(
-            candidate_id=candidate_id,
-            simulation_status="FAILED",
-            error_stage="simulation",
-            error_message=err_msg,
-        )
+        if result_db_tool is not None:
+            try:
+                result_db_tool.update_execution_status(
+                    candidate_id=candidate_id,
+                    simulation_status="FAILED",
+                    error_stage="simulation",
+                    error_message=err_msg,
+                )
+            except Exception:
+                pass
 
         return {
             "candidate_id": candidate_id,
