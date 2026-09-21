@@ -13,25 +13,19 @@ reference_design:
   sparsity_ratio: 0.0
 
 solvers:
-  rk4:
-    steps: [5, 10, 15, 25]
-  euler_backward:
-    steps: [2, 5, 10]
-  parareal:
-    steps: [10, 20]
+  euler:
+    steps: [1, 2, 5, 10]
   par_ode:
     steps: [10, 25]
 
 noise_models:
   - "L0_static_mismatch"
-  - "L1_stochastic_parameter_noise"
-  - "L2_functional_interface"
 
 sparsity_configs:
   dense:
     sparsity_ratio: 0.0
   threshold_pruned:
-    allowed_sparsity_ratios: [0.2, 0.4, 0.6, 0.8]
+    allowed_sparsity_ratios: [0.0]
   degree_bounded:
     max_degree: [64, 128, 256]
 
@@ -58,20 +52,20 @@ counter_limits:
 
 agent_efforts:
   node2_phase0_propose_candidate:
-    model: "gemini-3.1-pro"
+    model: "gemini-2.5-pro"
     effort: "medium"
   node1_phase1_solver_rewriter:
-    model: "gemini-3.1-pro"
+    model: "gemini-2.5-pro"
     effort: "high"
   node2_phase1_noise_rewriter:
-    model: "gemini-3.1-pro"
+    model: "gemini-2.5-pro"
     effort: "high"
   node3_phase1_compiler_rewriter:
-    model: "gemini-3.1-pro"
+    model: "gemini-2.5-pro"
     effort: "high"
   node8_phase1_diagnostic_proposal:
-    model: "gemini-3.1-pro"
+    model: "gemini-2.5-flash"
     effort: "medium"
   node2_phase2_generate_final_report:
-    model: "gemini-3.1-pro"
+    model: "gemini-2.5-flash"
     effort: "medium"
