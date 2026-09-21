@@ -424,19 +424,20 @@ def run_phase_1(
         if has_remote:
             try:
                 import subprocess
-                rewrites_local = Path(resolved_un0_dir) / "un0" / "compiler" / "rewrites"
-                if rewrites_local.exists():
-                    subprocess.run(
-                        [
-                            "rsync", "-az",
-                            "-e", "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -i /Users/chia/.ssh/id_ed25519",
-                            f"{rewrites_local}/",
-                            f"chia@34.70.38.219:/Users/chia/ChiaWorkspace/agentic-ML-analog-sim_cloud_run/Un-0/un0/compiler/rewrites/",
-                        ],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=10,
-                    )
+                for subdir in ["compiler/rewrites", "noise/rewrites", "solver"]:
+                    sub_local = Path(resolved_un0_dir) / "un0" / subdir
+                    if sub_local.exists():
+                        subprocess.run(
+                            [
+                                "rsync", "-az",
+                                "-e", "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -i /Users/chia/.ssh/id_ed25519",
+                                f"{sub_local}/",
+                                f"chia@34.70.38.219:/Users/chia/ChiaWorkspace/agentic-ML-analog-sim_cloud_run/Un-0/un0/{subdir}/",
+                            ],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=10,
+                        )
                 if getattr(db, "db_path", None):
                     subprocess.Popen(
                         [
