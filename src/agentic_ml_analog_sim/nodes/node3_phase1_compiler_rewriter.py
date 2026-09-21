@@ -324,11 +324,11 @@ def node3_phase1_compiler_rewriter(
     # 3. Instantiate Chia Tools
     un0_dir = resolve_un0_root()
 
-    result_db_tool = ResultDBTool(name="result_db", db=db, deploy=True)
+    result_db_tool = ResultDBTool(name="result_db", db=db, deploy=False)
     un0_rewriter_tool = Un0RewriterTool(
         name="un0_rewriter",
         repo_root=un0_dir,
-        auto_start=True,
+        auto_start=False,
     )
 
     tools = [result_db_tool, un0_rewriter_tool]
