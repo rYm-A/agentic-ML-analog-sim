@@ -97,6 +97,7 @@ def run_phase_0(
     llm: Any = None,
     un0_dir: Union[str, Path, None] = None,
     iteration: int = 1,
+    enable_safety_net: bool = True,
 ) -> Phase0Result:
     """Execute the end-to-end Phase 0 pipeline.
 
@@ -193,7 +194,61 @@ def run_phase_0(
                 details="Baseline reference design data is missing or incomplete in database. Routing to Phase 1.",
             )
 
-        # 5. Reference is complete: Enter Node 2 / Node 3 Optimization Loop
+        # 5. Programmatically determine target noise model based on per-noise quota budget
+        configured_noise = getattr(config, "noise_models", ["L0_static_mismatch"])
+        noise_model_names: list[str] = []
+        if isinstance(configured_noise, dict):
+            noise_model_names = list(configured_noise.keys())
+        elif isinstance(configured_noise, (list, tuple)):
+            for nm in configured_noise:
+                if isinstance(nm, str):
+                    noise_model_names.append(nm)
+                elif hasattr(nm, "name"):
+                    noise_model_names.append(getattr(nm, "name"))
+                elif isinstance(nm, dict) and "name" in nm:
+                    noise_model_names.append(nm["name"])
+        if not noise_model_names:
+            noise_model_names = ["L0_static_mismatch"]
+
+        max_experiments = getattr(config.budget, "max_experiments", 10)
+        target_noise_model: Optional[str] = None
+        if hasattr(database, "get_next_unfulfilled_noise_model") and callable(database.get_next_unfulfilled_noise_model):
+            target_noise_model = database.get_next_unfulfilled_noise_model(
+                noise_models=noise_model_names,
+                max_per_noise=max_experiments,
+            )
+        else:
+            if hasattr(database, "get_proposal_counts_by_noise_model"):
+                counts = database.get_proposal_counts_by_noise_model(exclude_reference=True)
+            else:
+                counts = {}
+            for nm in noise_model_names:
+                nm_counts = counts.get(nm, {})
+                attempts = nm_counts.get("completed", 0) + nm_counts.get("failed", 0)
+                if attempts < max_experiments:
+                    target_noise_model = nm
+                    break
+
+        if target_noise_model is None:
+            logger.info(
+                "All configured noise models have completed their experiment budget (%d each).",
+                max_experiments,
+            )
+            return Phase0Result(
+                action="TERMINATED_MAX_CYCLES",
+                candidate_id=None,
+                phase_1_instructions=None,
+                cycle_count=0,
+                details="All configured noise models have completed their experiment budget.",
+            )
+
+        logger.info(
+            "Target noise model for Phase 0 proposal: '%s' (quota: %d experiments per noise model)",
+            target_noise_model,
+            max_experiments,
+        )
+
+        # 6. Reference is complete: Enter Node 2 / Node 3 Optimization Loop
         max_retries = config.budget.max_node_retries
         cycle_count = 1
         prior_rejection_reason: Optional[str] = None
@@ -216,6 +271,7 @@ def run_phase_0(
                 tools=tools if tools else None,
                 prior_rejection_reason=prior_rejection_reason,
                 iteration=iteration,
+                target_noise_model=target_noise_model,
             )
 
             candidate_id = proposal_dict["candidate_id"]
@@ -229,6 +285,7 @@ def run_phase_0(
                 db=database,
                 config=config,
                 cycle_count=cycle_count,
+                target_noise_model=target_noise_model,
             )
 
             if is_valid:
@@ -254,8 +311,40 @@ def run_phase_0(
             )
             prior_rejection_reason = reason
 
-            if reason == "MAX_CYCLES_EXCEEDED" or updated_cycle > max_retries:
+            if reason == "MAX_CYCLES_EXCEEDED" or updated_cycle > max_retries or cycle_count >= max_retries:
                 logger.error("Max proposal retry cycles exceeded (%d/%d)", cycle_count, max_retries)
+                if enable_safety_net:
+                    from agentic_ml_analog_sim.nodes.node2_phase0_propose_candidate import (
+                        _insert_pending_candidate,
+                        _synthesize_unexplored_candidate,
+                    )
+
+                    fallback_proposal = _synthesize_unexplored_candidate(
+                        config, database, iteration, target_noise_model
+                    )
+                    if fallback_proposal is not None:
+                        logger.warning(
+                            "Phase 0: Max proposal retries reached with LLM rejections. Engaging emergency programmatic synthesis safety net to proceed with candidate '%s'.",
+                            fallback_proposal["candidate_id"],
+                        )
+                        _insert_pending_candidate(database, fallback_proposal)
+                        fb_valid, _, _ = _dispatch_node(
+                            node3_phase0_validate_proposal,
+                            candidate_id=fallback_proposal["candidate_id"],
+                            db=database,
+                            config=config,
+                            cycle_count=cycle_count,
+                            target_noise_model=target_noise_model,
+                        )
+                        if fb_valid:
+                            return Phase0Result(
+                                action="PROCEED_TO_PHASE_1_CANDIDATE",
+                                candidate_id=fallback_proposal["candidate_id"],
+                                phase_1_instructions=fallback_proposal.get("phase_1_prompt"),
+                                cycle_count=cycle_count,
+                                details="Candidate generated via Phase 0 programmatic safety net",
+                            )
+
                 return Phase0Result(
                     action="TERMINATED_MAX_CYCLES",
                     candidate_id=candidate_id,
@@ -267,6 +356,38 @@ def run_phase_0(
             cycle_count = max(cycle_count + 1, updated_cycle)
 
         # Exceeded loop bound
+        if enable_safety_net:
+            from agentic_ml_analog_sim.nodes.node2_phase0_propose_candidate import (
+                _insert_pending_candidate,
+                _synthesize_unexplored_candidate,
+            )
+
+            fallback_proposal = _synthesize_unexplored_candidate(
+                config, database, iteration, target_noise_model
+            )
+            if fallback_proposal is not None:
+                logger.warning(
+                    "Phase 0: Max proposal retries reached with LLM rejections. Engaging emergency programmatic synthesis safety net to proceed with candidate '%s'.",
+                    fallback_proposal["candidate_id"],
+                )
+                _insert_pending_candidate(database, fallback_proposal)
+                fb_valid, _, _ = _dispatch_node(
+                    node3_phase0_validate_proposal,
+                    candidate_id=fallback_proposal["candidate_id"],
+                    db=database,
+                    config=config,
+                    cycle_count=cycle_count,
+                    target_noise_model=target_noise_model,
+                )
+                if fb_valid:
+                    return Phase0Result(
+                        action="PROCEED_TO_PHASE_1_CANDIDATE",
+                        candidate_id=fallback_proposal["candidate_id"],
+                        phase_1_instructions=fallback_proposal.get("phase_1_prompt"),
+                        cycle_count=cycle_count,
+                        details="Candidate generated via Phase 0 programmatic safety net",
+                    )
+
         return Phase0Result(
             action="TERMINATED_MAX_CYCLES",
             candidate_id=last_candidate_id,

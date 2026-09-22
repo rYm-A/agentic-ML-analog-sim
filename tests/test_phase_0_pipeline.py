@@ -144,6 +144,7 @@ def test_case_c_cyclic_duplicates_yields_terminated_max_cycles(temp_env):
         config_path=CONFIG_PATH,
         db_path=db_path,
         llm=mock_llm,
+        enable_safety_net=False,
     )
 
     assert result.action == "TERMINATED_MAX_CYCLES"

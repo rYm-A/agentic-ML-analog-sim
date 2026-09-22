@@ -234,7 +234,7 @@ def _validate_solver(solver: str, solver_params: dict[str, Any], config: Any) ->
     if solver not in allowed_solver_names:
         return (
             False,
-            f"INVALID_SOLVER: Solver '{solver}' is not allowed. You MUST select one of the allowed solvers from configuration: {sorted(allowed_solver_names)}. Do NOT propose '{solver}' again.",
+            f"INVALID_SOLVER: Solver '{solver}' is not allowed. Allowed solvers: {sorted(allowed_solver_names)}",
         )
 
     # Check allowed_steps or steps if specified
