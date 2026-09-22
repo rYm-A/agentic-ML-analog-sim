@@ -7,7 +7,7 @@ import logging
 import re
 import sqlite3
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 from chia.base.ChiaFunction import ChiaFunction
@@ -81,42 +81,142 @@ def _get_val(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
-def _parse_llm_json_response(raw_text: str) -> dict[str, Any]:
-    """Extract and parse JSON object from LLM response text."""
-    clean_text = raw_text.strip()
+def _get_allowed_solvers(config: Any) -> list[str]:
+    """Extract list of allowed solver names from config."""
+    configured_solvers = _get_val(config, "solvers", [])
+    allowed: list[str] = []
+    if isinstance(configured_solvers, Mapping):
+        allowed = list(configured_solvers.keys())
+    elif isinstance(configured_solvers, (list, tuple)):
+        for s in configured_solvers:
+            if isinstance(s, str):
+                allowed.append(s)
+            elif isinstance(s, Mapping):
+                name = s.get("name")
+                if name:
+                    allowed.append(name)
+            elif hasattr(s, "name"):
+                name = getattr(s, "name")
+                if name:
+                    allowed.append(name)
+    return allowed
 
-    # Look for ```json ... ``` code fence
-    fence_pattern = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
-    match = fence_pattern.search(clean_text)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
 
-    # Look for raw JSON object {...}
-    brace_pattern = re.compile(r"(\{.*\})", re.DOTALL)
-    match = brace_pattern.search(clean_text)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
+def _parse_llm_json_response(
+    raw_text: str,
+    config: Any = None,
+    db: Any = None,
+    iteration: int = 1,
+    target_noise_model: Optional[str] = None,
+) -> dict[str, Any]:
+    """Extract and parse JSON object from LLM response text with dynamic config-aware fallback."""
+    clean_text = raw_text.strip() if raw_text else ""
+    parsed_json: dict[str, Any] | None = None
 
-    try:
-        return json.loads(clean_text)
-    except json.JSONDecodeError:
-        logger.warning("Could not parse JSON directly from LLM output: %s", raw_text[:200])
-        # Fallback to default proposal structure
-        return {
-            "solver": "euler",
-            "num_steps": 5,
-            "solver_params": {"num_steps": 5, "dt": 0.2},
-            "noise_model": "L0_static_mismatch",
-            "noise_params": {"sigma": 0.01},
-            "sparsity_config": {"sparsity_ratio": 0.4},
-            "selection_reason": "Fallback default: Explore Euler with low static mismatch and 40% sparsity",
-        }
+    if clean_text:
+        # Look for ```json ... ``` code fence
+        fence_pattern = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+        match = fence_pattern.search(clean_text)
+        if match:
+            try:
+                parsed_json = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # Look for raw JSON object {...}
+        if parsed_json is None:
+            brace_pattern = re.compile(r"(\{.*\})", re.DOTALL)
+            match = brace_pattern.search(clean_text)
+            if match:
+                try:
+                    parsed_json = json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    pass
+
+        if parsed_json is None:
+            try:
+                parsed_json = json.loads(clean_text)
+            except json.JSONDecodeError:
+                pass
+
+    if isinstance(parsed_json, dict) and parsed_json:
+        return parsed_json
+
+    logger.warning("Could not parse JSON directly from LLM output. Synthesizing valid candidate from config.")
+    if config is not None:
+        synth = _synthesize_unexplored_candidate(config, db, iteration, target_noise_model)
+        if synth is not None and isinstance(synth, dict):
+            return synth
+
+    # If _synthesize_unexplored_candidate returns None or config is None:
+    # Dynamically inspect _get_val(config, "solvers", []): pick first allowed solver
+    allowed_solvers = _get_allowed_solvers(config)
+    fallback_solver = allowed_solvers[0] if allowed_solvers else "euler"
+
+    configured_solvers = _get_val(config, "solvers", {}) if config is not None else {}
+    steps = 5
+    if isinstance(configured_solvers, Mapping) and fallback_solver in configured_solvers:
+        spec = configured_solvers[fallback_solver]
+        spec_steps = _get_val(spec, "steps") or _get_val(spec, "allowed_steps")
+        if spec_steps and isinstance(spec_steps, (list, tuple)) and len(spec_steps) > 0:
+            steps = int(spec_steps[0])
+    elif isinstance(configured_solvers, (list, tuple)):
+        for s in configured_solvers:
+            s_name = s if isinstance(s, str) else (_get_val(s, "name") if isinstance(s, Mapping) or hasattr(s, "name") else None)
+            if s_name == fallback_solver:
+                spec_steps = _get_val(s, "steps") or _get_val(s, "allowed_steps")
+                if spec_steps and isinstance(spec_steps, (list, tuple)) and len(spec_steps) > 0:
+                    steps = int(spec_steps[0])
+                break
+
+    noise_model = target_noise_model
+    if not noise_model:
+        raw_noise_models = _get_val(config, "noise_models", ["L0_static_mismatch"]) if config is not None else ["L0_static_mismatch"]
+        if isinstance(raw_noise_models, (list, tuple)) and len(raw_noise_models) > 0:
+            first_n = raw_noise_models[0]
+            if isinstance(first_n, str):
+                noise_model = first_n
+            elif isinstance(first_n, Mapping) and "name" in first_n:
+                noise_model = first_n["name"]
+            elif hasattr(first_n, "name"):
+                noise_model = getattr(first_n, "name")
+            else:
+                noise_model = "L0_static_mismatch"
+        elif isinstance(raw_noise_models, Mapping) and len(raw_noise_models) > 0:
+            noise_model = list(raw_noise_models.keys())[0]
+        else:
+            noise_model = "L0_static_mismatch"
+
+    dt = round(1.0 / steps, 6) if steps > 0 else 0.1
+    noise_params = {} if noise_model == "none" else {"sigma": 0.01}
+    cand_id = f"cand_{fallback_solver}{steps}_{uuid4().hex[:6]}"
+    selection_reason = f"Fallback default: Explore {fallback_solver} with {noise_model}"
+    sparsity_config = {"type": "dense", "sparsity_ratio": 0.0}
+    solver_params = {"num_steps": steps, "dt": dt}
+
+    phase_1_prompt = _format_phase_1_prompt(
+        candidate_id=cand_id,
+        solver=fallback_solver,
+        solver_params=solver_params,
+        noise_model=noise_model,
+        noise_params=noise_params,
+        sparsity_config=sparsity_config,
+        selection_reason=selection_reason,
+    )
+
+    return {
+        "candidate_id": cand_id,
+        "iteration": iteration,
+        "solver": fallback_solver,
+        "num_steps": steps,
+        "solver_params": solver_params,
+        "noise_model": noise_model,
+        "noise_params": noise_params,
+        "sparsity_config": sparsity_config,
+        "selection_reason": selection_reason,
+        "phase_1_prompt": phase_1_prompt,
+        "status": "PENDING",
+    }
 
 
 def _format_phase_1_prompt(
@@ -351,33 +451,53 @@ def _synthesize_unexplored_candidate(
     config: Any,
     db: Any,
     iteration: int = 1,
+    target_noise_model: Optional[str] = None,
 ) -> dict[str, Any] | None:
     """Deterministically find and synthesize the next unexplored valid candidate configuration."""
     from agentic_ml_analog_sim.nodes.node3_phase0_validate_proposal import _check_duplicate
 
     solvers_dict = _get_val(config, "solvers", {})
-    noise_models_list = _get_val(config, "noise_models", ["L0_static_mismatch"])
     sparsity_configs_obj = _get_val(config, "sparsity_configs", {})
 
     # Extract solver list and steps
     solver_options: list[tuple[str, int]] = []
     if isinstance(solvers_dict, Mapping):
         for s_name, s_cfg in solvers_dict.items():
-            steps = _get_val(s_cfg, "steps", [5, 10, 20])
+            steps = _get_val(s_cfg, "steps") or _get_val(s_cfg, "allowed_steps") or [5, 10, 20]
             for st in steps:
                 solver_options.append((s_name, int(st)))
     elif isinstance(solvers_dict, (list, tuple)):
         for s_entry in solvers_dict:
-            s_name = _get_val(s_entry, "name", "euler")
-            steps = _get_val(s_entry, "steps", [5, 10, 20])
+            if isinstance(s_entry, str):
+                s_name = s_entry
+                steps = [5, 10, 20]
+            else:
+                s_name = _get_val(s_entry, "name", "euler")
+                steps = _get_val(s_entry, "steps") or _get_val(s_entry, "allowed_steps") or [5, 10, 20]
             for st in steps:
                 solver_options.append((s_name, int(st)))
-    else:
+
+    if not solver_options:
         solver_options = [("euler", 5), ("euler", 10), ("euler", 20), ("par_ode", 5), ("par_ode", 10)]
 
     # Extract noise models
-    if not noise_models_list:
-        noise_models_list = ["L0_static_mismatch"]
+    if target_noise_model:
+        noise_models_list = [target_noise_model]
+    else:
+        raw_noise_models = _get_val(config, "noise_models", ["L0_static_mismatch"])
+        noise_models_list = []
+        if isinstance(raw_noise_models, (list, tuple)):
+            for n in raw_noise_models:
+                if isinstance(n, str):
+                    noise_models_list.append(n)
+                elif isinstance(n, Mapping) and "name" in n:
+                    noise_models_list.append(n["name"])
+                elif hasattr(n, "name"):
+                    noise_models_list.append(getattr(n, "name"))
+        elif isinstance(raw_noise_models, Mapping):
+            noise_models_list = list(raw_noise_models.keys())
+        if not noise_models_list:
+            noise_models_list = ["L0_static_mismatch"]
 
     # Extract sparsity options
     sparsity_options: list[tuple[str, dict[str, Any]]] = []
@@ -397,6 +517,21 @@ def _synthesize_unexplored_candidate(
     if isinstance(thresh_ratios, (list, tuple)):
         for r in thresh_ratios:
             sparsity_options.append((f"thresh{r}", {"type": "threshold_pruned", "sparsity_ratio": float(r)}))
+
+    # Also handle list representation for sparsity_configs if present
+    if isinstance(sparsity_configs_obj, (list, tuple)):
+        for sp in sparsity_configs_obj:
+            sp_name = _get_val(sp, "name")
+            if sp_name == "degree_bounded":
+                m_degs = _get_val(sp, "max_degree", [])
+                if isinstance(m_degs, (list, tuple)):
+                    for deg in m_degs:
+                        sparsity_options.append((f"deg{deg}", {"type": "degree_bounded", "max_degree": int(deg), "sparsity_ratio": 0.0}))
+            elif sp_name == "threshold_pruned":
+                t_ratios = _get_val(sp, "allowed_sparsity_ratios", [])
+                if isinstance(t_ratios, (list, tuple)):
+                    for r in t_ratios:
+                        sparsity_options.append((f"thresh{r}", {"type": "threshold_pruned", "sparsity_ratio": float(r)}))
 
     # Iterate through all grid combinations to find first unexplored
     for s_name, st in solver_options:
@@ -427,6 +562,7 @@ def _synthesize_unexplored_candidate(
                         "candidate_id": cand_id,
                         "iteration": iteration,
                         "solver": s_name,
+                        "num_steps": st,
                         "noise_model": nm,
                         "solver_params": test_rec["solver_params"],
                         "noise_params": test_rec["noise_params"],
@@ -446,6 +582,7 @@ def node2_phase0_propose_candidate(
     tools: list[Any] | None = None,
     prior_rejection_reason: str | None = None,
     iteration: int = 1,
+    target_noise_model: Optional[str] = None,
 ) -> dict[str, Any]:
     """Agentic node proposing the next simulation candidate (solver + noise + sparsity).
 
@@ -461,6 +598,7 @@ def node2_phase0_propose_candidate(
         tools: Optional list of ChiaTool instances.
         prior_rejection_reason: Optional rejection note from Node 3 to steer retry.
         iteration: Optimization loop iteration counter.
+        target_noise_model: Optional target noise model to strictly enforce.
 
     Returns:
         dict: {
@@ -492,20 +630,25 @@ def node2_phase0_propose_candidate(
     if not all_proposals and hasattr(db, "query_proposals") and callable(db.query_proposals):
         try:
             all_proposals = db.query_proposals(limit=200)
+            if all_proposals:
+                all_proposals = list(reversed(all_proposals))
         except Exception:
             pass
     if not all_proposals and hasattr(db, "get_proposals") and callable(db.get_proposals):
         try:
             all_proposals = db.get_proposals(limit=200)
+            if all_proposals:
+                all_proposals = list(reversed(all_proposals))
         except Exception:
             pass
 
     history_markdown = []
     if all_proposals:
+        recent_proposals = all_proposals[-10:] if len(all_proposals) > 10 else all_proposals
         history_markdown.append("\n### Prohibited Configurations (Already Explored or In-Flight in DB):")
         history_markdown.append("| Candidate ID | Status | Solver | Steps | dt | Noise Model | Sparsity |")
         history_markdown.append("|---|---|---|---|---|---|---|")
-        for p in all_proposals:
+        for p in recent_proposals:
             p_cid = _get_val(p, "candidate_id", "unknown")
             p_status = _get_val(p, "status", "UNKNOWN")
             p_solv = _get_val(p, "solver", "euler")
@@ -530,6 +673,10 @@ def node2_phase0_propose_candidate(
         f"Exploration configuration: {json.dumps(config_summary, default=str)}",
         f"Current iteration: {iteration}",
     ]
+    if target_noise_model:
+        user_prompt_lines.append(
+            f"CRITICAL REQUIREMENT: You MUST set noise_model to '{target_noise_model}'. Do NOT propose any other noise model."
+        )
     if history_markdown:
         user_prompt_lines.extend(history_markdown)
     else:
@@ -555,12 +702,54 @@ def node2_phase0_propose_candidate(
     response_text = getattr(query_result, "result", str(query_result))
 
     # Parse proposal JSON
-    proposal_data = _parse_llm_json_response(response_text)
+    proposal_data = _parse_llm_json_response(
+        response_text,
+        config=config,
+        db=db,
+        iteration=iteration,
+        target_noise_model=target_noise_model,
+    )
+
+    # In-node pre-validation: inspect parsed proposal fields
+    solver = proposal_data.get("solver")
+    noise_model = proposal_data.get("noise_model")
+    solver_params = proposal_data.get("solver_params")
+    sparsity_config = proposal_data.get("sparsity_config")
+
+    allowed_solvers = _get_allowed_solvers(config)
+    auto_corrected = False
+
+    if allowed_solvers and solver not in allowed_solvers:
+        logger.warning(
+            "Node 2: Proposed solver '%s' is not in configured solvers %s. Auto-correcting to unexplored valid candidate.",
+            solver,
+            allowed_solvers,
+        )
+        synth_candidate = _synthesize_unexplored_candidate(config, db, iteration, target_noise_model)
+        if synth_candidate is not None and isinstance(synth_candidate, dict):
+            proposal_data = synth_candidate
+        else:
+            fallback_solver = allowed_solvers[0]
+            proposal_data["solver"] = fallback_solver
+            if isinstance(solver_params, dict):
+                st = solver_params.get("num_steps", 5)
+                proposal_data["solver_params"] = {"num_steps": st, "dt": round(1.0 / st, 6)}
+            else:
+                proposal_data["solver_params"] = {"num_steps": 5, "dt": 0.2}
+        auto_corrected = True
+
+    if target_noise_model and proposal_data.get("noise_model") != target_noise_model:
+        proposal_data["noise_model"] = target_noise_model
+        if target_noise_model == "none":
+            proposal_data["noise_params"] = {}
+        elif not proposal_data.get("noise_params"):
+            proposal_data["noise_params"] = {"sigma": 0.01}
+        auto_corrected = True
 
     # Extract or generate proposal fields
     candidate_id = proposal_data.get("candidate_id") or f"cand_{uuid4().hex[:8]}"
-    solver = proposal_data.get("solver", "euler")
-    noise_model = proposal_data.get("noise_model", "L0_static_mismatch")
+    solver = proposal_data.get("solver") or (allowed_solvers[0] if allowed_solvers else "euler")
+    noise_model = proposal_data.get("noise_model", target_noise_model or "L0_static_mismatch")
     num_steps = proposal_data.get("num_steps", 5)
 
     solver_params = (
@@ -584,15 +773,18 @@ def node2_phase0_propose_candidate(
     )
 
     # Formulate and store phase_1_prompt
-    phase_1_prompt = proposal_data.get("phase_1_prompt") or _format_phase_1_prompt(
-        candidate_id=candidate_id,
-        solver=solver,
-        solver_params=solver_params,
-        noise_model=noise_model,
-        noise_params=noise_params,
-        sparsity_config=sparsity_config,
-        selection_reason=selection_reason,
-    )
+    if auto_corrected or not proposal_data.get("phase_1_prompt"):
+        phase_1_prompt = _format_phase_1_prompt(
+            candidate_id=candidate_id,
+            solver=solver,
+            solver_params=solver_params,
+            noise_model=noise_model,
+            noise_params=noise_params,
+            sparsity_config=sparsity_config,
+            selection_reason=selection_reason,
+        )
+    else:
+        phase_1_prompt = proposal_data["phase_1_prompt"]
 
     # Construct preliminary candidate record
     candidate_record = {
@@ -616,11 +808,18 @@ def node2_phase0_propose_candidate(
     if not usage and hasattr(active_llm, "history") and active_llm.history:
         usage = active_llm.history[-1].get("usage", {}) or {}
 
-    prompt_tokens = usage.get("prompt_tokens", 120)
-    completion_tokens = usage.get("candidates_tokens", usage.get("completion_tokens", 85))
-    total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+    prompt_tokens = usage.get("prompt_tokens", 120) if isinstance(usage, Mapping) else 120
+    completion_tokens = usage.get("candidates_tokens", usage.get("completion_tokens", 85)) if isinstance(usage, Mapping) else 85
+    if not isinstance(prompt_tokens, (int, float)):
+        prompt_tokens = 120
+    if not isinstance(completion_tokens, (int, float)):
+        completion_tokens = 85
+    total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens) if isinstance(usage, Mapping) else (prompt_tokens + completion_tokens)
+    if not isinstance(total_tokens, (int, float)):
+        total_tokens = prompt_tokens + completion_tokens
     cost_usd = (prompt_tokens * 0.00000125) + (completion_tokens * 0.000005)
-    model_name = getattr(active_llm, "model", "gemini-2.5-pro")
+    raw_model = getattr(active_llm, "model", "gemini-2.5-pro")
+    model_name = raw_model if isinstance(raw_model, str) else "gemini-2.5-pro"
 
     if hasattr(db, "record_token_usage") and callable(db.record_token_usage):
         try:

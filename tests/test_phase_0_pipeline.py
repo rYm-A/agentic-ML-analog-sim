@@ -118,8 +118,27 @@ def test_case_c_cyclic_duplicates_yields_terminated_max_cycles(temp_env):
         latency_ms=100.0,
     )
 
-    # Mock LLM returns exact duplicate of reference design on every prompt
-    mock_llm = MockAntigravityLLM(mode="duplicate")
+    # Populate an existing candidate proposal to be duplicated
+    dup_prop = {
+        "candidate_id": "cand_dup_l0",
+        "solver": "rk4",
+        "num_steps": 25,
+        "solver_params": {"num_steps": 25, "dt": 0.04},
+        "noise_model": "L0_static_mismatch",
+        "noise_params": {"sigma": 0.01},
+        "sparsity_config": {"sparsity_ratio": 0.0},
+    }
+    db.insert_proposal(
+        solver=dup_prop["solver"],
+        noise_model=dup_prop["noise_model"],
+        solver_params=dup_prop["solver_params"],
+        noise_params=dup_prop["noise_params"],
+        sparsity_config=dup_prop["sparsity_config"],
+        status="COMPLETED",
+    )
+
+    # Mock LLM returns exact duplicate of existing candidate on every prompt
+    mock_llm = MockAntigravityLLM(mode="duplicate", duplicate_proposal=dup_prop)
 
     result: Phase0Result = run_phase_0(
         config_path=CONFIG_PATH,
