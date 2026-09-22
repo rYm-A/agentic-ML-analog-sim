@@ -452,8 +452,179 @@ def test_node3_compiler_rewriter_missing_regenerative_cornn(tmp_db_and_config, m
     assert prop["rewrite_compiler_status"] == "SUCCESS"
 
 
+def test_node3_compiler_rewriter_deterministic_reference(tmp_db_and_config):
+    """Test Recommendation 1: Deterministic fast path in Node 3 for reference candidates."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_test_ref_fast_path",
+        solver="rk4",
+        noise_model="none",
+        is_reference=1,
+    )
+
+    mock_llm = MockAntigravityLLM(mode="valid")
+
+    res = node3_compiler_rewriter(db=db, config=config, candidate_id=cand_id, target_device="mps", llm=mock_llm)
+
+    assert res["status"] == "SUCCESS"
+    assert res["deterministic"] is True
+    assert res["tokens_consumed"] == 0
+    assert res["token_usage"]["total_tokens"] == 0
+    assert res["registered_rewrite"] in ("unrolled_functional", "hop_while_loop")
+    assert res["prepared_model"] is not None
+    assert res["next_node"] == "node4_phase1_compilation_runner"
+    # Verify LLM was NOT called
+    assert len(mock_llm.history) == 0
+
+    prop = db.get_proposal(cand_id)
+    assert prop["rewrite_compiler_status"] == "SUCCESS"
+
+
+def test_node3_compiler_rewriter_deterministic_reuse_registered(tmp_db_and_config):
+    """Test Recommendation 1: Deterministic fast path when rewrite is already registered or explicitly configured."""
+    db, config = tmp_db_and_config
+
+    # Sub-case 1: proposal specifies compiler_rewrite via solver_params
+    cand_id = db.insert_proposal(
+        candidate_id="cand_test_explicit_rewrite",
+        solver="rk4",
+        noise_model="none",
+        solver_params={"compiler_rewrite": "unrolled_functional"},
+    )
+
+    mock_llm = MockAntigravityLLM(mode="valid")
+
+    res = node3_compiler_rewriter(db=db, config=config, candidate_id=cand_id, target_device="mps", llm=mock_llm)
+
+    assert res["status"] == "SUCCESS"
+    assert res["deterministic"] is True
+    assert res["tokens_consumed"] == 0
+    assert res["registered_rewrite"] == "unrolled_functional"
+    assert len(mock_llm.history) == 0
+
+    # Sub-case 2: cand_clean_compiler_rewrite is in COMPILER_REGISTRY
+    from un0.compiler.registry import COMPILER_REGISTRY
+    cand_id_2 = db.insert_proposal(
+        candidate_id="cand_test_reg_direct",
+        solver="rk4",
+        noise_model="none",
+    )
+    COMPILER_REGISTRY["cand_test_reg_direct_compiler_rewrite"] = COMPILER_REGISTRY["unrolled_functional"]
+    try:
+        mock_llm_2 = MockAntigravityLLM(mode="valid")
+        res_2 = node3_compiler_rewriter(db=db, config=config, candidate_id=cand_id_2, target_device="mps", llm=mock_llm_2)
+        assert res_2["status"] == "SUCCESS"
+        assert res_2["deterministic"] is True
+        assert res_2["tokens_consumed"] == 0
+        assert res_2["registered_rewrite"] == "cand_test_reg_direct_compiler_rewrite"
+        assert len(mock_llm_2.history) == 0
+    finally:
+        COMPILER_REGISTRY.pop("cand_test_reg_direct_compiler_rewrite", None)
+
+
+def test_node3_compiler_rewriter_force_rewrite_and_steering_bypass(tmp_db_and_config):
+    """Test that force_rewrite=True and steering instructions bypass deterministic reuse."""
+    db, config = tmp_db_and_config
+
+    # Case A: force_rewrite=True bypasses deterministic reuse
+    cand_id_a = db.insert_proposal(
+        candidate_id="cand_test_force_rewrite",
+        solver="rk4",
+        noise_model="none",
+        is_reference=1,
+    )
+    mock_llm_a = MockAntigravityLLM(mode="valid")
+    res_a = node3_compiler_rewriter(
+        db=db, config=config, candidate_id=cand_id_a, target_device="mps", llm=mock_llm_a, force_rewrite=True
+    )
+    assert res_a["status"] == "SUCCESS"
+    assert len(mock_llm_a.history) == 1
+    assert res_a["tokens_consumed"] > 0
+
+    # Case B: steering_instructions parameter bypasses deterministic reuse and is appended to prompt
+    cand_id_b = db.insert_proposal(
+        candidate_id="cand_test_steering_param",
+        solver="rk4",
+        noise_model="none",
+        is_reference=1,
+    )
+    mock_llm_b = MockAntigravityLLM(mode="valid")
+    steering_text = "Use specialized dynamic batch hop unrolling for Inductor"
+    res_b = node3_compiler_rewriter(
+        db=db,
+        config=config,
+        candidate_id=cand_id_b,
+        target_device="mps",
+        llm=mock_llm_b,
+        steering_instructions=steering_text,
+    )
+    assert res_b["status"] == "SUCCESS"
+    assert len(mock_llm_b.history) == 1
+    prompt_b = mock_llm_b.history[-1]["user_message"]
+    assert "## Diagnostic Steering from Node 8" in prompt_b
+    assert steering_text in prompt_b
+
+    # Case C: steering instructions extracted from DB comments
+    cand_id_c = db.insert_proposal(
+        candidate_id="cand_test_steering_comment",
+        solver="rk4",
+        noise_model="none",
+        is_reference=1,
+    )
+    db.add_comment(
+        candidate_id=cand_id_c,
+        phase="phase_1",
+        agent_name="node8_phase1_diagnostic_proposal",
+        comment="[NODE8_STEERING_NODE3] Optimize while loop for memory bandwidth",
+    )
+    mock_llm_c = MockAntigravityLLM(mode="valid")
+    res_c = node3_compiler_rewriter(
+        db=db,
+        config=config,
+        candidate_id=cand_id_c,
+        target_device="mps",
+        llm=mock_llm_c,
+    )
+    assert res_c["status"] == "SUCCESS"
+    assert len(mock_llm_c.history) == 1
+    prompt_c = mock_llm_c.history[-1]["user_message"]
+    assert "## Diagnostic Steering from Node 8" in prompt_c
+    assert "Optimize while loop for memory bandwidth" in prompt_c
+
+
+def test_node3_compiler_rewriter_prompt_template_and_directives(tmp_db_and_config):
+    """Test Recommendation 2: Verify prompt contains concrete code template and execution directives."""
+    db, config = tmp_db_and_config
+
+    cand_id = db.insert_proposal(
+        candidate_id="cand_test_prompt_template",
+        solver="rk4",
+        noise_model="none",
+    )
+    mock_llm = MockAntigravityLLM(mode="valid")
+
+    res = node3_compiler_rewriter(db=db, config=config, candidate_id=cand_id, target_device="mps", llm=mock_llm)
+    assert res["status"] == "SUCCESS"
+    assert len(mock_llm.history) == 1
+
+    prompt = mock_llm.history[-1]["user_message"]
+    # Verify concrete implementation template
+    assert "## Concrete Implementation Template" in prompt
+    assert "@register_compiler_rewrite" in prompt
+    assert "functionalize_kuramoto_model" in prompt
+    assert "cand_test_prompt_template_compiler_rewrite" in prompt
+
+    # Verify directives & execution instructions
+    assert "## Directives & Execution Instructions" in prompt
+    assert "Directly call `un0_register_compiler_rewrite" in prompt
+    assert "Do NOT run long shell commands or background benchmarks" in prompt
+    assert "Do NOT browse unrelated files" in prompt
+
+
 
 # --- Tests for Node 5 Verification & Counter 1 ---
+
 
 
 def test_node5_verify_correctness_counter_1(tmp_db_and_config):

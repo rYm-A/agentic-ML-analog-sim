@@ -23,7 +23,7 @@ from pathlib import Path
 import re
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch import nn
@@ -236,6 +236,7 @@ def node3_phase1_compiler_rewriter(
     target_device: str = "mps",
     llm: Optional[Any] = None,
     force_rewrite: bool = False,
+    steering_instructions: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Node 3 Compiler Rewriter (Phase 1).
 
@@ -254,7 +255,8 @@ def node3_phase1_compiler_rewriter(
         candidate_id: Proposal candidate ID.
         target_device: Hardware execution target ('mps', 'cuda', 'cpu').
         llm: Optional LLM instance or mock.
-        force_rewrite: Kept for API compatibility; Node 3 systematically executes agentic rewrite.
+        force_rewrite: When True, bypasses deterministic reuse and forces agentic rewrite.
+        steering_instructions: Optional diagnostic guidance from Node 8. If None, checks DB comments.
 
     Returns:
         Dict detailing candidate_id, execution status, target device, prepared HOP model,
@@ -355,8 +357,112 @@ def node3_phase1_compiler_rewriter(
             )
             raise RuntimeError(error_msg)
 
-    # 3. Instantiate Chia Tools
+    # 3. Check for diagnostic steering instructions (from parameter or DB comments)
+    if steering_instructions is None:
+        try:
+            comments = db.get_comments(candidate_id)
+            for c in reversed(comments):
+                c_text = c.get("comment", "")
+                if "[NODE8_STEERING_NODE3]" in c_text or "[STEERING_PROMPT_NODE3]" in c_text:
+                    for tag in ("[NODE8_STEERING_NODE3]", "[STEERING_PROMPT_NODE3]"):
+                        if tag in c_text:
+                            part = c_text.split(tag, 1)[1].strip()
+                            steering_instructions = part if part else c_text.strip()
+                            break
+                    if steering_instructions:
+                        break
+        except Exception as exc:
+            logger.debug("Node 3: Could not retrieve steering comments from db: %s", exc)
+
+    # 4. Check for existing registered compiler rewrite (Deterministic Fast Path)
     un0_dir = resolve_un0_root()
+    _sync_compiler_rewrites_from_disk(un0_dir, candidate_id=candidate_id)
+
+    cand_clean = candidate_id.strip().replace(" ", "_")
+    is_reference = bool(proposal.get("is_reference"))
+
+    existing_rewrite_name = None
+    prop_rewrite = proposal.get("compiler_rewrite") or solver_params.get("compiler_rewrite")
+    if prop_rewrite and prop_rewrite in compiler_registry.COMPILER_REGISTRY:
+        existing_rewrite_name = prop_rewrite
+    elif f"{cand_clean}_compiler_rewrite" in compiler_registry.COMPILER_REGISTRY:
+        existing_rewrite_name = f"{cand_clean}_compiler_rewrite"
+    elif cand_clean in compiler_registry.COMPILER_REGISTRY:
+        existing_rewrite_name = cand_clean
+    elif is_reference and "unrolled_functional" in compiler_registry.COMPILER_REGISTRY:
+        existing_rewrite_name = "unrolled_functional"
+    elif is_reference and "hop_while_loop" in compiler_registry.COMPILER_REGISTRY:
+        existing_rewrite_name = "hop_while_loop"
+
+    # Deterministic branch: already registered, no forced rewrite, no steering instructions
+    if existing_rewrite_name and not force_rewrite and not steering_instructions:
+        logger.info(
+            "Node 3: Compiler rewrite '%s' is already registered in Un-0. Using deterministic reuse (null token consumption).",
+            existing_rewrite_name,
+        )
+        rewrite_fn = compiler_registry.get_compiler_rewrite(existing_rewrite_name)
+        try:
+            functional_model = rewrite_fn(
+                model=eager_model,
+                solver_name=solver_name,
+                num_steps=num_steps,
+                dt=dt,
+                integration_time=integration_time,
+                target_device=target_device,
+            )
+        except Exception as exec_err:
+            error_msg = f"Node 3: Execution of deterministic compiler rewrite '{existing_rewrite_name}' failed: {exec_err}"
+            logger.error(error_msg)
+            db.update_execution_status(
+                candidate_id,
+                rewrite_compiler_status="FAILED",
+                error_stage="node3_phase1_compiler_rewriter",
+                error_message=error_msg,
+            )
+            raise RuntimeError(error_msg)
+
+        db.update_execution_status(
+            candidate_id,
+            rewrite_compiler_status="SUCCESS",
+        )
+
+        try:
+            from chia.base.profiling import get_profiler
+            get_profiler().add_info({
+                "node": "node3_phase1_compiler_rewriter",
+                "candidate_id": candidate_id,
+                "deterministic": True,
+                "tokens_consumed": 0,
+                "registered_rewrite": existing_rewrite_name,
+            })
+        except Exception:
+            pass
+
+        return {
+            "candidate_id": candidate_id,
+            "status": "SUCCESS",
+            "target_device": target_device,
+            "prepared_model": functional_model,
+            "eager_model": eager_model,
+            "registered_rewrite": existing_rewrite_name,
+            "tokens_consumed": 0,
+            "token_usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+            "hop_functionalized": True,
+            "deterministic": True,
+            "next_node": "node4_phase1_compilation_runner",
+        }
+
+    # Nondeterministic / Agentic branch: requires agentic rewrite
+    logger.info(
+        "Node 3: Candidate '%s' requires agentic compiler rewrite. Invoking LLM via Chia API.",
+        candidate_id,
+    )
+
+    # 5. Instantiate Chia Tools
     task_opts = {"resources": {"sqlite_db": 0.01}}
 
     result_db_tool = ResultDBTool(name="result_db", db=db, deploy=True, task_options=task_opts)
@@ -378,7 +484,7 @@ def node3_phase1_compiler_rewriter(
             compilation_info_tool.repo_root,
         )
 
-    # 4. Formulate Agentic Prompt
+    # 6. Formulate Agentic Prompt
     tool_descriptions = [
         "1. `result_db`: query proposal details, record comments, and check Pareto front.",
     ]
@@ -392,6 +498,23 @@ def node3_phase1_compiler_rewriter(
         "compiler rewrite into Un-0 using `un0_register_compiler_rewrite`."
     )
     tools_section = "\n".join(tool_descriptions)
+
+    rewrite_identifier = f"{cand_clean}_compiler_rewrite"
+
+    code_template = f'''from un0.compiler.registry import register_compiler_rewrite
+from un0.compiler.functional_hop import functionalize_kuramoto_model
+
+@register_compiler_rewrite("{rewrite_identifier}")
+def {rewrite_identifier}_fn(model, solver_name="{solver_name}", num_steps={num_steps}, dt={dt}, integration_time={integration_time}, target_device="{target_device}", **kwargs):
+    """AOT compilable functional rewrite for {candidate_id}."""
+    return functionalize_kuramoto_model(
+        model=model,
+        solver_name=solver_name,
+        num_steps=num_steps,
+        dt=dt,
+        integration_time=integration_time,
+        use_hop=False,
+    )'''
 
     prompt_text = (
         f"# Phase 1 Compiler Rewriter Agent (Node 3)\n\n"
@@ -409,12 +532,21 @@ def node3_phase1_compiler_rewriter(
         f"- Dynamic Batch Constraint: Batch size B >= 1 with no upper bound.\n\n"
         f"Available Chia Tools:\n"
         f"{tools_section}\n\n"
-        f"- Directives:\n"
+        f"## Concrete Implementation Template\n"
+        f"Use or adapt the following compilable rewrite template:\n"
+        f"```python\n{code_template}\n```\n\n"
+        f"## Directives & Execution Instructions\n"
+        f"- Directly call `un0_register_compiler_rewrite(rewrite_name=\"{rewrite_identifier}\", candidate_id=\"{candidate_id}\", code=...)`.\n"
+        f"- Do NOT run long shell commands or background benchmarks.\n"
+        f"- Do NOT browse unrelated files.\n"
         f"- Do NOT use static Python while-loops that cause graph breaks in TorchDynamo.\n"
         f"- Functionalize using PyTorch Higher-Order Operators (`torch._higher_order_ops.while_loop`) or unrolled functional operators.\n"
-        f"- Register your rewrite via `un0_register_compiler_rewrite` in Un-0.\n"
         f"- In your final response, explain your functionalization design, operator choices, and compilation considerations."
     )
+
+    if steering_instructions:
+        prompt_text += f"\n\n## Diagnostic Steering from Node 8\n{steering_instructions}\n"
+
 
     # 5. Execute Agent Turn via Chia API
     active_llm = _resolve_llm(llm, config)
@@ -507,6 +639,8 @@ def node3_phase1_compiler_rewriter(
         cand_matches = [name for name in registered_compilers if candidate_id in name]
         if cand_matches:
             rewrite_name = cand_matches[-1]
+        elif rewrite_identifier in compiler_registry.COMPILER_REGISTRY:
+            rewrite_name = rewrite_identifier
         else:
             # Check if agent referred to a valid registered rewrite in its response
             extracted = _extract_rewrite_name(raw_result)
