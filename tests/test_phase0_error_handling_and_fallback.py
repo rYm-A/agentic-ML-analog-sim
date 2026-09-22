@@ -201,6 +201,7 @@ def test_phase0_loop_safety_net_prevents_premature_exit(tmp_path):
         "euler_backward": {"steps": [5, 10]},
     }
     config_dict["budget"]["max_node_retries"] = 3
+    config_dict["prevalidate"] = False
 
     cfg_file = tmp_path / "sim_config.yaml"
     with open(cfg_file, "w") as f:

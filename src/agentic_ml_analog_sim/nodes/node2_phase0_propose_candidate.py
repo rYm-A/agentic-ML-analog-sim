@@ -583,7 +583,7 @@ def node2_phase0_propose_candidate(
     prior_rejection_reason: str | None = None,
     iteration: int = 1,
     target_noise_model: Optional[str] = None,
-    prevalidate: bool = False,
+    prevalidate: bool = True,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Agentic node proposing the next simulation candidate (solver + noise + sparsity).
@@ -721,7 +721,8 @@ def node2_phase0_propose_candidate(
     allowed_solvers = _get_allowed_solvers(config)
     auto_corrected = False
 
-    should_prevalidate = prevalidate or bool(_get_val(config, "prevalidate", False))
+    cfg_prev = _get_val(config, "prevalidate")
+    should_prevalidate = prevalidate if cfg_prev is None else bool(cfg_prev)
     if should_prevalidate and allowed_solvers and solver not in allowed_solvers:
         logger.warning(
             "Node 2: Proposed solver '%s' is not in configured solvers %s. Auto-correcting to unexplored valid candidate.",

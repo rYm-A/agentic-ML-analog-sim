@@ -167,6 +167,7 @@ class SimulationConfig(BaseModel):
     counter_limits: CounterLimitsConfig = Field(default_factory=CounterLimitsConfig)
     agent_efforts: AgentEffortsConfig = Field(default_factory=AgentEffortsConfig)
     device: Optional[str] = Field(default="cpu", description="Execution device ('cpu', 'cuda', 'mps')")
+    prevalidate: bool = Field(default=True, description="Enable Node 2 candidate pre-validation against config.solvers")
 
     @model_validator(mode="before")
     @classmethod
