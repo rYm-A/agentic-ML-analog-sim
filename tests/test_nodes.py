@@ -449,7 +449,7 @@ def test_node3_validate_duplicate_proposal(test_db, config):
 
     is_valid, reason, next_cycle = validate_proposal("cand_duplicate", test_db, config, cycle_count=1)
     assert is_valid is False
-    assert reason == "DUPLICATE_PROPOSAL"
+    assert "DUPLICATE_PROPOSAL" in reason
     assert next_cycle == 2
 
     # Verify candidate marked REJECTED

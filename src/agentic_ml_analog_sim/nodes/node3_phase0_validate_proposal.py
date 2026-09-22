@@ -234,7 +234,7 @@ def _validate_solver(solver: str, solver_params: dict[str, Any], config: Any) ->
     if solver not in allowed_solver_names:
         return (
             False,
-            f"INVALID_SOLVER: Solver '{solver}' is not in configured solvers: {sorted(allowed_solver_names)}",
+            f"INVALID_SOLVER: Solver '{solver}' is not allowed. You MUST select one of the allowed solvers from configuration: {sorted(allowed_solver_names)}. Do NOT propose '{solver}' again.",
         )
 
     # Check allowed_steps or steps if specified
@@ -243,10 +243,12 @@ def _validate_solver(solver: str, solver_params: dict[str, Any], config: Any) ->
         allowed_steps = _get_val(spec, "allowed_steps") or _get_val(spec, "steps")
         if allowed_steps is not None and isinstance(allowed_steps, (list, tuple)):
             num_steps = solver_params.get("num_steps")
+            if num_steps is None:
+                num_steps = solver_params.get("steps")
             if num_steps is not None and num_steps not in allowed_steps:
                 return (
                     False,
-                    f"INVALID_SOLVER_STEPS: num_steps={num_steps} is not in allowed_steps={allowed_steps} for solver '{solver}'",
+                    f"INVALID_SOLVER_STEPS: num_steps={num_steps} is invalid for solver '{solver}'. You MUST choose from allowed step counts: {allowed_steps}.",
                 )
 
     return (True, None)
@@ -255,25 +257,25 @@ def _validate_solver(solver: str, solver_params: dict[str, Any], config: Any) ->
 def _validate_noise_model(noise_model: str, noise_params: dict[str, Any], config: Any) -> tuple[bool, str | None]:
     """Verify noise model and parameters against config.noise_models."""
     # "none" is always allowed for baseline / noise-free evaluations
-    allowed_noise_models: set[str] = {"none"}
+    allowed_noise_names: set[str] = {"none"}
     noise_spec_map: dict[str, Any] = {}
 
     configured_noise = _get_val(config, "noise_models", [])
     if isinstance(configured_noise, dict):
         for name, spec in configured_noise.items():
-            allowed_noise_models.add(name)
+            allowed_noise_names.add(name)
             noise_spec_map[name] = spec
     else:
         for n in configured_noise:
             name = _get_val(n, "name") if not isinstance(n, str) else n
             if name:
-                allowed_noise_models.add(name)
+                allowed_noise_names.add(name)
                 noise_spec_map[name] = n
 
-    if noise_model not in allowed_noise_models:
+    if noise_model not in allowed_noise_names:
         return (
             False,
-            f"INVALID_NOISE_MODEL: Noise model '{noise_model}' is not in configured noise models: {sorted(allowed_noise_models)}",
+            f"INVALID_NOISE_MODEL: Noise model '{noise_model}' is not configured. Allowed noise models are: {sorted(allowed_noise_names)}. Select from this list.",
         )
 
     # Check sigma_range if specified
@@ -287,7 +289,7 @@ def _validate_noise_model(noise_model: str, noise_params: dict[str, Any], config
                 if not (min_s <= sigma <= max_s):
                     return (
                         False,
-                        f"INVALID_NOISE_SIGMA: sigma={sigma} is out of bounds {sigma_range} for noise model '{noise_model}'",
+                        f"INVALID_NOISE_SIGMA: sigma={sigma} is out of bounds {sigma_range} for noise model '{noise_model}'. Choose sigma within [{min_s}, {max_s}].",
                     )
 
     return (True, None)
@@ -357,7 +359,7 @@ def _validate_sparsity_config(sparsity_config: dict[str, Any], config: Any) -> t
                     allowed_ratios.add(float(r))
 
     prop_ratio = sparsity_config.get("sparsity_ratio")
-    prop_name = sparsity_config.get("name")
+    prop_name = sparsity_config.get("name") or sparsity_config.get("type")
 
     # If proposal specifies a sparsity ratio, check against allowed ratios
     if prop_ratio is not None and allowed_ratios:
@@ -365,7 +367,19 @@ def _validate_sparsity_config(sparsity_config: dict[str, Any], config: Any) -> t
         if not any(abs(float(prop_ratio) - r) < 1e-5 for r in allowed_ratios):
             return (
                 False,
-                f"INVALID_SPARSITY_RATIO: sparsity_ratio={prop_ratio} is not in allowed ratios: {sorted(allowed_ratios)}",
+                f"INVALID_SPARSITY_RATIO: sparsity_ratio={prop_ratio} is invalid. You MUST select one of the allowed sparsity ratios from configuration: {sorted(allowed_ratios)} (allowed sparsity types: {sorted(allowed_names)}).",
+            )
+
+    if prop_name and allowed_names:
+        clean_name = str(prop_name).lower().replace("sparsityconfig", "").replace("config", "").strip()
+        matched = any(
+            clean_name == name.lower() or name.lower() in clean_name or clean_name in name.lower()
+            for name in allowed_names
+        )
+        if not matched and clean_name not in ("dense", "threshold_pruned", "degree_bounded"):
+            return (
+                False,
+                f"INVALID_SPARSITY_TYPE: Sparsity type '{prop_name}' is not allowed. You MUST select one of the allowed sparsity types from configuration: {sorted(allowed_names)} with ratios: {sorted(allowed_ratios)}.",
             )
 
     return (True, None)
@@ -449,9 +463,22 @@ def _check_duplicate(candidate_id: str, proposal: dict[str, Any], db: Any) -> tu
             and p_solv_params == solver_params
             and p_noise_params == noise_params
         ):
+            p_solv = _get_val(p, "solver") or p_solver
+            p_noise = _get_val(p, "noise_model") or p_noise
+            p_steps = p_solv_params.get("num_steps")
+            spar_type = p_spar.get("type", "dense")
+            if spar_type == "threshold_pruned":
+                spar_desc = f"threshold_pruned(ratio={p_spar.get('sparsity_ratio', 0.0)})"
+            elif spar_type == "degree_bounded":
+                spar_desc = f"degree_bounded(max_degree={p_spar.get('max_degree', 64)})"
+            elif spar_type == "dense":
+                spar_desc = "dense"
+            else:
+                spar_desc = str(p_spar)
+
             return (
                 True,
-                f"DUPLICATE_PROPOSAL: Identical configuration already exists as candidate '{p_id}'",
+                f"DUPLICATE_PROPOSAL: A candidate with solver '{p_solv}', steps={p_steps}, noise='{p_noise}', and sparsity '{spar_desc}' already exists in the database ({p_id}). You MUST propose a distinct parameter combination.",
             )
 
     return (False, None)
@@ -463,10 +490,12 @@ def node3_phase0_validate_proposal(
     db: Any,
     config: Any,
     cycle_count: int,
+    target_noise_model: Optional[str] = None,
 ) -> tuple[bool, str, int]:
     """Programmatically validate the latest candidate proposal in DB.
 
     Performs the following verification checks:
+      0. Verifies proposal matches `target_noise_model` if specified.
       1. Verifies that `solver` is in `config.solvers`.
       2. Verifies that `noise_model` is in `config.noise_models`.
       3. Verifies that `sparsity_config` is allowed by `config.sparsity_configs`.
@@ -484,6 +513,7 @@ def node3_phase0_validate_proposal(
         db: ResultDatabase instance (or compatible database/mock).
         config: SimulationConfig instance (or compatible configuration object).
         cycle_count: Current retry cycle counter (starting at 0 or 1).
+        target_noise_model: Optional target noise model to enforce.
 
     Returns:
         tuple[bool, str, int]: (is_valid, reason, updated_cycle_count)
@@ -501,6 +531,16 @@ def node3_phase0_validate_proposal(
     solver_params = _normalize_dict(proposal.get("solver_params"))
     noise_params = _normalize_dict(proposal.get("noise_params"))
     sparsity_config = _normalize_dict(proposal.get("sparsity_config"))
+
+    # 0. Verify target noise model constraint if specified
+    if target_noise_model is not None and proposal.get("noise_model") != target_noise_model:
+        return _handle_rejection(
+            candidate_id,
+            db,
+            "REJECTED_WRONG_NOISE_MODEL",
+            cycle_count,
+            max_retries,
+        )
 
     # 1. Verify solver
     valid_solver, solver_err = _validate_solver(solver, solver_params, config)
@@ -520,7 +560,7 @@ def node3_phase0_validate_proposal(
     # 4. Check for duplicate proposals
     is_duplicate, dup_err = _check_duplicate(candidate_id, proposal, db)
     if is_duplicate:
-        return _handle_rejection(candidate_id, db, "DUPLICATE_PROPOSAL", cycle_count, max_retries)
+        return _handle_rejection(candidate_id, db, dup_err or "DUPLICATE_PROPOSAL", cycle_count, max_retries)
 
     # 6. Proposal is valid and unique!
     logger.info("Node 3: Proposal %s is valid and unique (cycle=%d)", candidate_id, cycle_count)
@@ -537,9 +577,11 @@ def _handle_rejection(
     """Handle proposal rejection according to cycle count and max retries."""
     _update_proposal_status(db, candidate_id, "REJECTED")
 
+    reason_str = reason.rstrip(".") + "."
+
     if cycle_count >= max_retries:
         comment = (
-            f"Proposal rejected: {reason}. "
+            f"Proposal rejected: {reason_str} "
             f"Terminated execution because cycle_count ({cycle_count}) reached max_node_retries ({max_retries})."
         )
         _add_comment(db, candidate_id, phase="phase_0", agent_name="node3_validate_proposal", comment=comment)
@@ -547,7 +589,7 @@ def _handle_rejection(
         return (False, "MAX_CYCLES_EXCEEDED", cycle_count)
     else:
         next_cycle = cycle_count + 1
-        comment = f"Proposal rejected: {reason}. Retry cycle {next_cycle}/{max_retries}."
+        comment = f"Proposal rejected: {reason_str} Retry cycle {next_cycle}/{max_retries}."
         _add_comment(db, candidate_id, phase="phase_0", agent_name="node3_validate_proposal", comment=comment)
         logger.info("Node 3: %s", comment)
         return (False, reason, next_cycle)
