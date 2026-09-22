@@ -51,7 +51,7 @@ Based on the physical-neural-network-hardware-noise-modeling literature:
 ### Candidate Proposal Guidelines:
 1. QUERY PRIOR PROPOSALS: Call `read_prior_proposals` or `get_candidate_history_summary` to inspect all proposals that have already been made.
 2. AVOID REPEATED PROPOSALS: Never propose a combination of (solver, num_steps, noise_model, sparsity_config) that has already been proposed or evaluated in the database. Node 3 will automatically REJECT duplicate proposals.
-3. If the database has no non-reference proposals, propose a fast baseline (e.g. Euler with 5 or 10 steps, L0 static mismatch sigma=0.01, 40% sparsity).
+3. If the database has no non-reference proposals, propose a fast baseline strictly conforming to the exploration config (e.g. Euler with 5 or 10 steps, L0 static mismatch sigma=0.01, dense connectivity).
 4. If prior evaluations exist, balance exploration of new parameters with exploitation near the Pareto frontier.
 5. If a prior proposal was rejected, avoid repeating the rejected parameter configuration.
 6. Provide a clear rationale explaining expected latency reduction and accuracy impact.
@@ -329,6 +329,115 @@ def _resolve_llm(llm: Any = None, config: Any = None) -> Any:
         return MockAntigravityLLM(mode="valid", model=model, effort=effort, extra_cli_args=extra_cli_args, system_message=NODE2_SYSTEM_INSTRUCTIONS)
 
 
+def _normalize_dict(val: Any) -> dict[str, Any]:
+    """Safely convert dict-like, JSON-encoded, or object values to a standard dict."""
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    if hasattr(val, "model_dump") and callable(val.model_dump):
+        return val.model_dump()
+    if hasattr(val, "__dict__"):
+        return {k: v for k, v in val.__dict__.items() if not k.startswith("_")}
+    return {}
+
+
+def _synthesize_unexplored_candidate(
+    config: Any,
+    db: Any,
+    iteration: int = 1,
+) -> dict[str, Any] | None:
+    """Deterministically find and synthesize the next unexplored valid candidate configuration."""
+    from agentic_ml_analog_sim.nodes.node3_phase0_validate_proposal import _check_duplicate
+
+    solvers_dict = _get_val(config, "solvers", {})
+    noise_models_list = _get_val(config, "noise_models", ["L0_static_mismatch"])
+    sparsity_configs_obj = _get_val(config, "sparsity_configs", {})
+
+    # Extract solver list and steps
+    solver_options: list[tuple[str, int]] = []
+    if isinstance(solvers_dict, Mapping):
+        for s_name, s_cfg in solvers_dict.items():
+            steps = _get_val(s_cfg, "steps", [5, 10, 20])
+            for st in steps:
+                solver_options.append((s_name, int(st)))
+    elif isinstance(solvers_dict, (list, tuple)):
+        for s_entry in solvers_dict:
+            s_name = _get_val(s_entry, "name", "euler")
+            steps = _get_val(s_entry, "steps", [5, 10, 20])
+            for st in steps:
+                solver_options.append((s_name, int(st)))
+    else:
+        solver_options = [("euler", 5), ("euler", 10), ("euler", 20), ("par_ode", 5), ("par_ode", 10)]
+
+    # Extract noise models
+    if not noise_models_list:
+        noise_models_list = ["L0_static_mismatch"]
+
+    # Extract sparsity options
+    sparsity_options: list[tuple[str, dict[str, Any]]] = []
+    # Dense
+    sparsity_options.append(("dense", {"type": "dense", "sparsity_ratio": 0.0}))
+
+    # Degree bounded
+    deg_cfg = _get_val(sparsity_configs_obj, "degree_bounded", {})
+    max_degrees = _get_val(deg_cfg, "max_degree", [])
+    if isinstance(max_degrees, (list, tuple)):
+        for deg in max_degrees:
+            sparsity_options.append((f"deg{deg}", {"type": "degree_bounded", "max_degree": int(deg), "sparsity_ratio": 0.0}))
+
+    # Threshold pruned
+    thresh_cfg = _get_val(sparsity_configs_obj, "threshold_pruned", {})
+    thresh_ratios = _get_val(thresh_cfg, "allowed_sparsity_ratios", [])
+    if isinstance(thresh_ratios, (list, tuple)):
+        for r in thresh_ratios:
+            sparsity_options.append((f"thresh{r}", {"type": "threshold_pruned", "sparsity_ratio": float(r)}))
+
+    # Iterate through all grid combinations to find first unexplored
+    for s_name, st in solver_options:
+        for nm in noise_models_list:
+            for sp_label, sp_dict in sparsity_options:
+                dt_val = round(1.0 / st, 6)
+                test_rec = {
+                    "solver": s_name,
+                    "solver_params": {"num_steps": st, "dt": dt_val},
+                    "noise_model": nm,
+                    "noise_params": {} if nm == "none" else {"sigma": 0.01},
+                    "sparsity_config": sp_dict,
+                }
+                is_dup, _ = _check_duplicate("synth_check", test_rec, db)
+                if not is_dup:
+                    cand_id = f"cand_{s_name}{st}_{nm[:2]}_{sp_label}_{uuid4().hex[:4]}"
+                    reason = f"Synthesized unexplored configuration: {s_name} ({st} steps, dt={dt_val}), {nm}, {sp_label}."
+                    phase_1_prompt = _format_phase_1_prompt(
+                        candidate_id=cand_id,
+                        solver=s_name,
+                        solver_params=test_rec["solver_params"],
+                        noise_model=nm,
+                        noise_params=test_rec["noise_params"],
+                        sparsity_config=sp_dict,
+                        selection_reason=reason,
+                    )
+                    return {
+                        "candidate_id": cand_id,
+                        "iteration": iteration,
+                        "solver": s_name,
+                        "noise_model": nm,
+                        "solver_params": test_rec["solver_params"],
+                        "noise_params": test_rec["noise_params"],
+                        "sparsity_config": sp_dict,
+                        "selection_reason": reason,
+                        "phase_1_prompt": phase_1_prompt,
+                        "status": "PENDING",
+                    }
+    return None
+
+
 @ChiaFunction(resources={"agent_worker": 1, "antigravity_creds": 0.01})
 def node2_phase0_propose_candidate(
     db: Any,
@@ -373,14 +482,62 @@ def node2_phase0_propose_candidate(
         "budget": _get_val(config, "budget", {}),
     }
 
+    # Retrieve all existing proposals from the DB across all statuses to inject into prompt
+    all_proposals = []
+    if hasattr(db, "get_all_proposals") and callable(db.get_all_proposals):
+        try:
+            all_proposals = db.get_all_proposals()
+        except Exception:
+            pass
+    if not all_proposals and hasattr(db, "query_proposals") and callable(db.query_proposals):
+        try:
+            all_proposals = db.query_proposals(limit=200)
+        except Exception:
+            pass
+    if not all_proposals and hasattr(db, "get_proposals") and callable(db.get_proposals):
+        try:
+            all_proposals = db.get_proposals(limit=200)
+        except Exception:
+            pass
+
+    history_markdown = []
+    if all_proposals:
+        history_markdown.append("\n### Prohibited Configurations (Already Explored or In-Flight in DB):")
+        history_markdown.append("| Candidate ID | Status | Solver | Steps | dt | Noise Model | Sparsity |")
+        history_markdown.append("|---|---|---|---|---|---|---|")
+        for p in all_proposals:
+            p_cid = _get_val(p, "candidate_id", "unknown")
+            p_status = _get_val(p, "status", "UNKNOWN")
+            p_solv = _get_val(p, "solver", "euler")
+            p_sparams = _normalize_dict(_get_val(p, "solver_params"))
+            p_steps = p_sparams.get("num_steps", "?")
+            p_dt = p_sparams.get("dt", "?")
+            p_noise = _get_val(p, "noise_model", "none")
+            p_spar = _normalize_dict(_get_val(p, "sparsity_config"))
+            spar_desc = p_spar.get("type", "")
+            if p_spar.get("max_degree"):
+                spar_desc = f"deg{p_spar.get('max_degree')}"
+            elif "sparsity_ratio" in p_spar:
+                spar_desc = f"ratio {p_spar.get('sparsity_ratio')}"
+            history_markdown.append(f"| {p_cid} | {p_status} | {p_solv} | {p_steps} | {p_dt} | {p_noise} | {spar_desc} |")
+        history_markdown.append(
+            "CRITICAL CONSTRAINT: You are strictly forbidden from proposing any configuration that matches "
+            "the (solver, steps, dt, noise, sparsity) tuples listed above. Proposing a duplicate will cause automatic rejection."
+        )
+
     user_prompt_lines = [
         "Please propose the next simulation design candidate for Un-0 analog ML accelerator.",
         f"Exploration configuration: {json.dumps(config_summary, default=str)}",
         f"Current iteration: {iteration}",
-        "IMPORTANT: You have read-only access to the database via the result_db_read MCP tool.",
-        "Use read_prior_proposals or get_candidate_history_summary to inspect all proposals already made in the database.",
-        "DO NOT propose a combination of solver, step count, noise model, and sparsity configuration that already exists.",
     ]
+    if history_markdown:
+        user_prompt_lines.extend(history_markdown)
+    else:
+        user_prompt_lines.extend([
+            "IMPORTANT: You have read-only access to the database via the result_db_read MCP tool.",
+            "Use read_prior_proposals or get_candidate_history_summary to inspect all proposals already made in the database.",
+            "DO NOT propose a combination of solver, step count, noise model, and sparsity configuration that already exists.",
+        ])
 
     if prior_rejection_reason:
         user_prompt_lines.append(
@@ -409,7 +566,7 @@ def node2_phase0_propose_candidate(
     solver_params = (
         proposal_data.get("solver_params")
         if proposal_data.get("solver_params") is not None
-        else {"num_steps": num_steps, "dt": 0.2}
+        else {"num_steps": num_steps, "dt": round(1.0 / num_steps, 6)}
     )
     noise_params = (
         proposal_data.get("noise_params")
@@ -419,7 +576,7 @@ def node2_phase0_propose_candidate(
     sparsity_config = (
         proposal_data.get("sparsity_config")
         if proposal_data.get("sparsity_config") is not None
-        else {"sparsity_ratio": 0.4}
+        else {"type": "dense", "sparsity_ratio": 0.0}
     )
     selection_reason = proposal_data.get(
         "selection_reason",
@@ -437,7 +594,7 @@ def node2_phase0_propose_candidate(
         selection_reason=selection_reason,
     )
 
-    # Store candidate in DB as PENDING
+    # Construct preliminary candidate record
     candidate_record = {
         "candidate_id": candidate_id,
         "iteration": iteration,
@@ -450,6 +607,8 @@ def node2_phase0_propose_candidate(
         "phase_1_prompt": phase_1_prompt,
         "status": "PENDING",
     }
+
+    # Store candidate in DB as PENDING
     _insert_pending_candidate(db, candidate_record)
 
     # Extract token metrics and record to database and profiler

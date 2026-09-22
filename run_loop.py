@@ -385,7 +385,7 @@ def execute_loop(
             # -----------------------------------------------------------------
             # STEP 1: Phase 0 (Exploration, Reference Check, Candidate Proposal)
             # -----------------------------------------------------------------
-            p0_res = run_phase_0(config_path=config_path, db_path=db_path)
+            p0_res = run_phase_0(config_path=config_path, db_path=db_path, iteration=iteration)
             logger.info(
                 "Phase 0 action=%s, candidate_id=%s, details=%s",
                 p0_res.action,

@@ -29,14 +29,30 @@ worker_start_ray_commands:
 
 gcp_nodes:
   project: ${GCP_PROJECT}
-  zone: "us-central1-a"
+  zone: ${GCP_ZONE}
   sim_gpu_pool:
     machine_type: "g2-standard-8"
     count: 1
     disk_size_gb: 100
     spot: false
-    ssh_user: "chia"
-    ssh_private_key: "${HOME}/.ssh/id_ed25519"
+    ssh_user: ${GCP_SSH_USER}
+    ssh_private_key: ${GCP_SSH_PRIVATE_KEY}
+    setup_commands:
+      - |
+        python3 -c "
+        import subprocess, sys
+        out = subprocess.check_output(['nvidia-smi', '-q'], text=True)
+        for line in out.splitlines():
+            if 'CUDA Version' in line:
+                v = float(line.split(':')[1].strip())
+                if v >= 13.0:
+                    print(f'CUDA driver verified: {v}')
+                    sys.exit(0)
+                else:
+                    print(f'FATAL: CUDA Version {v} is lower than required 13.0', file=sys.stderr)
+                    sys.exit(1)
+        sys.exit('FATAL: Could not detect CUDA version from nvidia-smi')
+        "
 
 available_node_types:
   local_orchestrator:

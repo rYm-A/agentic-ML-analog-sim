@@ -68,6 +68,48 @@ def node0_gate(
         logger.info("Node 0: Entering Phase 1 from Phase 0 for candidate '%s'. Resetting all 4 counters to 0.", proposal_id)
         db.reset_counters(proposal_id)
 
+        # Transition active candidate to EVALUATING state
+        if hasattr(db, "mark_proposal_status") and callable(db.mark_proposal_status):
+            try:
+                db.mark_proposal_status(proposal_id, status="EVALUATING", is_active_evaluation=1)
+            except Exception as e:
+                logger.debug("Node 0: Could not set status EVALUATING for %s: %s", proposal_id, e)
+
+        # Pre-flight hygiene sweep: Clean up any lingering PENDING proposals from prior sessions
+        try:
+            pending_proposals = db.get_proposals(status="PENDING") if hasattr(db, "get_proposals") else []
+            for p in pending_proposals:
+                cid = p.get("candidate_id") if isinstance(p, dict) else getattr(p, "candidate_id", None)
+                if cid and cid != proposal_id:
+                    c1 = p.get("counter_1_compilation", 0) if isinstance(p, dict) else getattr(p, "counter_1_compilation", 0)
+                    c2 = p.get("counter_2_rewrite", 0) if isinstance(p, dict) else getattr(p, "counter_2_rewrite", 0)
+                    c4 = p.get("counter_4_debug_loop", 0) if isinstance(p, dict) else getattr(p, "counter_4_debug_loop", 0)
+                    if c1 > 3 or c2 > 3 or c4 > 5:
+                        logger.warning("Node 0: Cleaning lingering zombie candidate '%s' with exceeded counters (c1=%s, c2=%s). Transitioning to FAILED.", cid, c1, c2)
+                        node9_phase1_error_handler(
+                            db=db,
+                            config=config,
+                            candidate_id=cid,
+                            counter_name="counter_1_compilation" if c1 > 3 else "counter_2_rewrite",
+                            current_count=max(c1, c2),
+                            max_count=3,
+                            execution_mode="cleanup",
+                            error_stage=(p.get("error_stage") if isinstance(p, dict) else getattr(p, "error_stage", None)) or "compilation",
+                            details="Pre-flight hygiene transition of unfinalized counter overflow.",
+                        )
+                    else:
+                        logger.warning("Node 0: Cleaning lingering candidate '%s' abandoned in previous run. Transitioning to FAILED.", cid)
+                        if hasattr(db, "mark_proposal_status"):
+                            db.mark_proposal_status(
+                                cid,
+                                status="FAILED",
+                                error_stage="interrupted_run",
+                                error_message="Candidate abandoned mid-run during an interrupted prior session.",
+                                is_active_evaluation=0,
+                            )
+        except Exception as sweep_err:
+            logger.debug("Node 0: Pre-flight hygiene sweep encountered non-critical error: %s", sweep_err)
+
     # Mode 1: Reference Profiling Mode (Triggered by Phase 0 Node 3 / reference design)
     if is_reference or is_from_phase_0:
         mode = "reference" if is_reference else "standard"

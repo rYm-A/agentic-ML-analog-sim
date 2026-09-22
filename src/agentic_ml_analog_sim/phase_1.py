@@ -268,6 +268,17 @@ def run_phase_1(
 
     cycle_count = 0
     active_candidate_id = candidate_id
+    execution_mode = "standard"
+    counter_limits = getattr(config, "counter_limits", None)
+    max_counter_1 = getattr(counter_limits, "max_counter_1_compilation", 3) if counter_limits else 3
+    max_counter_2 = getattr(counter_limits, "max_counter_2_rewrite", 3) if counter_limits else 3
+
+    # Transition active candidate to EVALUATING state upon entering Phase 1
+    if hasattr(db, "mark_proposal_status") and callable(db.mark_proposal_status):
+        try:
+            db.mark_proposal_status(active_candidate_id, status="EVALUATING", is_active_evaluation=1)
+        except Exception as e:
+            logger.debug("run_phase_1: Could not transition candidate %s to EVALUATING: %s", active_candidate_id, e)
 
     # Every time we enter Phase 1 coming from Phase 0, all four counters must be reset to 0
     if current_trigger in ("phase_0", "phase0_node3") or previous_node_id.startswith("phase_0") or previous_node_id.startswith("phase0"):
@@ -295,6 +306,17 @@ def run_phase_1(
         gate_status = gate_res.get("status")
         if gate_action == "TERMINATED_MAX_CYCLES" or gate_status == "TERMINATED_MAX_CYCLES":
             logger.error("Node 0 gate terminated execution: %s", gate_res.get("reason", gate_res.get("details")))
+            node9_res = node9_phase1_error_handler(
+                db=db,
+                config=config,
+                candidate_id=active_candidate_id,
+                counter_name=gate_res.get("counter_name", "counter_3_debug_gate"),
+                current_count=gate_res.get("current_count", 3),
+                max_count=gate_res.get("max_count", 2),
+                execution_mode=gate_res.get("execution_mode", gate_res.get("mode", "debug")),
+                error_stage="node0_phase1_gate",
+                details=str(gate_res.get("details") or gate_res.get("reason")),
+            )
             return Phase1Result(
                 action="TERMINATED_MAX_CYCLES",
                 candidate_id=active_candidate_id,
@@ -302,7 +324,7 @@ def run_phase_1(
                 execution_mode=gate_res.get("execution_mode", gate_res.get("mode", "UNKNOWN")),
                 metrics={},
                 cycle_count=cycle_count,
-                details=f"Node 0 gate terminated: {gate_res.get('details') or gate_res.get('reason') or gate_res.get('counter_name')}",
+                details=f"Node 0 gate terminated: {gate_res.get('details') or gate_res.get('reason') or gate_res.get('counter_name')}. Snapshot: {node9_res.get('db_snapshot') if isinstance(node9_res, dict) else 'none'}",
             )
 
         execution_mode = gate_res["mode"]
@@ -508,6 +530,17 @@ def run_phase_1(
 
         if verify_res.get("status") == "TERMINATED_MAX_CYCLES":
             logger.error("Node 5 terminated loop due to cycle limits for '%s'", active_candidate_id)
+            node9_res = node9_phase1_error_handler(
+                db=db,
+                config=config,
+                candidate_id=active_candidate_id,
+                counter_name=verify_res.get("counter_name", "counter_1_compilation"),
+                current_count=verify_res.get("counter_1", verify_res.get("current_count", max_counter_1 + 1)),
+                max_count=verify_res.get("max_count", max_counter_1),
+                execution_mode=verify_res.get("execution_mode", execution_mode),
+                error_stage=verify_res.get("error_stage", "compilation"),
+                details=str(verify_res.get("error_logs") or verify_res.get("details") or compilation_error or "Lowering exception in compilation"),
+            )
             return Phase1Result(
                 action="TERMINATED_MAX_CYCLES",
                 candidate_id=active_candidate_id,
@@ -515,7 +548,7 @@ def run_phase_1(
                 execution_mode=verify_res.get("execution_mode", execution_mode),
                 metrics={},
                 cycle_count=cycle_count,
-                details=f"Node 5 retry limit exceeded: {verify_res.get('counter_name')} ({verify_res.get('current_count')}/{verify_res.get('max_count')})",
+                details=f"Node 5 retry limit exceeded: {verify_res.get('counter_name')} ({verify_res.get('current_count', verify_res.get('counter_1'))}/{verify_res.get('max_count', max_counter_1)}). Snapshot: {node9_res.get('db_snapshot') if isinstance(node9_res, dict) else 'none'}",
             )
 
         if verify_res.get("status") == "FAILED":
@@ -625,6 +658,19 @@ def run_phase_1(
             )
         elif eval_status == "TERMINATED_MAX_CYCLES" or (eval_status == "FAILED" and eval_res.get("reason") in ("counter_2_rewrite_exceeded", "counter_4_debug_loop_exceeded")):
             logger.error("Node 7 terminated loop due to cycle limits for '%s'", active_candidate_id)
+            c_name = eval_res.get("counter_name", "counter_2_rewrite" if eval_res.get("reason") == "counter_2_rewrite_exceeded" else "counter_4_debug_loop")
+            c_count = eval_res.get("current_count", eval_res.get("counter_2", 4))
+            node9_res = node9_phase1_error_handler(
+                db=db,
+                config=config,
+                candidate_id=active_candidate_id,
+                counter_name=c_name,
+                current_count=c_count,
+                max_count=3,
+                execution_mode=eval_res.get("execution_mode", execution_mode),
+                error_stage="node7_phase1_evaluation_gate",
+                details=str(eval_res.get("details") or eval_res.get("reason")),
+            )
             return Phase1Result(
                 action="TERMINATED_MAX_CYCLES",
                 candidate_id=active_candidate_id,
@@ -632,7 +678,7 @@ def run_phase_1(
                 execution_mode=eval_res.get("execution_mode", execution_mode),
                 metrics=metrics,
                 cycle_count=cycle_count,
-                details=f"Node 7 retry limit exceeded: {eval_res.get('counter_name', eval_res.get('reason', ''))}",
+                details=f"Node 7 retry limit exceeded: {eval_res.get('counter_name', eval_res.get('reason', ''))}. Snapshot: {node9_res.get('db_snapshot') if isinstance(node9_res, dict) else 'none'}",
             )
         else:
             # Out of tolerance -> Route to Node 8 Diagnostic Agent

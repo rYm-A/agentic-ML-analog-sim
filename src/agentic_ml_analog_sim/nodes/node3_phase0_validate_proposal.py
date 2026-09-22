@@ -95,6 +95,14 @@ def _get_proposal_record(db: Any, candidate_id: str) -> dict[str, Any] | None:
 
 def _get_all_proposals(db: Any) -> list[dict[str, Any]]:
     """Retrieve all proposal records from DB for duplicate checking."""
+    if hasattr(db, "get_all_proposals") and callable(db.get_all_proposals):
+        try:
+            res = db.get_all_proposals()
+            if res:
+                return [dict(p) if isinstance(p, Mapping) else p for p in res]
+        except Exception as exc:
+            logger.debug("db.get_all_proposals() in _get_all_proposals raised: %s", exc)
+
     if hasattr(db, "query_proposals") and callable(db.query_proposals):
         try:
             res = db.query_proposals()
@@ -363,15 +371,62 @@ def _validate_sparsity_config(sparsity_config: dict[str, Any], config: Any) -> t
     return (True, None)
 
 
+def _canonicalize_sparsity_config(sc: Any) -> dict[str, Any]:
+    """Canonicalize sparsity configuration into a standardized semantic dictionary."""
+    d = _normalize_dict(sc)
+    s_type = str(d.get("type", d.get("method", ""))).lower()
+    max_deg = d.get("max_degree")
+    ratio = d.get("sparsity_ratio")
+
+    # 1. Degree-bounded coupling
+    if max_deg is not None or "degree" in s_type:
+        return {
+            "type": "degree_bounded",
+            "max_degree": int(max_deg) if max_deg is not None else 64,
+            "sparsity_ratio": 0.0,
+        }
+
+    # 2. Dense coupling
+    ratio_val = float(ratio) if ratio is not None else 0.0
+    if abs(ratio_val) < 1e-6 or "dense" in s_type:
+        return {"type": "dense", "sparsity_ratio": 0.0}
+
+    # 3. Threshold pruned
+    return {"type": "threshold_pruned", "sparsity_ratio": round(ratio_val, 4)}
+
+
+def _canonicalize_solver_params(solver: str, params: Any) -> dict[str, Any]:
+    """Canonicalize solver parameters into standardized steps and dt."""
+    d = _normalize_dict(params)
+    num_steps = d.get("num_steps") or d.get("steps") or 10
+    num_steps = int(num_steps)
+    dt = d.get("dt")
+    if dt is None:
+        t = float(d.get("integration_time", 1.0))
+        dt = round(t / num_steps, 6)
+    else:
+        dt = round(float(dt), 6)
+    return {"num_steps": num_steps, "dt": dt}
+
+
+def _canonicalize_noise_params(noise_model: str, params: Any) -> dict[str, Any]:
+    """Canonicalize noise model parameters."""
+    if str(noise_model).strip().lower() in ("none", "null", ""):
+        return {}
+    d = _normalize_dict(params)
+    sigma = d.get("sigma", 0.01)
+    return {"sigma": round(float(sigma), 6)}
+
+
 def _check_duplicate(candidate_id: str, proposal: dict[str, Any], db: Any) -> tuple[bool, str | None]:
-    """Check if an identical proposal was previously evaluated or pending in DB."""
+    """Check if an identical proposal was previously evaluated or pending in DB using semantic equivalence."""
     all_proposals = _get_all_proposals(db)
 
-    solver = proposal.get("solver")
-    noise_model = proposal.get("noise_model")
-    solver_params = _normalize_dict(proposal.get("solver_params"))
-    noise_params = _normalize_dict(proposal.get("noise_params"))
-    sparsity_config = _normalize_dict(proposal.get("sparsity_config"))
+    solver = str(proposal.get("solver", "")).strip().lower()
+    noise_model = str(proposal.get("noise_model", "")).strip().lower()
+    solver_params = _canonicalize_solver_params(solver, proposal.get("solver_params"))
+    noise_params = _canonicalize_noise_params(noise_model, proposal.get("noise_params"))
+    sparsity_config = _canonicalize_sparsity_config(proposal.get("sparsity_config"))
 
     for p in all_proposals:
         p_id = _get_val(p, "candidate_id")
@@ -381,11 +436,11 @@ def _check_duplicate(candidate_id: str, proposal: dict[str, Any], db: Any) -> tu
         if p_id == candidate_id or p_status == "REJECTED":
             continue
 
-        p_solver = _get_val(p, "solver")
-        p_noise = _get_val(p, "noise_model")
-        p_spar = _normalize_dict(_get_val(p, "sparsity_config"))
-        p_solv_params = _normalize_dict(_get_val(p, "solver_params"))
-        p_noise_params = _normalize_dict(_get_val(p, "noise_params"))
+        p_solver = str(_get_val(p, "solver", "")).strip().lower()
+        p_noise = str(_get_val(p, "noise_model", "")).strip().lower()
+        p_spar = _canonicalize_sparsity_config(_get_val(p, "sparsity_config"))
+        p_solv_params = _canonicalize_solver_params(p_solver, _get_val(p, "solver_params"))
+        p_noise_params = _canonicalize_noise_params(p_noise, _get_val(p, "noise_params"))
 
         if (
             p_solver == solver
@@ -501,4 +556,14 @@ def _handle_rejection(
 # Backward compatibility aliases
 validate_proposal = node3_phase0_validate_proposal
 node3_validate_proposal = node3_phase0_validate_proposal
+
+__all__ = [
+    "node3_phase0_validate_proposal",
+    "validate_proposal",
+    "node3_validate_proposal",
+    "_canonicalize_sparsity_config",
+    "_canonicalize_solver_params",
+    "_canonicalize_noise_params",
+    "_check_duplicate",
+]
 

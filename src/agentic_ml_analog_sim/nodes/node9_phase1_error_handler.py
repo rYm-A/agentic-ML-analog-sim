@@ -85,6 +85,7 @@ def node9_phase1_error_handler(
                 status="FAILED",
                 error_stage=error_stage,
                 error_message=error_msg,
+                is_active_evaluation=0,
             )
         elif hasattr(db, "update_execution_status") and callable(db.update_execution_status):
             db.update_execution_status(

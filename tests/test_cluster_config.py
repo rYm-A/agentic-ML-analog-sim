@@ -54,6 +54,9 @@ def test_cluster_bare_yaml_loads():
 def test_cluster_cloud_yaml_loads(monkeypatch):
     """Verify loading cluster.cloud.yaml using chia.cluster.config.load_config."""
     monkeypatch.setenv("GCP_PROJECT", "test-project-123")
+    monkeypatch.setenv("GCP_ZONE", "us-central1-a")
+    monkeypatch.setenv("GCP_SSH_USER", "chia")
+    monkeypatch.setenv("GCP_SSH_PRIVATE_KEY", "/tmp/id_ed25519")
     monkeypatch.setenv("TS_AUTHKEY", "tskey-auth-test-key")
 
     cfg = load_config("cluster.cloud.yaml")
@@ -77,6 +80,9 @@ def test_cluster_cloud_yaml_loads(monkeypatch):
 def test_cluster_cloud_yaml_parses(monkeypatch):
     """Verify Phase 2 cloud burst cluster.cloud.yaml parses via raw loader and gcp parser."""
     monkeypatch.setenv("GCP_PROJECT", "test-project-123")
+    monkeypatch.setenv("GCP_ZONE", "us-central1-a")
+    monkeypatch.setenv("GCP_SSH_USER", "chia")
+    monkeypatch.setenv("GCP_SSH_PRIVATE_KEY", "/tmp/id_ed25519")
     monkeypatch.setenv("TS_AUTHKEY", "tskey-auth-test-key")
 
     raw = load_raw_config("cluster.cloud.yaml")

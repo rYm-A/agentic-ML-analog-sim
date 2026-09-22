@@ -96,6 +96,7 @@ def run_phase_0(
     db_path: Union[str, Path],
     llm: Any = None,
     un0_dir: Union[str, Path, None] = None,
+    iteration: int = 1,
 ) -> Phase0Result:
     """Execute the end-to-end Phase 0 pipeline.
 
@@ -214,7 +215,7 @@ def run_phase_0(
                 llm=llm,
                 tools=tools if tools else None,
                 prior_rejection_reason=prior_rejection_reason,
-                iteration=cycle_count,
+                iteration=iteration,
             )
 
             candidate_id = proposal_dict["candidate_id"]
