@@ -36,21 +36,30 @@ logger = logging.getLogger("agentic_ml_analog_sim.nodes.node5_phase1_verify_corr
 @contextmanager
 def _freeze_noise(models: list[Any]):
     """Temporarily disables stochastic noise parameters (e.g., sigma=0.0) during compilation verification."""
-    saved: list[tuple[Any, Any]] = []
+    saved: list[tuple[Any, str, Any]] = []
     seen_ids: set[int] = set()
     for m in models:
         if m is not None and hasattr(m, "modules"):
             for mod in m.modules():
                 mod_id = id(mod)
-                if mod_id not in seen_ids and hasattr(mod, "sigma") and isinstance(getattr(mod, "sigma"), (int, float)):
-                    seen_ids.add(mod_id)
-                    saved.append((mod, getattr(mod, "sigma")))
-                    setattr(mod, "sigma", 0.0)
+                if mod_id not in seen_ids and hasattr(mod, "sigma"):
+                    sig = getattr(mod, "sigma")
+                    if isinstance(sig, (int, float)):
+                        seen_ids.add(mod_id)
+                        saved.append((mod, "attr", sig))
+                        setattr(mod, "sigma", 0.0)
+                    elif isinstance(sig, torch.Tensor):
+                        seen_ids.add(mod_id)
+                        saved.append((mod, "tensor", sig.clone()))
+                        sig.fill_(0.0)
     try:
         yield
     finally:
-        for mod, orig_val in saved:
-            setattr(mod, "sigma", orig_val)
+        for mod, mode, orig_val in saved:
+            if mode == "attr":
+                setattr(mod, "sigma", orig_val)
+            elif mode == "tensor":
+                getattr(mod, "sigma").copy_(orig_val)
 
 
 def _resolve_target_device(requested_device: str = "mps") -> str:

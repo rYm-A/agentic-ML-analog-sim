@@ -237,7 +237,7 @@ class MockAntigravityLLM(AntigravityLLM):
             return None
         return self.history[-1]["user_message"]
 
-    def _get_next_proposal_dict(self, tool_list: Optional[List[Any]] = None) -> dict[str, Any]:
+    def _get_next_proposal_dict(self, tool_list: Optional[List[Any]] = None, target_noise: Optional[str] = None) -> dict[str, Any]:
         """Resolve proposal dict based on queue or active mode."""
         if self._responses:
             next_item = self._responses.pop(0)
@@ -270,6 +270,8 @@ class MockAntigravityLLM(AntigravityLLM):
             if db is not None and hasattr(db, "is_duplicate_proposal"):
                 for candidate in VALID_CANDIDATE_POOL:
                     cand_copy = dict(candidate)
+                    if target_noise:
+                        cand_copy["noise_model"] = target_noise
                     is_dup = db.is_duplicate_proposal(
                         solver=cand_copy.get("solver", ""),
                         noise_model=cand_copy.get("noise_model", ""),
@@ -278,11 +280,14 @@ class MockAntigravityLLM(AntigravityLLM):
                         sparsity_config=cand_copy.get("sparsity_config", {}),
                     )
                     if not is_dup:
+                        cand_copy["candidate_id"] = f"{cand_copy['candidate_id']}_{uuid4().hex[:6]}"
                         return cand_copy
 
             pool_idx = max(0, self.call_count - 1) % len(VALID_CANDIDATE_POOL)
             proposal = dict(VALID_CANDIDATE_POOL[pool_idx])
-            proposal["candidate_id"] = f"{proposal['candidate_id']}_{self.call_count:03d}"
+            if target_noise:
+                proposal["noise_model"] = target_noise
+            proposal["candidate_id"] = f"{proposal['candidate_id']}_{uuid4().hex[:6]}"
             return proposal
         elif self.mode == "duplicate":
             return dict(self.duplicate_proposal)
@@ -521,7 +526,12 @@ class {noise_name.replace("_", "").capitalize()}Noise(nn.Module):
                 }
             result_json = json.dumps(proposal_dict, indent=2)
         else:
-            proposal_dict = self._get_next_proposal_dict(tool_list)
+            import re
+            m_target_noise = re.search(r"noise_model to ['\"]([^'\"]+)['\"]", user_message, re.IGNORECASE)
+            target_noise = m_target_noise.group(1) if (m_target_noise and self.mode not in ("invalid_noise", "invalid_proposal", "duplicate")) else None
+            proposal_dict = self._get_next_proposal_dict(tool_list, target_noise=target_noise)
+            if target_noise and self.mode not in ("invalid_noise", "invalid_proposal", "duplicate"):
+                proposal_dict["noise_model"] = target_noise
             result_json = json.dumps(proposal_dict, indent=2)
 
         usage_data = {

@@ -1,5 +1,5 @@
 experiment_name: "first_run_trial_un0_analog_acceleration"
-device: cpu
+device: cuda
 
 reference_design:
   name: "imagenet64/n6656"
@@ -7,20 +7,26 @@ reference_design:
   n_oscillators: 6656
   n_conditional_oscillators: 8
   solver: "rk4"
-  num_steps: 25
+  num_steps: 45
   integration_time: 1.0
   precision: "fp32"
   noise_model: "none"
   sparsity_ratio: 0.0
 
 solvers:
-  euler:
-    steps: [1, 2, 5, 10]
+  rk4:
+    steps: [5, 15, 25, 35, 45]
+  euler_backward:
+    steps: [5, 15, 25, 35, 45]
+  parareal:
+    steps: [5, 15, 25, 35, 45]
   par_ode:
-    steps: [10, 25]
+    steps: [5, 15, 25, 35, 45]
 
 noise_models:
   - "L0_static_mismatch"
+  - "L1_stochastic_parameter_noise"
+  - "L2_functional_interface"
 
 sparsity_configs:
   dense:
@@ -40,33 +46,33 @@ tolerances:
     max_fid_degradation: 2.0
 
 budget:
-  max_experiments: 10
-  max_iterations: 15
+  max_experiments: 4
+  max_iterations: 20
   max_node_retries: 3
   timeout_seconds_per_eval: 2100
 
 counter_limits:
-  max_counter_1_compilation: 3
+  max_counter_1_compilation: 5
   max_counter_2_rewrite: 3
   max_counter_3_debug_gate: 3
   max_counter_4_debug_loop: 5
 
 agent_efforts:
   node2_phase0_propose_candidate:
-    model: "gemini-2.5-pro"
+    model: "gemini-3.8-flash"
     effort: "medium"
   node1_phase1_solver_rewriter:
-    model: "gemini-2.5-pro"
+    model: "gemini-3.8-flash"
     effort: "high"
   node2_phase1_noise_rewriter:
-    model: "gemini-2.5-pro"
+    model: "gemini-3.8-flash"
     effort: "high"
   node3_phase1_compiler_rewriter:
-    model: "gemini-2.5-pro"
+    model: "gemini-3.8-flash"
     effort: "high"
   node8_phase1_diagnostic_proposal:
-    model: "gemini-2.5-flash"
+    model: "gemini-3.8-flash"
     effort: "medium"
   node2_phase2_generate_final_report:
-    model: "gemini-2.5-flash"
+    model: "gemini-3.8-flash"
     effort: "medium"

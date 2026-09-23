@@ -700,20 +700,109 @@ class ResultDatabase:
         finally:
             conn.close()
 
-    def get_completed_experiments_count(self) -> int:
-        """Count evaluated candidate experiments (completed or failed, non-reference)."""
+    def get_completed_experiments_count(self, noise_model: Optional[str] = None) -> int:
+        """Count evaluated candidate experiments (completed or failed, non-reference).
+
+        Args:
+            noise_model: Optional noise model name to filter by.
+        """
         conn = self._get_connection()
         try:
-            cur = conn.execute(
-                """
-                SELECT COUNT(*) FROM proposals
-                WHERE is_reference = 0
-                  AND status IN ('COMPLETED', 'FAILED')
-                """
-            )
+            if noise_model is not None:
+                cur = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM proposals
+                    WHERE is_reference = 0
+                      AND status IN ('COMPLETED', 'FAILED')
+                      AND noise_model = ?
+                    """,
+                    (noise_model,),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM proposals
+                    WHERE is_reference = 0
+                      AND status IN ('COMPLETED', 'FAILED')
+                    """
+                )
             return cur.fetchone()[0]
         finally:
             conn.close()
+
+    def get_proposal_counts_by_noise_model(
+        self, exclude_reference: bool = True
+    ) -> Dict[str, Dict[str, int]]:
+        """Count proposals grouped by noise model and execution status.
+
+        Args:
+            exclude_reference: If True, excludes reference proposals (is_reference = 1).
+
+        Returns:
+            Dict mapping each noise model name to counts:
+            {'total': int, 'completed': int, 'failed': int, 'pending': int, 'rejected': int}
+        """
+        conn = self._get_connection()
+        try:
+            where_clause = "WHERE is_reference = 0" if exclude_reference else ""
+            cur = conn.execute(
+                f"""
+                SELECT noise_model, status, COUNT(*) as cnt
+                FROM proposals
+                {where_clause}
+                GROUP BY noise_model, status
+                """
+            )
+            rows = cur.fetchall()
+            counts_by_model: Dict[str, Dict[str, int]] = {}
+            for row in rows:
+                nm = row["noise_model"]
+                status = str(row["status"]).upper()
+                cnt = int(row["cnt"])
+                if nm not in counts_by_model:
+                    counts_by_model[nm] = {
+                        "total": 0,
+                        "completed": 0,
+                        "failed": 0,
+                        "pending": 0,
+                        "rejected": 0,
+                    }
+                counts_by_model[nm]["total"] += cnt
+                if status == "COMPLETED":
+                    counts_by_model[nm]["completed"] += cnt
+                elif status == "FAILED":
+                    counts_by_model[nm]["failed"] += cnt
+                elif status in ("PENDING", "EVALUATING"):
+                    counts_by_model[nm]["pending"] += cnt
+                elif status in ("REJECTED", "QUARANTINED"):
+                    counts_by_model[nm]["rejected"] += cnt
+            return counts_by_model
+        finally:
+            conn.close()
+
+    def get_next_unfulfilled_noise_model(
+        self, noise_models: list[str], max_per_noise: int
+    ) -> Optional[str]:
+        """Find the first noise model whose candidate attempt count is less than max_per_noise.
+
+        An attempt is an executed experiment (status COMPLETED or FAILED, non-reference).
+
+        Args:
+            noise_models: Ordered list of noise model names to check.
+            max_per_noise: Maximum number of experiment attempts allowed per noise model.
+
+        Returns:
+            The first noise model in noise_models with attempt count < max_per_noise,
+            or None if all noise models have satisfied their quota.
+        """
+        counts = self.get_proposal_counts_by_noise_model(exclude_reference=True)
+        for nm in noise_models:
+            nm_counts = counts.get(nm, {})
+            attempts = nm_counts.get("completed", 0) + nm_counts.get("failed", 0)
+            if attempts < max_per_noise:
+                return nm
+        return None
+
 
     def update_execution_status(
         self,

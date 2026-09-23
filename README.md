@@ -88,9 +88,10 @@ The autonomous loop is organized into three synchronized phases governed by SQLi
 ```
 
 ### Phase 0: Candidate Exploration & Gatekeeping
+- **Deterministic Noise Quota Scheduling**: Programmatically schedules target noise models across `config.noise_models`, ensuring that `budget.max_experiments` proposals are executed for EACH configured noise model (regardless of whether individual candidate compilations/simulations succeed or fail). When all noise model quotas are satisfied, Phase 0 terminates with `TERMINATED_MAX_CYCLES`.
 - **Node 1 (`node1_phase0_check_reference`)**: Checks SQLite database for the baseline golden reference design. If missing, routes reference parameters to Phase 1 to establish baseline accuracy and latency.
-- **Node 2 (`node2_phase0_propose_candidate`)**: LLM agent (Gemini 2.5 Pro with high reasoning effort) queries past evaluations and Pareto frontier, proposing novel combinations of solver, steps, noise model, and sparsity ratio.
-- **Node 3 (`node3_phase0_validate_proposal`)**: Gatekeeper validating proposals against allowed solver steps, noise models, and sparsity ratios; enforces uniqueness against duplicate proposals.
+- **Node 2 (`node2_phase0_propose_candidate`)**: LLM agent (Gemini 2.5 Pro with high reasoning effort) queries past evaluations and Pareto frontier, proposing novel combinations of solver, steps, and sparsity ratio, strictly constrained to the scheduled `target_noise_model`.
+- **Node 3 (`node3_phase0_validate_proposal`)**: Gatekeeper validating proposals against allowed solver steps, noise models, and sparsity ratios; enforces the scheduled `target_noise_model` (rejecting mismatches with `REJECTED_WRONG_NOISE_MODEL`) and checks uniqueness against duplicate proposals.
 
 ### Phase 1: Code Rewriting, Simulation & Verification
 - **Node 0 (`node0_phase1_gate`)**: Enforces debug mode isolation invariants and guards against invalid debug requests (Counter 3).
@@ -103,7 +104,7 @@ The autonomous loop is organized into three synchronized phases governed by SQLi
 - **Node 9 (`node9_phase1_error_handler`)**: Standardized stop handler executed when any retry counter is exhausted. Performs graceful termination, updates proposal status to `FAILED`, and generates an atomic SQLite live snapshot (`snapshots/<candidate_id>_error_snapshot.db`).
 
 ### Phase 2: Experiment Auditing, Reporting & Consultation
-- **Node 1 (`node1_phase2_check_experiment_limit`)**: Checks completed experiment counts against `budget.max_experiments` and loop iterations against `budget.max_iterations`.
+- **Node 1 (`node1_phase2_check_experiment_limit`)**: Checks per-noise completed experiment counts against `budget.max_experiments` (terminating when all noise models satisfy their quota) and loop iterations against `budget.max_iterations`.
 - **Node 2 (`node2_phase2_generate_final_report`)**: Compiles publication-grade Pareto frontier plots, generates a LaTeX report with candidate comparison tables and swarm token audits, and compiles the final PDF artifact.
 - **Interactive Consultant**: A CLI REPL (`InteractiveReportSession`) backed by an LLM to answer technical questions and analyze Pareto trade-offs from the generated report.
 
@@ -234,7 +235,7 @@ The configuration separates macro campaign bounds from micro execution retry bou
 
 | Section | Parameter | Governs | Destination Upon Exceedance |
 | :--- | :--- | :--- | :--- |
-| **`budget`** | `max_experiments` (10) | Total completed candidate experiments | Phase 2 Final Report Generation |
+| **`budget`** | `max_experiments` (10) | Maximum candidate experiment proposals executed per noise model (campaign total: N_noise x max_experiments regardless of candidate compilation/simulation success or failure) | Phase 2 Final Report Generation |
 | **`budget`** | `max_iterations` (15) | Hard ceiling on outer exploration cycles | Phase 2 Final Report Generation |
 | **`budget`** | `max_node_retries` (3) | Phase 0 candidate rejection retries | Halt Phase 0 (`MAX_CYCLES_EXCEEDED`) |
 | **`counter_limits`** | `max_counter_1_compilation` (3) | Compilation / ODE numerical checks (Node 5) | `node9_phase1_error_handler` |

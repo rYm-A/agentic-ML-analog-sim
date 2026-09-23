@@ -338,7 +338,7 @@ def execute_loop(
     )
 
     logger.info(
-        "Starting unified Chia loop: experiment='%s', max_experiments=%d, max_iterations=%d",
+        "Starting unified Chia loop: experiment='%s', max_experiments_per_noise=%d, max_iterations=%d",
         getattr(config, "experiment_name", "unknown"),
         max_experiments,
         max_iterations,
@@ -447,11 +447,27 @@ def execute_loop(
                 output_dir=reports_base,
                 compile_pdf=compile_pdf,
             )
+            # Multi-noise quota progress logging
+            progress_msg = ""
+            if hasattr(db, "get_proposal_counts_by_noise_model"):
+                try:
+                    noise_counts = db.get_proposal_counts_by_noise_model(exclude_reference=True)
+                    configured_noise = getattr(config, "noise_models", ["L0_static_mismatch"])
+                    noise_names = [getattr(nm, "name", nm) if not isinstance(nm, str) else nm for nm in configured_noise]
+                    items = [
+                        f"Noise model {nm}: {noise_counts.get(nm, {}).get('completed', 0) + noise_counts.get(nm, {}).get('failed', 0)}/{max_experiments}"
+                        for nm in noise_names
+                    ]
+                    progress_msg = f" ({', '.join(items)})"
+                except Exception:
+                    pass
+
             logger.info(
-                "Phase 2 action=%s, completed=%d/%d, details=%s",
+                "Phase 2 action=%s, completed=%d/%d%s, details=%s",
                 p2_res.action,
                 p2_res.completed_experiments,
                 p2_res.max_experiments,
+                progress_msg,
                 p2_res.details,
             )
 
@@ -482,6 +498,22 @@ def execute_loop(
     completed_total = db.get_completed_experiments_count()
     token_summary = db.get_token_usage_summary()
 
+    # Per-noise quota summary
+    per_noise_summary = {}
+    if hasattr(db, "get_proposal_counts_by_noise_model"):
+        try:
+            noise_counts = db.get_proposal_counts_by_noise_model(exclude_reference=True)
+            configured_noise = getattr(config, "noise_models", ["L0_static_mismatch"])
+            noise_names = [getattr(nm, "name", nm) if not isinstance(nm, str) else nm for nm in configured_noise]
+            progress_items = [
+                f"Noise model {nm}: {noise_counts.get(nm, {}).get('completed', 0) + noise_counts.get(nm, {}).get('failed', 0)}/{max_experiments}"
+                for nm in noise_names
+            ]
+            logger.info("Multi-Noise Quota Summary: %s", ", ".join(progress_items))
+            per_noise_summary = noise_counts
+        except Exception:
+            pass
+
     logger.info("=== Unified Loop Execution Complete in %.1fs ===", elapsed_s)
     logger.info("Final Loop Status: %s", loop_status)
     logger.info("Total Completed Designs: %d", completed_total)
@@ -494,6 +526,7 @@ def execute_loop(
         "status": loop_status,
         "iterations": iteration,
         "completed_experiments": completed_total,
+        "noise_model_progress": per_noise_summary,
         "elapsed_seconds": round(elapsed_s, 2),
         "database_path": str(db_path),
         "experiment_dir": str(experiment_dir),

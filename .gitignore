@@ -35,3 +35,11 @@ htmlcov/
 # Ray
 /tmp/ray/
 session_*
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.out

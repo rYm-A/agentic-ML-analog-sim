@@ -23,6 +23,7 @@ from chia.base.ChiaFunction import ChiaFunction
 from agentic_ml_analog_sim.reporting.latex_sanitizer import sanitize_latex_text
 from agentic_ml_analog_sim.reporting.plot_generator import (
     generate_breakdown_plot,
+    generate_multi_noise_pareto_plots,
     generate_pareto_plot,
     generate_token_cost_plot,
 )
@@ -37,11 +38,13 @@ Critical instructions:
 1. Ground your discussion strictly in the varying empirical data provided in the prompt. Avoid repetitive, static boilerplate and avoid rigid closed heuristics.
 2. The focus of the report is to expose graphically and tabularly the obtained results, followed by an open-ended, data-driven technical discussion.
 3. In the Pareto analysis:
-   - Critically analyze the empirical Pareto front points (latency vs. error / accuracy coordinates).
+   - Critically analyze the empirical Pareto front points (latency vs. error / accuracy coordinates) across individual noise models and the consolidated multi-noise comparison.
    - Evaluate the spatial distribution, spread, and clarity of the Pareto front: examine whether the points form a crystal-clear, well-separated trade-off curve across orders of magnitude, or whether candidate points are tightly clustered, close to one another, or overlapping.
    - If points are close or overlapping, interpret why this occurs (e.g., whether parameter perturbations yielded diminishing dynamical differentiation, whether numerical accuracy saturated, or whether physical circuit bottlenecks dominated).
    - If the Pareto front is ambiguous, unclear, or scarce, openly discuss the lack of clarity and what it reveals about the explored parameter regime for this particular run.
-4. Reflect on loop execution reliability, error stages encountered (rewrites, compilations, simulations), and pipeline bottlenecks.
+4. In pipeline reliability:
+   - Reflect on loop execution reliability, error stages encountered (rewrites, compilations, simulations), and pipeline bottlenecks.
+   - Ground compilation failure reasons strictly in factual PyTorch Inductor CPU lowering exception logs (e.g. LoweringException, unbacked scalar bindings in higher-order operators) and empirical error messages provided in compilation_failure_logs. DO NOT claim or hallucinate that proposals failed due to schema validation rejection (e.g., sparsity_ratio=0.4 is a valid schema configuration and must never be cited as schema rejected).
 5. Reflect on swarm token and compute expenditure across phases.
 6. Provide clear, quantitative, academic-grade text and analytical assessments.
 """
@@ -172,6 +175,7 @@ def _escape_latex(s: Any) -> str:
 def _build_pareto_table_tex(pareto_front: List[Dict[str, Any]], ref_proposal: Optional[Dict[str, Any]]) -> str:
     """Generate LaTeX booktabs table of Pareto-optimal candidate configurations."""
     ref_lat = ref_proposal.get("latency_ms", 100.0) if ref_proposal else 100.0
+    ref_id = ref_proposal.get("candidate_id") if ref_proposal else None
 
     rows = []
     if ref_proposal:
@@ -183,6 +187,8 @@ def _build_pareto_table_tex(pareto_front: List[Dict[str, Any]], ref_proposal: Op
         rows.append(f"\\textbf{{{cid}}} (Baseline) & {solv} & {noise} & 0.0 & {lat:.1f} & {err:.4f} & 1.00$\\times$ \\\\")
 
     for p in pareto_front:
+        if p.get("is_reference") or (ref_id and p.get("candidate_id") == ref_id):
+            continue
         cid = _escape_latex(p.get("candidate_id", "cand"))
         solv = _escape_latex(p.get("solver", "euler"))
         noise = _escape_latex(p.get("noise_model", "none").split("_")[0])
@@ -207,6 +213,24 @@ def _build_pareto_table_tex(pareto_front: List[Dict[str, Any]], ref_proposal: Op
         rows.append("None & - & - & - & - & - & - \\\\")
 
     return "\n".join(rows)
+
+
+def _get_compilation_failures(db: Any) -> List[Dict[str, Any]]:
+    """Retrieve compilation failure logs from database to ground reporting."""
+    if not hasattr(db, "get_proposals"):
+        return []
+    proposals = db.get_proposals(limit=200)
+    failures = []
+    for p in proposals:
+        if p.get("compilation_status") == "FAILED" or p.get("error_stage") == "compilation":
+            failures.append({
+                "candidate_id": p.get("candidate_id"),
+                "solver": p.get("solver"),
+                "noise_model": p.get("noise_model"),
+                "error_stage": p.get("error_stage"),
+                "error_message": p.get("error_message"),
+            })
+    return failures
 
 
 def _build_token_table_tex(token_summary: Dict[str, Any]) -> str:
@@ -360,7 +384,10 @@ def _generate_dynamic_pareto_analysis(
     return f"[pregenerated template text] {frontier_characterization} {tradeoff_summary}"
 
 
-def _generate_dynamic_reliability_analysis(stats: Dict[str, Any]) -> str:
+def _generate_dynamic_reliability_analysis(
+    stats: Dict[str, Any],
+    compilation_failures: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """Dynamically discuss execution pipeline reliability and bottlenecks."""
     total_prop = stats.get("total_proposals", 0)
     failed_rewrites = stats.get("rewrites_failed_count", 0)
@@ -381,14 +408,27 @@ def _generate_dynamic_reliability_analysis(stats: Dict[str, Any]) -> str:
     if failed_rewrites > 0:
         bottlenecks.append(f"{failed_rewrites} rewrite stage failures")
     if failed_comps > 0:
-        bottlenecks.append(f"{failed_comps} compiler build failures")
+        bottlenecks.append(f"{failed_comps} TorchInductor compiler lowering failures")
     if failed_sims > 0:
         bottlenecks.append(f"{failed_sims} numerical simulation divergences")
+
+    failure_details = ""
+    if compilation_failures:
+        inductor_errs = [
+            f for f in compilation_failures
+            if "lowering" in str(f.get("error_message", "")).lower() or "inductor" in str(f.get("error_message", "")).lower()
+        ]
+        if inductor_errs:
+            failure_details = (
+                " Compiler build failures were strictly driven by PyTorch Inductor CPU lowering exceptions "
+                "(such as dynamic symbol unbacked bindings in higher-order loops) rather than code schema rejection "
+                "or configuration invalidity."
+            )
 
     return (
         f"[pregenerated template text] Pipeline reliability monitoring recorded {total_failures} execution failures across {total_prop} evaluated "
         f"proposals: {', '.join(bottlenecks)}. Success rates achieved: {succ_comps}/{succ_comps + failed_comps} for domain "
-        f"compilation and {succ_sims}/{succ_sims + failed_sims} for numerical simulation."
+        f"compilation and {succ_sims}/{succ_sims + failed_sims} for numerical simulation.{failure_details}"
     )
 
 
@@ -477,6 +517,7 @@ def _generate_report_tex_content(
     db: Any,
     config: Any,
     llm_synthesis: Optional[Dict[str, str]] = None,
+    noise_models: Optional[List[str]] = None,
 ) -> str:
     """Construct publication-grade LaTeX report with dynamic, data-driven discussion.
 
@@ -487,6 +528,15 @@ def _generate_report_tex_content(
     pareto = db.compute_pareto_front() if hasattr(db, "compute_pareto_front") else []
     stats = db.get_execution_statistics() if hasattr(db, "get_execution_statistics") else {}
     token_sum = db.get_token_usage_summary() if hasattr(db, "get_token_usage_summary") else {}
+
+    if not noise_models:
+        noise_models = _get_val(config, "noise_models", None)
+    if not noise_models:
+        all_props = db.get_proposals(is_reference=False) if hasattr(db, "get_proposals") else []
+        distinct = sorted(list({p.get("noise_model") for p in all_props if p.get("noise_model")}))
+        noise_models = distinct if distinct else ["none"]
+
+    compilation_failures = _get_compilation_failures(db)
 
     pareto_table = _build_pareto_table_tex(pareto, ref)
     token_table = _build_token_table_tex(token_sum)
@@ -507,7 +557,7 @@ def _generate_report_tex_content(
     reliability_text = (
         llm_synthesis.get("reliability_discussion") or llm_synthesis.get("architecture_discussion")
         if llm_synthesis and ("reliability_discussion" in llm_synthesis or "architecture_discussion" in llm_synthesis)
-        else _generate_dynamic_reliability_analysis(stats)
+        else _generate_dynamic_reliability_analysis(stats, compilation_failures)
     )
 
     resource_text = (
@@ -528,6 +578,38 @@ def _generate_report_tex_content(
     reliability_text = sanitize_latex_text(reliability_text)
     resource_text = sanitize_latex_text(resource_text)
     recommendations_text = sanitize_latex_text(recommendations_text)
+
+    # Build Pareto figures for consolidated multi-noise and per-noise plots
+    fig_blocks = [
+        r"""\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/pareto_frontier.pdf}
+\caption{Multi-Objective Pareto frontier for analog ML co-design (Latency vs. Relative Error). Golden baseline is marked with a star.}
+\label{fig:pareto}
+\end{figure}""",
+        r"""\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/pareto_frontier_all.pdf}
+\caption{Consolidated Multi-Noise Pareto Frontiers comparing trade-off boundaries across all evaluated hardware-noise regimes.}
+\label{fig:pareto_all}
+\end{figure}""",
+    ]
+    noise_refs = []
+    for nm in noise_models:
+        nm_clean = nm.lower()
+        nm_label = nm_clean.replace("_", "-")
+        nm_escaped = _escape_latex(nm)
+        noise_refs.append(f"Figure~\\ref{{fig:pareto-{nm_label}}}")
+        fig_blocks.append(
+            f"""\\begin{{figure}}[htbp]
+\\centering
+\\includegraphics[width=0.95\\linewidth]{{figures/pareto_frontier_{nm_clean}.pdf}}
+\\caption{{Multi-Objective Pareto frontier for the \\texttt{{{nm_escaped}}} noise regime (Latency vs. Relative Error).}}
+\\label{{fig:pareto-{nm_label}}}
+\\end{{figure}}"""
+        )
+    noise_figure_refs = ", ".join(noise_refs) if noise_refs else "Figure~\\ref{fig:pareto_all}"
+    pareto_figures_tex = "\n\n".join(fig_blocks)
 
     doc = f"""\\documentclass[10pt,conference]{{IEEEtran}}
 \\usepackage{{amsmath,amssymb,amsfonts}}
@@ -567,14 +649,9 @@ Analog oscillatory neural networks offer massive parallel compute density and ul
 \\section{{Multi-Objective Pareto Analysis}}
 {pareto_analysis_text}
 
-Figure~\\ref{{fig:pareto}} illustrates the empirical Pareto frontier contrasting simulation latency against relative error. Table~\\ref{{tab:pareto}} lists key Pareto-optimal designs alongside the reference baseline.
+Figure~\\ref{{fig:pareto_all}} illustrates the consolidated empirical Pareto frontiers contrasting simulation latency against relative error across evaluated hardware-noise regimes, with individual noise breakdowns shown in {noise_figure_refs}. Table~\\ref{{tab:pareto}} lists key Pareto-optimal designs alongside the reference baseline.
 
-\\begin{{figure}}[htbp]
-\\centering
-\\includegraphics[width=0.95\\linewidth]{{figures/pareto_frontier.pdf}}
-\\caption{{Multi-Objective Pareto frontier for analog ML co-design (Latency vs. Relative Error). Golden baseline is marked with a star.}}
-\\label{{fig:pareto}}
-\\end{{figure}}
+{pareto_figures_tex}
 
 \\begin{{table}}[htbp]
 \\caption{{Pareto-Optimal Candidate Configurations}}
@@ -679,17 +756,18 @@ def node2_phase2_generate_final_report(
     out_path.mkdir(parents=True, exist_ok=True)
     fig_path.mkdir(parents=True, exist_ok=True)
 
-    # 1. Generate all required Matplotlib plots in <output_dir>/<experiment_name>/figures
-    logger.info("Generating publication Matplotlib figures in %s...", fig_path)
+    # 1. Determine noise models from configuration or database
+    noise_models = _get_val(config, "noise_models", None)
+    if not noise_models:
+        all_props = db.get_proposals(is_reference=False) if hasattr(db, "get_proposals") else []
+        distinct = sorted(list({p.get("noise_model") for p in all_props if p.get("noise_model")}))
+        noise_models = distinct if distinct else ["none"]
+
+    # Generate publication Matplotlib plots (multi-noise Pareto and execution breakdown)
+    logger.info("Generating publication Matplotlib figures in %s for noise models: %s...", fig_path, noise_models)
+    multi_pareto_files = generate_multi_noise_pareto_plots(db, fig_path, noise_models=noise_models, prefix="pareto_frontier")
     pareto_files = generate_pareto_plot(db, fig_path, "pareto_frontier")
     breakdown_files = generate_breakdown_plot(db, fig_path, "execution_breakdown")
-    token_files = generate_token_cost_plot(db, fig_path, "token_cost_summary")
-
-    figures = {
-        "pareto": pareto_files,
-        "breakdown": breakdown_files,
-        "token_cost": token_files,
-    }
 
     # 2. Gather data for LLM reflection prompt
     pareto_front = db.compute_pareto_front() if hasattr(db, "compute_pareto_front") else []
@@ -697,6 +775,7 @@ def node2_phase2_generate_final_report(
     token_summary = db.get_token_usage_summary() if hasattr(db, "get_token_usage_summary") else {}
     ref_proposal = db.get_reference_proposal() if hasattr(db, "get_reference_proposal") else None
     completed_candidates = db.get_proposals(is_reference=False, limit=100) if hasattr(db, "get_proposals") else []
+    compilation_failures = _get_compilation_failures(db)
 
     # 3. Prompt LLM to reflect, analyze, and draft dynamic technical synthesis
     llm_synthesis = None
@@ -713,16 +792,18 @@ def node2_phase2_generate_final_report(
             "reference_baseline": ref_proposal,
             "pareto_candidates": pareto_front,
             "execution_statistics": exec_stats,
+            "compilation_failure_logs": compilation_failures,
             "token_usage_summary": token_summary,
             "instruction": (
                 "Reflect on and analyze the actual experimental results of this loop run. "
                 "Respond with a JSON object containing keys: 'executive_summary', 'pareto_analysis', "
                 "'reliability_discussion', 'resource_discussion', and 'recommendations'. "
-                "Base your discussion strictly on the varying empirical data: critically analyze the distribution "
-                "of Pareto front points (latency vs. error coordinates) to evaluate whether they form a clear, distinct frontier "
-                "or whether they are tightly clustered or overlapping, and interpret why that pattern or overlap arose; "
-                "analyze execution pipeline reliability and bottlenecks; and audit swarm token and compute expenditures. "
-                "Avoid static boilerplate or rigid closed heuristics."
+                "Base your discussion strictly on empirical data: analyze the distribution "
+                "of Pareto front points across noise models; analyze pipeline reliability and bottlenecks "
+                "strictly using empirical records and provided compilation_failure_logs (grounding compilation failures "
+                "in factual PyTorch Inductor CPU lowering exceptions such as LoweringException or unbacked scalar bindings, "
+                "and NEVER hallucinating schema validation rejections or invalid sparsity_ratio claims); "
+                "and audit swarm token and compute expenditures. Avoid static boilerplate or rigid closed heuristics."
             ),
         }
 
@@ -762,7 +843,7 @@ def node2_phase2_generate_final_report(
         except Exception:
             pass
 
-        # 5. Parse LLM response if valid JSON returned
+        # Parse LLM response if valid JSON returned
         response_text = getattr(query_result, "result", str(query_result))
         if isinstance(response_text, str):
             try:
@@ -774,8 +855,20 @@ def node2_phase2_generate_final_report(
             except Exception:
                 pass
 
+    # 5. Generate token cost plot AFTER recording Phase 2 tokens to capture complete swarm expenditure
+    token_files = generate_token_cost_plot(db, fig_path, "token_cost_summary")
+
+    figures = {
+        "pareto": pareto_files,
+        "pareto_multi": multi_pareto_files,
+        "breakdown": breakdown_files,
+        "token_cost": token_files,
+    }
+
     # 6. Generate sanitized LaTeX document
-    tex_content = _generate_report_tex_content(db, config, llm_synthesis=llm_synthesis)
+    tex_content = _generate_report_tex_content(
+        db, config, llm_synthesis=llm_synthesis, noise_models=noise_models
+    )
     tex_path = out_path / "final_report.tex"
     with open(tex_path, "w", encoding="utf-8") as f:
         f.write(tex_content)

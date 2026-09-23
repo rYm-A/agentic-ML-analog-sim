@@ -183,10 +183,6 @@ def node4_phase1_compilation_runner(
     if not solver_name:
         raise KeyError(f"No solver specified for candidate '{candidate_id}' in proposal or simulation config.")
 
-    num_steps = proposal.get("num_steps") or getattr(ref_design, "num_steps", None)
-    if num_steps is None:
-        raise ValueError(f"num_steps not specified for candidate '{candidate_id}' or reference design.")
-
     solver_params = proposal.get("solver_params", {}) or {}
     if isinstance(solver_params, str):
         try:
@@ -194,6 +190,14 @@ def node4_phase1_compilation_runner(
             solver_params = json.loads(solver_params)
         except Exception:
             solver_params = {}
+
+    num_steps = (
+        proposal.get("num_steps")
+        or solver_params.get("num_steps")
+        or getattr(ref_design, "num_steps", None)
+    )
+    if num_steps is None:
+        raise ValueError(f"num_steps not specified for candidate '{candidate_id}' or reference design.")
 
     integration_time = solver_params.get("integration_time") or getattr(ref_design, "integration_time", None)
     if integration_time is None:

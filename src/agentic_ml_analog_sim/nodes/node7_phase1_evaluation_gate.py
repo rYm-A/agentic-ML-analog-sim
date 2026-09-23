@@ -203,6 +203,7 @@ def node7_phase1_evaluation_gate(
         # Success: reset counter 2, mark COMPLETED, compute Pareto front, route to Phase 2
         db.update_counters(candidate_id, counter_2_rewrite=0)
         db.mark_proposal_status(candidate_id, status="COMPLETED")
+        db.update_execution_status(candidate_id=candidate_id, simulation_status="SUCCESS")
         db.compute_pareto_front()
 
         logger.info("Node 7: Reference proposal %s successfully evaluated and marked COMPLETED. Routing to Phase 2.", candidate_id)
@@ -261,6 +262,7 @@ def node7_phase1_evaluation_gate(
         # Success: reset counter 2, mark COMPLETED, compute Pareto front, route to Phase 2
         db.update_counters(candidate_id, counter_2_rewrite=0)
         db.mark_proposal_status(candidate_id, status="COMPLETED")
+        db.update_execution_status(candidate_id=candidate_id, simulation_status="SUCCESS")
 
         # If this proposal was derived after a debug session, reactivate parent if needed
         if proposal.get("debug_parent_id"):

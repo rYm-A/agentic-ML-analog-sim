@@ -613,7 +613,7 @@ def run_phase_1(
             target_device=target_device,
             backend_mode=target_device,
             proposal=active_candidate,
-            timeout=300.0,
+            timeout=600.0,
         )
 
         metrics = profile_res.get("metrics", {})

@@ -2,6 +2,8 @@
 
 from agentic_ml_analog_sim.reporting.plot_generator import (
     generate_breakdown_plot,
+    generate_consolidated_pareto_plot,
+    generate_multi_noise_pareto_plots,
     generate_pareto_plot,
     generate_token_cost_plot,
 )
@@ -13,6 +15,8 @@ from agentic_ml_analog_sim.reporting.latex_sanitizer import (
 
 __all__ = [
     "generate_pareto_plot",
+    "generate_consolidated_pareto_plot",
+    "generate_multi_noise_pareto_plots",
     "generate_breakdown_plot",
     "generate_token_cost_plot",
     "InteractiveReportSession",
