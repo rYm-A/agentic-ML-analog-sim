@@ -29,14 +29,14 @@ worker_start_ray_commands:
 
 gcp_nodes:
   project: ${GCP_PROJECT}
-  zone: ${GCP_ZONE}
+  zone: "us-central1-a"
   sim_gpu_pool:
     machine_type: "g2-standard-8"
     count: 1
     disk_size_gb: 100
     spot: false
-    ssh_user: ${GCP_SSH_USER}
-    ssh_private_key: ${GCP_SSH_PRIVATE_KEY}
+    ssh_user: "chia"
+    ssh_private_key: "${HOME}/.ssh/id_ed25519"
     setup_commands:
       - |
         python3 -c "
