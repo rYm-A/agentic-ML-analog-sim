@@ -80,3 +80,4 @@ available_node_types:
         - -e LD_LIBRARY_PATH=/usr/local/cuda-compat:/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
     worker_env_commands:
       - "source ~/.bashrc && conda activate chia_env"
+      - "export PYTHONPATH=/workspace/src:/workspace/Un-0:${PYTHONPATH}"
