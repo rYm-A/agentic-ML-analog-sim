@@ -264,6 +264,7 @@ def node0_gate(
                 "nodes_to_run": [3],
                 "bypassed_nodes": [1, 2],
                 "edges": task_graph_edges,
+                "compiler_steering_instructions": debug_request.get("compiler_steering_instructions") if debug_request else None,
             }
 
         else:
@@ -311,6 +312,7 @@ def node0_gate(
                 "nodes_to_run": nodes_to_run,
                 "bypassed_nodes": bypassed,
                 "edges": task_graph_edges,
+                "compiler_steering_instructions": debug_request.get("compiler_steering_instructions") if debug_request else None,
             }
 
     # Standard entry mode (N1 -> N2 -> N3)

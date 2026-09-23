@@ -462,19 +462,16 @@ def node3_phase1_compiler_rewriter(
         candidate_id,
     )
 
-    # 5. Instantiate Chia Tools
-    task_opts = {"resources": {"sqlite_db": 0.01}}
-
-    result_db_tool = ResultDBTool(name="result_db", db=db, deploy=True, task_options=task_opts)
+    # 5. Instantiate Chia Tools (matching Node 1 and Node 2)
+    result_db_tool = ResultDBTool(name="result_db", db=db, deploy=False)
     un0_rewriter_tool = Un0RewriterTool(
         name="un0_rewriter",
         repo_root=un0_dir,
-        auto_start=True,
-        task_options=task_opts,
+        auto_start=False,
     )
 
     tools = [result_db_tool, un0_rewriter_tool]
-    compilation_info_tool = CompilationInfoTool(name="compilation_info", auto_start=True, task_options=task_opts)
+    compilation_info_tool = CompilationInfoTool(name="compilation_info", auto_start=False)
     if compilation_info_tool.is_available:
         tools.append(compilation_info_tool)
     else:

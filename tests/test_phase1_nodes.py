@@ -1484,3 +1484,59 @@ def test_node4_compilation_runner_chia_function_and_failure_payload(tmp_db_and_c
     assert "Forced TorchInductor compilation failure" in res_fail["error_message"]
     assert res_fail["next_node"] == "node5_phase1_verify_correctness"
 
+
+def test_node8_generates_compiler_steering_and_gate_forwards(tmp_db_and_config):
+    """Verify Node 8 generates compiler steering instructions on compiler error and Node 0 gate forwards it."""
+    from agentic_ml_analog_sim.nodes.node8_phase1_diagnostic_proposal import node8_phase1_diagnostic_proposal
+    from agentic_ml_analog_sim.nodes.node0_phase1_gate import node0_phase1_gate
+
+    db, config = tmp_db_and_config
+    cand_id = "cand_steer_test"
+    db.insert_proposal(
+        candidate_id=cand_id,
+        iteration=1,
+        solver="euler",
+        solver_params={"num_steps": 5, "dt": 0.1},
+        sparsity_config={"type": "dense"},
+        noise_model="none",
+    )
+
+    class DummyLLM:
+        def prompt(self, prompt_text, tools=None):
+            return "Non-json response"
+
+    res8 = node8_phase1_diagnostic_proposal(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        error_logs="LoweringException: failed to compile un0 kuramoto model with Inductor",
+        llm=DummyLLM(),
+    )
+
+    assert "compiler_steering_instructions" in res8
+    assert res8["compiler_steering_instructions"] is not None
+    assert "CRITICAL STEERING FROM NODE 8 DIAGNOSTICS" in res8["compiler_steering_instructions"]
+    assert "un0_register_compiler_rewrite" in res8["compiler_steering_instructions"]
+
+    # Verify DB comment was written with tag
+    comments = db.get_comments(cand_id)
+    assert any("[NODE8_STEERING_NODE3]" in c["comment"] for c in comments)
+
+    # Now verify Node 0 gate preserves the steering instructions in Mode 2
+    res0 = node0_phase1_gate(
+        db=db,
+        config=config,
+        trigger_source="node_8",
+        previous_node_id="node8_phase1_diagnostic_proposal",
+        proposal_id=cand_id,
+        debug_request={
+            "action": "rewrite_correction",
+            "nodes_to_rerun": [3],
+            "compiler_steering_instructions": res8["compiler_steering_instructions"],
+        },
+    )
+
+    assert res0["status"] == "SUCCESS"
+    assert res0["compiler_steering_instructions"] == res8["compiler_steering_instructions"]
+
+

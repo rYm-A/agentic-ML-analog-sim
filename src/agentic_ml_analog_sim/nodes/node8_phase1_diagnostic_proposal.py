@@ -331,6 +331,42 @@ Note: "debug_request" field must be null or omitted if action is "rewrite_correc
         nodes_to_rerun.append(3)
     nodes_to_rerun = sorted(list(set(nodes_to_rerun)))
 
+    # Formulate compiler rewrite steering instructions for Node 3
+    is_compiler_failure = (
+        "compil" in logs_str.lower()
+        or "inductor" in logs_str.lower()
+        or "hop" in logs_str.lower()
+        or "node3" in logs_str.lower()
+        or "compiler" in logs_str.lower()
+        or c1 > 0
+    )
+    compiler_steering_instructions = None
+    if parsed_json and isinstance(parsed_json, dict) and parsed_json.get("compiler_steering_instructions"):
+        compiler_steering_instructions = str(parsed_json["compiler_steering_instructions"]).strip()
+    elif is_compiler_failure:
+        compiler_steering_instructions = (
+            f"CRITICAL STEERING FROM NODE 8 DIAGNOSTICS (Compilation Cycle #{c1 + 1}):\n"
+            f"The previous compiler rewrite attempt failed to register a valid rewrite in COMPILER_REGISTRY.\n"
+            f"Failure context: {logs_str[:250]}\n"
+            f"Diagnosis: {diagnosis_text}\n"
+            f"STEERING DIRECTIVE FOR NODE 3: You MUST immediately call `un0_register_compiler_rewrite` with:\n"
+            f"- candidate_id: '{candidate_id}'\n"
+            f"- rewrite_name: '{candidate_id}_compiler_rewrite'\n"
+            f"- implementation: Use `un0.compiler.functional_hop.functionalize_kuramoto_model` with `use_hop=False` "
+            f"for Ahead-Of-Time TorchInductor compilation without graph breaks.\n"
+            f"Do NOT execute background test runs or explore filesystem directories; call the registration tool directly."
+        )
+
+    if compiler_steering_instructions:
+        db.add_comment(
+            candidate_id=candidate_id,
+            phase="phase_1",
+            agent_name="node8_phase1_diagnostic_proposal",
+            comment=f"[NODE8_STEERING_NODE3]\n{compiler_steering_instructions}",
+        )
+        if debug_request_dict:
+            debug_request_dict["compiler_steering_instructions"] = compiler_steering_instructions
+
     # Record commentary in database
     db.add_comment(
         candidate_id=candidate_id,
@@ -417,6 +453,7 @@ Note: "debug_request" field must be null or omitted if action is "rewrite_correc
         "debug_request": debug_request_dict if action == "debug_request" else None,
         "diagnosis": diagnosis_text,
         "reasoning": reasoning_text,
+        "compiler_steering_instructions": compiler_steering_instructions,
         "tokens_consumed": total_tokens,
         "token_usage": {
             "prompt_tokens": prompt_tokens,

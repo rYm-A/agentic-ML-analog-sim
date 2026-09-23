@@ -108,13 +108,30 @@ def _dispatch_node(
     Guarded with an effective timeout to prevent synchronous driver deadlocks.
     """
     _configure_tailnet_proxy_if_present()
-    if ray.is_initialized() and hasattr(node_fn, "chia_remote") and get is not None:
-        config = kwargs.get("config")
-        if config is None:
-            for arg in args:
-                if hasattr(arg, "node_timeout") or hasattr(arg, "experiment_limits") or hasattr(arg, "budget"):
-                    config = arg
-                    break
+    config = kwargs.get("config")
+    if config is None:
+        for arg in args:
+            if hasattr(arg, "node_timeout") or hasattr(arg, "experiment_limits") or hasattr(arg, "budget") or hasattr(arg, "dry_run"):
+                config = arg
+                break
+
+    dry_run = kwargs.get("dry_run", False) or getattr(config, "dry_run", False)
+    if not dry_run and ray.is_initialized() and hasattr(node_fn, "chia_remote") and get is not None:
+        required_resources = getattr(node_fn, "_chia_options", {}).get("resources", {})
+        if required_resources:
+            try:
+                cluster_resources = ray.cluster_resources() if ray.is_initialized() else {}
+            except Exception:
+                cluster_resources = {}
+            missing_resources = [k for k, v in required_resources.items() if cluster_resources.get(k, 0) < v]
+            if missing_resources and cluster_resources:
+                logger.debug(
+                    "Cluster lacks required resources %s for node %s; executing locally.",
+                    missing_resources,
+                    getattr(node_fn, "__name__", str(node_fn)),
+                )
+                return node_fn(*args, **kwargs)
+
         effective_timeout = timeout or getattr(config, "node_timeout", None)
         if effective_timeout is None and hasattr(config, "experiment_limits"):
             effective_timeout = getattr(config.experiment_limits, "timeout_seconds_per_eval", None)
@@ -265,6 +282,7 @@ def run_phase_1(
     current_trigger = trigger_source
     previous_node_id = "phase_0_node_3" if current_trigger == "phase_0" else "node_8"
     debug_request: Optional[Dict[str, Any]] = None
+    pending_steering_instructions: Optional[str] = None
 
     cycle_count = 0
     active_candidate_id = candidate_id
@@ -330,6 +348,8 @@ def run_phase_1(
         execution_mode = gate_res["mode"]
         nodes_to_run = gate_res["nodes_to_run"]
         active_candidate_id = gate_res.get("candidate_id", active_candidate_id)
+        if gate_res.get("compiler_steering_instructions"):
+            pending_steering_instructions = gate_res.get("compiler_steering_instructions")
 
         logger.info("Node 0 configured mode '%s' for candidate '%s', nodes to run: %s", execution_mode, active_candidate_id, nodes_to_run)
 
@@ -370,8 +390,12 @@ def run_phase_1(
                     candidate_id=active_candidate_id,
                     target_device=target_device,
                     llm=llm,
+                    force_rewrite=force_rewrites or bool(pending_steering_instructions),
+                    steering_instructions=pending_steering_instructions,
                 )
+                pending_steering_instructions = None
             except Exception as err:
+                pending_steering_instructions = None
                 logger.error("Node 3 encountered exception: %s. Routing to Node 9 error handler / Node 8 diagnostic recovery.", err)
                 node3_res = {"status": "FAILED", "error": str(err)}
 
@@ -427,10 +451,13 @@ def run_phase_1(
                 )
                 current_trigger = "node_8"
                 previous_node_id = "node8_phase1_diagnostic_proposal"
+                pending_steering_instructions = diag_res.get("compiler_steering_instructions")
                 if diag_res.get("type") == "DEBUG_MODE_REQUEST" or diag_res.get("action") == "debug_request":
                     debug_request = diag_res.get("debug_request") or diag_res
                 else:
                     debug_request = {"nodes_to_rerun": diag_res.get("nodes_to_rerun", [1, 2, 3])}
+                if pending_steering_instructions and isinstance(debug_request, dict):
+                    debug_request["compiler_steering_instructions"] = pending_steering_instructions
                 continue
 
         # STEP 3: Node 4 Compilation Runner
@@ -565,10 +592,13 @@ def run_phase_1(
             )
             current_trigger = "node_8"
             previous_node_id = "node8_phase1_diagnostic_proposal"
+            pending_steering_instructions = diag_res.get("compiler_steering_instructions")
             if diag_res.get("type") == "DEBUG_MODE_REQUEST" or diag_res.get("action") == "debug_request":
                 debug_request = diag_res.get("debug_request") or diag_res
             else:
                 debug_request = {"nodes_to_rerun": diag_res.get("nodes_to_rerun", [1, 2, 3])}
+            if pending_steering_instructions and isinstance(debug_request, dict):
+                debug_request["compiler_steering_instructions"] = pending_steering_instructions
             continue
 
         # STEP 5: Node 6 Simulate and Profile
@@ -601,7 +631,7 @@ def run_phase_1(
                 )
                 db.update_execution_status(
                     candidate_id=active_candidate_id,
-                    profiling_status="SUCCESS",
+                    simulation_status="SUCCESS",
                 )
             elif profile_res.get("status") == "FAILED":
                 db.update_execution_status(
@@ -627,10 +657,13 @@ def run_phase_1(
             )
             current_trigger = "node_8"
             previous_node_id = "node8_phase1_diagnostic_proposal"
+            pending_steering_instructions = diag_res.get("compiler_steering_instructions")
             if diag_res.get("type") == "DEBUG_MODE_REQUEST" or diag_res.get("action") == "debug_request":
                 debug_request = diag_res.get("debug_request") or diag_res
             else:
                 debug_request = {"nodes_to_rerun": diag_res.get("nodes_to_rerun", [1, 2, 3])}
+            if pending_steering_instructions and isinstance(debug_request, dict):
+                debug_request["compiler_steering_instructions"] = pending_steering_instructions
             continue
 
         # STEP 6: Node 7 Evaluation Gate
@@ -693,10 +726,13 @@ def run_phase_1(
             )
             current_trigger = "node_8"
             previous_node_id = "node8_phase1_diagnostic_proposal"
+            pending_steering_instructions = diag_res.get("compiler_steering_instructions")
             if diag_res.get("type") == "DEBUG_MODE_REQUEST" or diag_res.get("action") == "debug_request":
                 debug_request = diag_res.get("debug_request") or diag_res
             else:
                 debug_request = {"nodes_to_rerun": diag_res.get("nodes_to_rerun", [1, 2, 3])}
+            if pending_steering_instructions and isinstance(debug_request, dict):
+                debug_request["compiler_steering_instructions"] = pending_steering_instructions
             continue
 
     # Exceeded loop bound
