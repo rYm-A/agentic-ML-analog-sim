@@ -301,16 +301,20 @@ def node3_phase1_compiler_rewriter(
     else:
         num_classes = 10
 
-    num_steps = proposal.get("num_steps") or getattr(ref_design, "num_steps", None)
-    if num_steps is None:
-        raise ValueError(f"Number of steps not specified for candidate '{candidate_id}' or reference design.")
-
     solver_params = proposal.get("solver_params", {}) or {}
     if isinstance(solver_params, str):
         try:
             solver_params = json.loads(solver_params)
         except Exception:
             solver_params = {}
+
+    num_steps = (
+        proposal.get("num_steps")
+        or solver_params.get("num_steps")
+        or getattr(ref_design, "num_steps", None)
+    )
+    if num_steps is None:
+        raise ValueError(f"Number of steps not specified for candidate '{candidate_id}' or reference design.")
 
     integration_time = solver_params.get("integration_time") or getattr(ref_design, "integration_time", None)
     if integration_time is None:
