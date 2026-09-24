@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-ml-analog-sim"
+version = "0.1.0"
+description = "Agentic ML Analog Accelerator Simulation Loop"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "matplotlib>=3.8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["Un-0", "submodules", ".git", ".pytest_cache"]
+markers = [
+    "node1_phase0: marks tests related to node1_phase0",
+    "node2_phase0: marks tests related to node2_phase0",
+]

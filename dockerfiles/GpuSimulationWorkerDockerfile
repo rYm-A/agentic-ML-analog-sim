@@ -1,0 +1,77 @@
+# syntax=docker/dockerfile:1
+# ==============================================================================
+# Un-0 Analog ML Swarm - Unified GPU Simulation & Compilation Worker
+# ==============================================================================
+# Target Platform: Linux x86_64 (linux/amd64) with NVIDIA CUDA 13.0 Devel
+# Tag: ghcr.io/rym-a/analog-sim-worker:latest
+#
+# Capabilities:
+#   - PyTorch 2.14.0 + CUDA 13.0 + cuDNN 9 (Devel)
+#   - C++ Compilation toolchain (g++, gcc, ninja-build) for PyTorch Inductor
+#   - Python 3.10.19 and Ray 2.54.0 pinned to cluster head
+#   - torchdiffeq, scipy, numpy, matplotlib for ODE simulations
+#   - chialoops framework with pre-provisioned /home/ray/anaconda3/envs/py_worker
+# ==============================================================================
+
+ARG BASE_IMAGE=pytorch/pytorch:2.14.0-cuda13.0-cudnn9-devel
+FROM --platform=linux/amd64 ${BASE_IMAGE}
+
+SHELL ["/bin/bash", "-cl"]
+
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1. System toolchains & C++ headers for Inductor AOT/JIT and Ray transport
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        g++ \
+        gcc \
+        ninja-build \
+        git \
+        python3-dev \
+        pkg-config \
+        openssh-client \
+        rsync \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Python 3.10.19 & Ray 2.54.0 Worker Environment (py_worker)
+# Adopting the canonical Chia pattern (docker_images.rst) using standalone CPython:
+ARG PYTHON_VERSION=3.10.19
+ARG PBS_TAG=20260203
+ARG RAY_VERSION=2.54.0
+
+RUN curl -fsSL \
+        "https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/cpython-${PYTHON_VERSION}+${PBS_TAG}-x86_64-unknown-linux-gnu-install_only.tar.gz" \
+        | tar -xzf - -C /opt \
+    && mkdir -p /home/ray/anaconda3/envs \
+    && /opt/python/bin/python3 -m venv /home/ray/anaconda3/envs/py_worker
+
+# 3. Compilation & Simulation Dependencies
+RUN /home/ray/anaconda3/envs/py_worker/bin/pip install --no-cache-dir \
+        torch==2.14.0 torchvision --extra-index-url https://download.pytorch.org/whl/cu130 \
+    && /home/ray/anaconda3/envs/py_worker/bin/pip install --no-cache-dir \
+        "ray[default]==${RAY_VERSION}" \
+        torchdiffeq \
+        scipy \
+        numpy \
+        matplotlib \
+        pydantic \
+        anyio \
+        chialoops
+
+# 4. User permissions & Chia worker discovery
+RUN useradd -m -s /bin/bash ray \
+    && mkdir -p /workspace \
+    && chown -R ray:ray /home/ray /workspace 2>/dev/null || true \
+    && chmod -R a+rwX /home/ray /workspace \
+    && chmod a+rw /etc/passwd
+
+ENV PATH="/home/ray/anaconda3/envs/py_worker/bin:${PATH}"
+ENV HOME=/home/ray
+
+USER ray
+WORKDIR /workspace
+
+CMD ["/bin/bash"]

@@ -1,0 +1,83 @@
+# Cloud Burst Profile for Phase 2 GPU Simulation Pool (Tailnet + GCP)
+cluster_name: "agentic-ml-analog-sim-cloud"
+
+tailnet:
+  manage_all: true
+  auth_key: ${TS_AUTHKEY}
+  head_advertise_ip: ${THIS_MACHINE}
+
+provider:
+  head_ip: ${THIS_MACHINE}
+
+auth:
+  ssh_user: ${USER}
+  ssh_private_key: "~/.ssh/id_ed25519"
+
+head_env_commands:
+  - "source ~/.zshrc && conda activate chia_env"
+
+head_setup_commands:
+  - "source ~/.zshrc && conda activate chia_env"
+
+head_start_ray_commands:
+  - "source ~/.zshrc && conda activate chia_env && ray stop"
+  - "source ~/.zshrc && conda activate chia_env && ray start --head --port=6379 --disable-usage-stats --resources='{\"control_worker\": 1, \"agent_worker\": 1, \"antigravity_creds\": 1, \"metal_gpu\": 1, \"sqlite_db\": 1, \"python_worker\": 4}' --include-dashboard=False"
+
+worker_start_ray_commands:
+  - "ray stop"
+  - "export LD_LIBRARY_PATH=/usr/local/cuda-compat:${LD_LIBRARY_PATH} && ray start --address=$RAY_HEAD_IP:6379 --dashboard-agent-listen-port=0"
+
+gcp_nodes:
+  project: ${GCP_PROJECT}
+  zone: "us-central1-a"
+  sim_gpu_pool:
+    machine_type: "g2-standard-8"
+    count: 1
+    disk_size_gb: 100
+    spot: false
+    ssh_user: "chia"
+    ssh_private_key: "${HOME}/.ssh/id_ed25519"
+    setup_commands:
+      - sudo apt-get update && sudo apt-get install -y cuda-compat-13-0
+      - |
+        python3 -c "
+        import subprocess, sys
+        out = subprocess.check_output(['nvidia-smi', '-q'], text=True)
+        for line in out.splitlines():
+            if 'CUDA Version' in line:
+                v = float(line.split(':')[1].strip())
+                if v >= 12.0:
+                    print(f'CUDA driver verified: {v}')
+                    sys.exit(0)
+                else:
+                    print(f'FATAL: CUDA Version {v} is lower than required 12.0', file=sys.stderr)
+                    sys.exit(1)
+        sys.exit('FATAL: Could not detect CUDA version from nvidia-smi')
+        "
+
+available_node_types:
+  local_orchestrator:
+    resources: {"control_worker": 1, "agent_worker": 1, "antigravity_creds": 1, "sqlite_db": 1}
+    num_workers: 0
+    compatible_ips: ["${THIS_MACHINE}"]
+    worker_env_commands:
+      - "source ~/.zshrc && conda activate chia_env"
+
+  gpu_simulation_worker:
+    resources: {"sim_worker": 1, "compile_worker": 1}
+    num_workers: 1
+    compatible_ips: ["@sim_gpu_pool:0"]
+    docker:
+      image: "ghcr.io/rym-a/analog-sim-worker:latest"
+      container_name: "chia-sim-worker-${USER}"
+      pull_before_run: true
+      run_options:
+        - --gpus=all
+        - --shm-size=16gb
+        - --ulimit nofile=65536:65536
+        - -v ${PWD}:/workspace
+        - -v /usr/local/cuda-13.0/compat:/usr/local/cuda-compat:ro
+        - -e LD_LIBRARY_PATH=/usr/local/cuda-compat:/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+    worker_env_commands:
+      - "source ~/.bashrc && conda activate chia_env"
+      - "export PYTHONPATH=/workspace/src:/workspace/Un-0:${PYTHONPATH}"
