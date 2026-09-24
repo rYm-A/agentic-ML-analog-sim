@@ -603,6 +603,10 @@ def run_phase_1(
 
         # STEP 5: Node 6 Simulate and Profile
         logger.info("Executing Node 6 (Simulate & Profile) for '%s'", active_candidate_id)
+        if verify_res.get("max_rel_diff") is not None:
+            active_candidate["verify_max_rel_diff"] = verify_res.get("max_rel_diff")
+        if verify_res.get("max_abs_diff") is not None:
+            active_candidate["verify_max_abs_diff"] = verify_res.get("max_abs_diff")
         model_to_profile = verify_res.get("compiled_model") if verify_res.get("compiled_model") is not None else compiled_model
         profile_res = _dispatch_node(
             node6_phase1_simulate_profile,
@@ -617,6 +621,8 @@ def run_phase_1(
         )
 
         metrics = profile_res.get("metrics", {})
+        active_candidate["relative_error"] = metrics.get("relative_error")
+        active_candidate["absolute_error"] = metrics.get("absolute_error")
         # Sync Node 6 profiling metrics and status to local db
         try:
             if profile_res.get("status") == "SUCCESS":
@@ -625,6 +631,7 @@ def run_phase_1(
                     status="EVALUATING",
                     latency_ms=metrics.get("latency_ms"),
                     relative_error=metrics.get("relative_error"),
+                    absolute_error=metrics.get("absolute_error"),
                     accuracy_fid=metrics.get("accuracy_fid"),
                     wall_clock_s=metrics.get("wall_clock_s"),
                     worker_utilization=0.85,
