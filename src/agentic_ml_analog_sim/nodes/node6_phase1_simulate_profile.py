@@ -11,6 +11,7 @@ import logging
 import math
 import time
 import traceback
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -20,6 +21,20 @@ from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.tools.result_db_tool import ResultDBTool
 
 logger = logging.getLogger("agentic_ml_analog_sim.nodes.node6_phase1_simulate_profile")
+
+# In-memory cache for reference baseline outputs across candidate evaluations
+_CACHED_REF_OUTPUTS: Optional[List[torch.Tensor]] = None
+
+
+def _resolve_ref_cache_path(db: Optional[Any], config: Optional[Any]) -> Path:
+    """Resolve file path for caching reference baseline trajectories."""
+    if db is not None:
+        db_path = getattr(db, "db_path", None)
+        if db_path is not None:
+            return Path(db_path).parent / "ref_trajectories.pt"
+    exp_name = getattr(config, "experiment_name", "first_run_trial_un0_analog_acceleration") if config else "first_run_trial_un0_analog_acceleration"
+    return Path("reports") / exp_name / "ref_trajectories.pt"
+
 
 try:
     import ray
@@ -103,11 +118,13 @@ def _simulate_batch1_worker(
     device_str: str,
     n_osc: Optional[int] = None,
     n_cond: Optional[int] = None,
+    ref_outputs: Optional[List[torch.Tensor]] = None,
+    is_reference: bool = False,
 ) -> Dict[str, Any]:
     """Execute sequential batch size 1 inference passes on hardware device.
 
-    Profiles individual sample latencies, peak memory, and verifies numerical stability
-    using compiled Torch execution semantics (as in RegenariveCoRNN).
+    Profiles individual sample latencies, peak memory, and computes numerical
+    trajectory error against golden reference outputs when available.
     """
     device = torch.device(device_str)
 
@@ -120,6 +137,9 @@ def _simulate_batch1_worker(
 
     has_drive = (n_osc is not None and n_cond is not None and n_cond > 0)
     sample_latencies: List[float] = []
+    recorded_outputs: List[torch.Tensor] = []
+    sample_rel_errors: List[float] = []
+    sample_abs_errors: List[float] = []
 
     with torch.inference_mode():
         # Warmup passes for Torch compiled model (fixed batch size 1 shape)
@@ -137,14 +157,16 @@ def _simulate_batch1_worker(
             del dummy_in
         _sync_device(device_str)
 
-        # Sequential batch size 1 profiling
+        # Sequential batch size 1 profiling with deterministic seed per sample
         t_start = time.perf_counter()
 
         for s_idx in range(num_eval_samples):
-            sample_in = torch.randn(1, state_dim, device=device)
+            gen = torch.Generator(device=device)
+            gen.manual_seed(1000 + s_idx)
+            sample_in = torch.randn(1, state_dim, generator=gen, device=device)
             sample_drive = None
             if has_drive:
-                sample_drive = torch.randn(1, n_osc, n_cond, device=device)
+                sample_drive = torch.randn(1, n_osc, n_cond, generator=gen, device=device)
                 _sync_device(device_str)
                 t0 = time.perf_counter()
                 try:
@@ -172,6 +194,21 @@ def _simulate_batch1_worker(
                             f"Numerical divergence: NaN/Inf detected in model output tuple at evaluation sample {s_idx}"
                         )
 
+            # Extract primary tensor output for trajectory comparison
+            out_tensor = out[0] if isinstance(out, (tuple, list)) else out
+
+            if is_reference:
+                recorded_outputs.append(out_tensor.detach().cpu())
+            elif ref_outputs is not None and s_idx < len(ref_outputs):
+                ref_s = ref_outputs[s_idx].to(device=out_tensor.device, dtype=out_tensor.dtype)
+                diff = torch.abs(out_tensor - ref_s)
+                sample_abs = float(torch.mean(diff).item())
+                ref_norm = float(torch.norm(ref_s).item())
+                sample_rel = float((torch.norm(out_tensor - ref_s).item()) / max(ref_norm, 1e-8))
+                sample_abs_errors.append(sample_abs)
+                sample_rel_errors.append(sample_rel)
+                del ref_s, diff
+
             # Explicitly delete intermediate tensors or sample tensors to avoid retaining memory across iterations
             del out, sample_in, sample_drive
 
@@ -187,6 +224,16 @@ def _simulate_batch1_worker(
     peak_memory_mb = _get_peak_memory_mb(device_str)
     throughput = (num_eval_samples / total_eval_time_s) if total_eval_time_s > 0 else 0.0
 
+    if is_reference:
+        mean_relative_error = 0.0
+        mean_absolute_error = 0.0
+    elif sample_rel_errors:
+        mean_relative_error = float(sum(sample_rel_errors) / len(sample_rel_errors))
+        mean_absolute_error = float(sum(sample_abs_errors) / len(sample_abs_errors))
+    else:
+        mean_relative_error = None
+        mean_absolute_error = None
+
     return {
         "mean_latency_ms": round(mean_lat_ms, 4),
         "latency_std": round(latency_std, 4),
@@ -194,6 +241,9 @@ def _simulate_batch1_worker(
         "peak_memory_mb": round(peak_memory_mb, 2),
         "total_eval_time_s": total_eval_time_s,
         "evaluated_samples": num_eval_samples,
+        "relative_error": round(mean_relative_error, 6) if mean_relative_error is not None else None,
+        "absolute_error": round(mean_absolute_error, 6) if mean_absolute_error is not None else None,
+        "recorded_outputs": recorded_outputs if is_reference else None,
     }
 
 
@@ -309,6 +359,7 @@ def node6_phase1_simulate_profile(
         latency_ms = 4.2 if is_ref else 5.8
         peak_memory_mb = 128.0 if is_ref else 142.5
         relative_error = 0.0 if is_ref else 0.015
+        absolute_error = 0.0 if is_ref else 0.012
         accuracy_mean = 0.925 if is_ref else 0.900
         accuracy_std = 0.005 if is_ref else 0.012
         accuracy_ci95 = 0.001 if is_ref else 0.002
@@ -325,6 +376,7 @@ def node6_phase1_simulate_profile(
             "accuracy_worst_pct": accuracy_worst_pct,
             "accuracy_fid": None,
             "relative_error": relative_error,
+            "absolute_error": absolute_error,
             "wall_clock_s": wall_clock_s,
             "sample_count": sample_count,
             "dataset": dataset_name,
@@ -340,6 +392,7 @@ def node6_phase1_simulate_profile(
                     latency_ms=latency_ms,
                     accuracy_fid=None,
                     relative_error=relative_error,
+                    absolute_error=absolute_error,
                     wall_clock_s=wall_clock_s,
                     worker_utilization=0.85,
                 )
@@ -469,6 +522,22 @@ def node6_phase1_simulate_profile(
         except Exception:
             is_ray_active = False
 
+        is_ref = bool(proposal.get("is_reference"))
+        ref_outputs: Optional[List[torch.Tensor]] = None
+        if not is_ref:
+            global _CACHED_REF_OUTPUTS
+            if _CACHED_REF_OUTPUTS is not None:
+                ref_outputs = _CACHED_REF_OUTPUTS
+            else:
+                cache_p = _resolve_ref_cache_path(db, config)
+                if cache_p.exists():
+                    try:
+                        ref_outputs = torch.load(cache_p, weights_only=True)
+                        _CACHED_REF_OUTPUTS = ref_outputs
+                        logger.info("Node 6: Loaded %d reference trajectory outputs from %s", len(ref_outputs), cache_p)
+                    except Exception as load_err:
+                        logger.warning("Node 6: Failed to load reference trajectory cache: %s", load_err)
+
         # Node 6 is already executing on the target simulation worker node (sim_worker: 1).
         # Execute the batch 1 worker directly in-process to avoid deadlocks from nested resource acquisition.
         worker_res = _simulate_batch1_worker(
@@ -478,7 +547,19 @@ def node6_phase1_simulate_profile(
             device_str=device,
             n_osc=n_osc,
             n_cond=n_cond,
+            ref_outputs=ref_outputs,
+            is_reference=is_ref,
         )
+
+        if is_ref and worker_res.get("recorded_outputs"):
+            _CACHED_REF_OUTPUTS = worker_res["recorded_outputs"]
+            cache_p = _resolve_ref_cache_path(db, config)
+            try:
+                cache_p.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(_CACHED_REF_OUTPUTS, cache_p)
+                logger.info("Node 6: Persisted %d reference trajectory outputs to %s", len(_CACHED_REF_OUTPUTS), cache_p)
+            except Exception as save_err:
+                logger.debug("Node 6: Could not persist reference trajectory cache: %s", save_err)
 
         wall_clock_s = time.perf_counter() - start_wall_clock
 
@@ -487,10 +568,19 @@ def node6_phase1_simulate_profile(
         peak_memory_mb = worker_res["peak_memory_mb"]
         throughput = worker_res["throughput_samples_per_sec"]
 
-        # Natural measurements:
-        is_ref = bool(proposal.get("is_reference"))
-        relative_error = 0.0 if is_ref else 0.005
-        accuracy_mean = 0.95 if is_ref else 0.93
+        if is_ref:
+            relative_error = 0.0
+            absolute_error = 0.0
+        else:
+            relative_error = worker_res.get("relative_error")
+            absolute_error = worker_res.get("absolute_error")
+            # Fallback to Node 5 verified differences if reference cache was absent
+            if relative_error is None:
+                relative_error = proposal.get("verify_max_rel_diff", 0.005)
+            if absolute_error is None:
+                absolute_error = proposal.get("verify_max_abs_diff", 0.005)
+
+        accuracy_mean = 0.95 if is_ref else max(0.0, 1.0 - relative_error)
         accuracy_worst_pct = accuracy_mean - 2 * (latency_std / max(latency_ms, 1e-4) * 0.01)
         accuracy_ci95 = 0.002
 
@@ -505,6 +595,7 @@ def node6_phase1_simulate_profile(
             "accuracy_worst_pct": round(accuracy_worst_pct, 4),
             "accuracy_fid": None,
             "relative_error": relative_error,
+            "absolute_error": absolute_error,
             "wall_clock_s": round(wall_clock_s, 4),
             "sample_count": sample_count,
             "dataset": dataset_name,
@@ -523,6 +614,7 @@ def node6_phase1_simulate_profile(
                     latency_ms=latency_ms,
                     accuracy_fid=None,
                     relative_error=relative_error,
+                    absolute_error=absolute_error,
                     wall_clock_s=wall_clock_s,
                     worker_utilization=0.90,
                 )

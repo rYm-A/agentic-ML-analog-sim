@@ -19,7 +19,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
-import os
 from pathlib import Path
 import re
 import sys
@@ -161,14 +160,10 @@ def _sync_compiler_rewrites_from_disk(un0_dir: Path, candidate_id: Optional[str]
     """
     search_dirs = [
         un0_dir / "un0" / "compiler" / "rewrites",
+        Path("/Users/chia/ChiaWorkspace/Un-0/un0/compiler/rewrites"),
+        Path("/Users/chia/ChiaWorkspace/agentic-ML-analog-sim-run/Un-0/un0/compiler/rewrites"),
         Path.cwd() / "Un-0" / "un0" / "compiler" / "rewrites",
     ]
-    if "UN0_ROOT" in os.environ and os.environ["UN0_ROOT"].strip():
-        search_dirs.append(Path(os.environ["UN0_ROOT"].strip()) / "un0" / "compiler" / "rewrites")
-    if "UN0_REWRITES_DIR" in os.environ and os.environ["UN0_REWRITES_DIR"].strip():
-        search_dirs.append(Path(os.environ["UN0_REWRITES_DIR"].strip()))
-    if "AGENTIC_SIM_RUN_REWRITES_DIR" in os.environ and os.environ["AGENTIC_SIM_RUN_REWRITES_DIR"].strip():
-        search_dirs.append(Path(os.environ["AGENTIC_SIM_RUN_REWRITES_DIR"].strip()))
     seen_dirs: set[Path] = set()
     all_files: list[Path] = []
     for rdir in search_dirs:
@@ -354,7 +349,13 @@ def node3_phase1_compiler_rewriter(
                 noise_params = {}
         try:
             noise_cls = get_noise_model(noise_name)
-            eager_model = noise_cls(base_dynamics, **(noise_params if isinstance(noise_params, dict) else {}))
+            import inspect
+            sig = inspect.signature(noise_cls.__init__)
+            if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                valid_params = noise_params if isinstance(noise_params, dict) else {}
+            else:
+                valid_params = {k: v for k, v in noise_params.items() if k in sig.parameters} if isinstance(noise_params, dict) else {}
+            eager_model = noise_cls(base_dynamics, **valid_params)
         except Exception as noise_err:
             error_msg = f"Node 3: Failed to instantiate noise model '{noise_name}' for candidate '{candidate_id}': {noise_err}"
             logger.error(error_msg)

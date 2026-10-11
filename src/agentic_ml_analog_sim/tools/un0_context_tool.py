@@ -37,12 +37,9 @@ except ImportError:  # pragma: no cover
 
 from mcp.server.fastmcp import FastMCP
 
-UN0_ROOT_ENV = os.environ.get("UN0_ROOT")
-FALLBACK_UN0_ROOT = (
-    Path(UN0_ROOT_ENV).resolve()
-    if UN0_ROOT_ENV
-    else (Path(__file__).resolve().parents[3] / "Un-0").resolve()
-)
+logger = logging.getLogger(__name__)
+
+FALLBACK_UN0_ROOT = Path("/Users/chia/ChiaWorkspace/Un-0")
 
 
 def resolve_un0_root(repo_root: Optional[Union[str, Path]] = None) -> Path:
@@ -50,10 +47,9 @@ def resolve_un0_root(repo_root: Optional[Union[str, Path]] = None) -> Path:
 
     Search order:
     1. Explicit argument passed to Un0Context(repo_root=...)
-    2. UN0_ROOT environment variable (if set and valid)
-    3. Submodule directory inside agentic-ML-analog-sim/Un-0 (or submodules/Un-0)
-    4. Sibling directory ../Un-0 relative to agentic-ML-analog-sim or CWD
-    5. Default fallback.
+    2. Submodule directory inside agentic-ML-analog-sim/Un-0 (or submodules/Un-0)
+    3. Sibling directory ../Un-0 relative to agentic-ML-analog-sim or CWD
+    4. Default fallback.
 
     Args:
         repo_root: Optional explicit path provided by caller.
@@ -64,12 +60,6 @@ def resolve_un0_root(repo_root: Optional[Union[str, Path]] = None) -> Path:
     # 1. Explicit argument passed
     if repo_root is not None:
         return Path(repo_root).resolve()
-
-    # 2. UN0_ROOT environment variable
-    if "UN0_ROOT" in os.environ and os.environ["UN0_ROOT"].strip():
-        env_cand = Path(os.environ["UN0_ROOT"].strip()).resolve()
-        if env_cand.is_dir() and ((env_cand / "un0").is_dir() or (env_cand / "pyproject.toml").is_file()):
-            return env_cand
 
     # Determine package / workspace root for agentic-ML-analog-sim
     current_file = Path(__file__).resolve()

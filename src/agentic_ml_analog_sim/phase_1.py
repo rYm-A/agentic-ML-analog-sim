@@ -473,46 +473,31 @@ def run_phase_1(
         if has_remote:
             try:
                 import subprocess
-                remote_host = os.environ.get("AGENTIC_SIM_REMOTE_HOST") or os.environ.get("CLOUD_VM_IP")
-                if not remote_host:
-                    logger.debug("AGENTIC_SIM_REMOTE_HOST / CLOUD_VM_IP unset; skipping remote cluster rsync")
-                else:
-                    remote_user = os.environ.get("AGENTIC_SIM_REMOTE_USER") or os.environ.get("USER") or "ray"
-                    remote_ssh_key = os.environ.get(
-                        "AGENTIC_SIM_SSH_KEY",
-                        str(Path.home() / ".ssh" / "id_ed25519"),
-                    )
-                    remote_workspace = os.environ.get(
-                        "AGENTIC_SIM_REMOTE_WORKSPACE",
-                        f"~/agentic-ML-analog-sim_cloud_run",
-                    )
-                    ssh_cmd = f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i {remote_ssh_key}"
-
-                    for subdir in ["compiler/rewrites", "noise/rewrites", "solver"]:
-                        sub_local = Path(resolved_un0_dir) / "un0" / subdir
-                        if sub_local.exists():
-                            subprocess.run(
-                                [
-                                    "rsync", "-az",
-                                    "-e", f"{ssh_cmd} -o ConnectTimeout=5",
-                                    f"{sub_local}/",
-                                    f"{remote_user}@{remote_host}:{remote_workspace}/Un-0/un0/{subdir}/",
-                                ],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                timeout=10,
-                            )
-                    if getattr(db, "db_path", None):
-                        subprocess.Popen(
+                for subdir in ["compiler/rewrites", "noise/rewrites", "solver"]:
+                    sub_local = Path(resolved_un0_dir) / "un0" / subdir
+                    if sub_local.exists():
+                        subprocess.run(
                             [
                                 "rsync", "-az",
-                                "-e", f"{ssh_cmd} -o ConnectTimeout=2",
-                                str(Path(db.db_path).resolve()),
-                                f"{remote_user}@{remote_host}:{Path(db.db_path).resolve()}",
+                                "-e", "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -i /Users/chia/.ssh/id_ed25519",
+                                f"{sub_local}/",
+                                f"chia@34.70.38.219:/Users/chia/ChiaWorkspace/agentic-ML-analog-sim_cloud_run/Un-0/un0/{subdir}/",
                             ],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
+                            timeout=10,
                         )
+                if getattr(db, "db_path", None):
+                    subprocess.Popen(
+                        [
+                            "rsync", "-az",
+                            "-e", "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 -i /Users/chia/.ssh/id_ed25519",
+                            str(Path(db.db_path).resolve()),
+                            f"chia@34.70.38.219:{Path(db.db_path).resolve()}",
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
             except Exception as sync_err:
                 logger.debug("Remote cluster sync error: %s", sync_err)
 
@@ -618,6 +603,10 @@ def run_phase_1(
 
         # STEP 5: Node 6 Simulate and Profile
         logger.info("Executing Node 6 (Simulate & Profile) for '%s'", active_candidate_id)
+        if verify_res.get("max_rel_diff") is not None:
+            active_candidate["verify_max_rel_diff"] = verify_res.get("max_rel_diff")
+        if verify_res.get("max_abs_diff") is not None:
+            active_candidate["verify_max_abs_diff"] = verify_res.get("max_abs_diff")
         model_to_profile = verify_res.get("compiled_model") if verify_res.get("compiled_model") is not None else compiled_model
         profile_res = _dispatch_node(
             node6_phase1_simulate_profile,
@@ -632,6 +621,8 @@ def run_phase_1(
         )
 
         metrics = profile_res.get("metrics", {})
+        active_candidate["relative_error"] = metrics.get("relative_error")
+        active_candidate["absolute_error"] = metrics.get("absolute_error")
         # Sync Node 6 profiling metrics and status to local db
         try:
             if profile_res.get("status") == "SUCCESS":
@@ -640,6 +631,7 @@ def run_phase_1(
                     status="EVALUATING",
                     latency_ms=metrics.get("latency_ms"),
                     relative_error=metrics.get("relative_error"),
+                    absolute_error=metrics.get("absolute_error"),
                     accuracy_fid=metrics.get("accuracy_fid"),
                     wall_clock_s=metrics.get("wall_clock_s"),
                     worker_utilization=0.85,
