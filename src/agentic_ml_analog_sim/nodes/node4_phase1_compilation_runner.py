@@ -236,7 +236,13 @@ def node4_phase1_compilation_runner(
                         noise_params = json.loads(noise_params)
                     except Exception:
                         noise_params = {}
-                eager_model = noise_cls(base_dynamics, **(noise_params if isinstance(noise_params, dict) else {}))
+                import inspect
+                sig = inspect.signature(noise_cls.__init__)
+                if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                    valid_params = noise_params if isinstance(noise_params, dict) else {}
+                else:
+                    valid_params = {k: v for k, v in noise_params.items() if k in sig.parameters} if isinstance(noise_params, dict) else {}
+                eager_model = noise_cls(base_dynamics, **valid_params)
             else:
                 eager_model = base_dynamics
         except Exception as exc:
