@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     accuracy_fid REAL,
     relative_error REAL,
     absolute_error REAL,
+    absolute_error_p90 REAL,
     latency_ms REAL,
     wall_clock_s REAL,
     worker_utilization REAL,
@@ -79,3 +80,18 @@ FOR EACH ROW
 BEGIN
     UPDATE proposals SET updated_at = CURRENT_TIMESTAMP WHERE candidate_id = OLD.candidate_id;
 END;
+
+CREATE TABLE IF NOT EXISTS sensitivity_lookup (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_name TEXT NOT NULL DEFAULT 'default',
+    reference_id TEXT NOT NULL,
+    epsilon_d REAL NOT NULL,
+    e_pert REAL NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(reference_id) REFERENCES proposals(candidate_id) ON DELETE CASCADE,
+    UNIQUE(reference_id, epsilon_d)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sensitivity_lookup_ref ON sensitivity_lookup(reference_id);
+CREATE INDEX IF NOT EXISTS idx_sensitivity_lookup_exp ON sensitivity_lookup(experiment_name);
+

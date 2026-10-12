@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Union
 import ray
 from chia.base.tools.ChiaTool import ChiaTool
 
+from agentic_ml_analog_sim.accuracy.sensitivity_lookup import SensitivityLookupTable
 from agentic_ml_analog_sim.db.database import ResultDatabase
 
 
@@ -82,6 +83,8 @@ class ResultDBTool(ChiaTool):
         self.mcp.add_tool(self.get_execution_statistics, name=f"{self.name}_get_execution_statistics")
         self.mcp.add_tool(self.get_token_usage_summary, name=f"{self.name}_get_token_usage_summary")
         self.mcp.add_tool(self.get_completed_experiments_count, name=f"{self.name}_get_completed_experiments_count")
+        self.mcp.add_tool(self.get_sensitivity_curve, name=f"{self.name}_get_sensitivity_curve")
+        self.mcp.add_tool(self.interpolate_sensitivity, name=f"{self.name}_interpolate_sensitivity")
 
         # Register mutation tools ONLY when NOT in read_only mode
         if not self.read_only:
@@ -90,6 +93,7 @@ class ResultDBTool(ChiaTool):
             self.mcp.add_tool(self.record_token_usage, name=f"{self.name}_record_token_usage")
             self.mcp.add_tool(self.mark_proposal_status, name=f"{self.name}_mark_proposal_status")
             self.mcp.add_tool(self.update_execution_status, name=f"{self.name}_update_execution_status")
+            self.mcp.add_tool(self.record_sensitivity_curve, name=f"{self.name}_record_sensitivity_curve")
 
     def read_prior_proposals(self, status: Optional[str] = None, limit: int = 50) -> str:
         """Read simulation candidate proposals that have already been made from the database.
@@ -566,6 +570,7 @@ class ResultDBTool(ChiaTool):
         accuracy_fid: Optional[float] = None,
         relative_error: Optional[float] = None,
         absolute_error: Optional[float] = None,
+        absolute_error_p90: Optional[float] = None,
         wall_clock_s: Optional[float] = None,
         worker_utilization: Optional[float] = None,
         **kwargs: Any,
@@ -577,8 +582,9 @@ class ResultDBTool(ChiaTool):
             status: New proposal status.
             latency_ms: Measured inference latency in milliseconds.
             accuracy_fid: Deprecated legacy FID metric (retained for backward compatibility).
-            relative_error: Relative numerical error vs golden baseline trajectory.
-            absolute_error: Absolute numerical error vs golden baseline trajectory.
+            relative_error: Relative numerical error / dynamic sensitivity error vs reference.
+            absolute_error: Absolute numerical error (aligned chordal pooled MS / RMS).
+            absolute_error_p90: 90th percentile of absolute chordal error.
             wall_clock_s: Wall clock elapsed time in seconds.
             worker_utilization: Estimated worker utilization.
             **kwargs: Extra fields passed to database mark_proposal_status.
@@ -594,6 +600,7 @@ class ResultDBTool(ChiaTool):
                 accuracy_fid=accuracy_fid,
                 relative_error=relative_error,
                 absolute_error=absolute_error,
+                absolute_error_p90=absolute_error_p90,
                 wall_clock_s=wall_clock_s,
                 worker_utilization=worker_utilization,
                 **kwargs,
@@ -642,6 +649,107 @@ class ResultDBTool(ChiaTool):
             return json.dumps({"status": "SUCCESS", "candidate_id": candidate_id, "simulation_status": simulation_status})
         except Exception as e:
             return json.dumps({"status": "ERROR", "message": f"Error updating execution status: {e}"})
+
+    def record_sensitivity_curve(
+        self,
+        reference_id: str,
+        curve_json: str,
+        experiment_name: str = "default",
+    ) -> str:
+        """Record calibrated (epsilon_d, e_pert) points in the sensitivity lookup table.
+
+        Args:
+            reference_id: Candidate ID of the reference design.
+            curve_json: JSON string of list of [epsilon_d, e_pert] pairs.
+            experiment_name: Optional experiment identifier.
+
+        Returns:
+            JSON string confirming recording count.
+        """
+        if self.read_only:
+            raise PermissionError("ResultDBReadOnlyTool provides read-only access. Recording sensitivity curves is not permitted.")
+        try:
+            raw_curve = json.loads(curve_json) if isinstance(curve_json, str) else curve_json
+            curve = [(float(p[0]), float(p[1])) for p in raw_curve]
+            count = self.db.record_sensitivity_curve(
+                reference_id=reference_id,
+                curve=curve,
+                experiment_name=experiment_name,
+            )
+            return json.dumps({
+                "status": "SUCCESS",
+                "reference_id": reference_id,
+                "points_recorded": count,
+            })
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error recording sensitivity curve: {e}"})
+
+    def get_sensitivity_curve(
+        self,
+        reference_id: Optional[str] = None,
+        experiment_name: Optional[str] = None,
+    ) -> str:
+        """Retrieve calibrated sensitivity lookup table.
+
+        Args:
+            reference_id: Optional reference proposal candidate ID.
+            experiment_name: Optional experiment identifier.
+
+        Returns:
+            JSON string containing sorted list of (epsilon_d, e_pert) pairs.
+        """
+        try:
+            curve = self.db.get_sensitivity_curve(
+                reference_id=reference_id,
+                experiment_name=experiment_name,
+            )
+            return json.dumps({
+                "status": "SUCCESS",
+                "reference_id": reference_id,
+                "count": len(curve),
+                "curve": [{"epsilon_d": p[0], "e_pert": p[1]} for p in curve],
+            })
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error retrieving sensitivity curve: {e}"})
+
+    def interpolate_sensitivity(
+        self,
+        e_pert: float,
+        reference_id: Optional[str] = None,
+        experiment_name: Optional[str] = None,
+    ) -> str:
+        """Linearly interpolate epsilon_d from measured e_pert using sensitivity curve.
+
+        Args:
+            e_pert: Measured perturbation error (e.g. pooled absolute error or RMS).
+            reference_id: Optional reference candidate ID.
+            experiment_name: Optional experiment name.
+
+        Returns:
+            JSON string with interpolated epsilon_d.
+        """
+        try:
+            curve = self.db.get_sensitivity_curve(
+                reference_id=reference_id,
+                experiment_name=experiment_name,
+            )
+            if not curve:
+                return json.dumps({
+                    "status": "EMPTY",
+                    "e_pert": float(e_pert),
+                    "epsilon_d": 0.0,
+                    "message": "No sensitivity curve found for interpolation.",
+                })
+            table = SensitivityLookupTable(entries=curve, reference_id=reference_id or "", experiment_name=experiment_name or "default")
+            eps_d = table.interpolate(float(e_pert))
+            return json.dumps({
+                "status": "SUCCESS",
+                "e_pert": float(e_pert),
+                "epsilon_d": float(eps_d),
+                "reference_id": reference_id,
+            })
+        except Exception as e:
+            return json.dumps({"status": "ERROR", "message": f"Error interpolating sensitivity: {e}"})
 
 
 # Direct helper functions for local/test execution without requiring tool server instantiation
@@ -769,4 +877,48 @@ def update_execution_status(db: ResultDatabase, candidate_id: str, **kwargs: Any
     """Helper function to update execution status directly on a ResultDatabase."""
     tool = ResultDBTool(db=db, deploy=False)
     return tool.update_execution_status(candidate_id=candidate_id, **kwargs)
+
+
+def record_sensitivity_curve(
+    db: ResultDatabase,
+    reference_id: str,
+    curve_json: str,
+    experiment_name: str = "default",
+) -> str:
+    """Helper function to record sensitivity curve directly against a ResultDatabase."""
+    tool = ResultDBTool(db=db, deploy=False)
+    return tool.record_sensitivity_curve(
+        reference_id=reference_id,
+        curve_json=curve_json,
+        experiment_name=experiment_name,
+    )
+
+
+def get_sensitivity_curve(
+    db: ResultDatabase,
+    reference_id: Optional[str] = None,
+    experiment_name: Optional[str] = None,
+) -> str:
+    """Helper function to retrieve sensitivity curve directly against a ResultDatabase."""
+    tool = ResultDBReadOnlyTool(db=db, deploy=False)
+    return tool.get_sensitivity_curve(
+        reference_id=reference_id,
+        experiment_name=experiment_name,
+    )
+
+
+def interpolate_sensitivity(
+    db: ResultDatabase,
+    e_pert: float,
+    reference_id: Optional[str] = None,
+    experiment_name: Optional[str] = None,
+) -> str:
+    """Helper function to interpolate sensitivity epsilon_d directly against a ResultDatabase."""
+    tool = ResultDBReadOnlyTool(db=db, deploy=False)
+    return tool.interpolate_sensitivity(
+        e_pert=e_pert,
+        reference_id=reference_id,
+        experiment_name=experiment_name,
+    )
+
 

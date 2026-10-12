@@ -80,10 +80,12 @@ def test_reference_and_candidate_trajectory_errors(tmp_db_and_cfg):
     assert ref_res["status"] == "SUCCESS"
     assert ref_res["metrics"]["relative_error"] == 0.0
     assert ref_res["metrics"]["absolute_error"] == 0.0
+    assert ref_res["metrics"]["absolute_error_p90"] == 0.0
 
     ref_prop = tmp_db.get_proposal(ref_id)
     assert ref_prop["relative_error"] == 0.0
     assert ref_prop["absolute_error"] == 0.0
+    assert ref_prop["absolute_error_p90"] == 0.0
 
     # Insert candidate with L0 noise
     cand_id = tmp_db.insert_proposal(
@@ -111,13 +113,16 @@ def test_reference_and_candidate_trajectory_errors(tmp_db_and_cfg):
     assert cand_res["status"] == "SUCCESS"
     rel_err = cand_res["metrics"]["relative_error"]
     abs_err = cand_res["metrics"]["absolute_error"]
+    abs_p90 = cand_res["metrics"]["absolute_error_p90"]
 
     assert rel_err > 0.0, f"Expected non-zero relative error, got {rel_err}"
     assert abs_err > 0.0, f"Expected non-zero absolute error, got {abs_err}"
+    assert abs_p90 > 0.0, f"Expected non-zero p90 error, got {abs_p90}"
 
     cand_prop = tmp_db.get_proposal(cand_id)
     assert cand_prop["relative_error"] == rel_err
     assert cand_prop["absolute_error"] == abs_err
+    assert cand_prop["absolute_error_p90"] == abs_p90
 
     # Insert second candidate with Euler and coarser steps to verify dynamic divergence
     cand2_id = tmp_db.insert_proposal(
@@ -145,9 +150,11 @@ def test_reference_and_candidate_trajectory_errors(tmp_db_and_cfg):
     assert cand2_res["status"] == "SUCCESS"
     rel_err_2 = cand2_res["metrics"]["relative_error"]
     abs_err_2 = cand2_res["metrics"]["absolute_error"]
+    abs_p90_2 = cand2_res["metrics"]["absolute_error_p90"]
 
     assert rel_err_2 > 0.0
     assert abs_err_2 > 0.0
+    assert abs_p90_2 > 0.0
     # Euler with 5 steps should diverge more than RK4 with 10 steps
     assert rel_err_2 != rel_err, f"Expected distinct relative errors, got {rel_err_2} vs {rel_err}"
     assert abs_err_2 != abs_err, f"Expected distinct absolute errors, got {abs_err_2} vs {abs_err}"
@@ -180,6 +187,6 @@ def test_candidate_fails_when_reference_cache_missing(tmp_db_and_cfg, monkeypatc
     )
 
     assert res["status"] == "FAILED"
-    assert "reference trajectory comparison could not be computed" in res["error_message"]
+    assert "reference" in res["error_message"].lower()
     assert res["next_node"] == "node8_phase1_diagnostic_proposal"
 

@@ -234,7 +234,13 @@ def node7_phase1_evaluation_gate(
     abs_error = proposal.get("absolute_error")
     if abs_error is None:
         abs_error = proposal.get("abs_error")
+    abs_error_p90 = proposal.get("absolute_error_p90")
     sim_status = proposal.get("simulation_status")
+
+    logger.info(
+        "Node 7: Candidate %s errors: absolute=%s (p90=%s), relative=%s vs tolerances (atol=%s, rtol=%s)",
+        candidate_id, abs_error, abs_error_p90, rel_error, atol, rtol
+    )
 
     # Evaluate metric tolerance bounds
     within_tolerance = True

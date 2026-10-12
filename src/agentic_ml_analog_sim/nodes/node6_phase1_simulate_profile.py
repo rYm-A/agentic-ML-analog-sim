@@ -16,24 +16,39 @@ from typing import Any, Dict, List, Optional, Union
 
 import torch
 
+from agentic_ml_analog_sim.accuracy.chordal_error import (
+    aggregate_class_errors,
+    compute_sample_chordal_error,
+)
+from agentic_ml_analog_sim.accuracy.sensitivity_lookup import (
+    SensitivityLookupTable,
+    generate_perturbation_scales,
+)
 from agentic_ml_analog_sim.config import SimulationConfig
 from agentic_ml_analog_sim.db.database import ResultDatabase
 from agentic_ml_analog_sim.tools.result_db_tool import ResultDBTool
 
 logger = logging.getLogger("agentic_ml_analog_sim.nodes.node6_phase1_simulate_profile")
 
-# In-memory cache for reference baseline outputs across candidate evaluations
+# In-memory caches across candidate evaluations
 _CACHED_REF_OUTPUTS: Optional[List[torch.Tensor]] = None
+_CACHED_SENSITIVITY_TABLE: Optional[SensitivityLookupTable] = None
 
 
 def _resolve_ref_cache_path(db: Optional[Any], config: Optional[Any]) -> Path:
-    """Resolve file path for caching reference baseline trajectories."""
+    """Resolve file path for caching reference baseline phase snapshots at T=1."""
     if db is not None:
         db_path = getattr(db, "db_path", None)
         if db_path is not None:
-            return Path(db_path).parent / "ref_trajectories.pt"
+            return Path(db_path).parent / "ref_phases_T1.pt"
     exp_name = getattr(config, "experiment_name", "first_run_trial_un0_analog_acceleration") if config else "first_run_trial_un0_analog_acceleration"
-    return Path("reports") / exp_name / "ref_trajectories.pt"
+    return Path("reports") / exp_name / "ref_phases_T1.pt"
+
+
+def _resolve_sensitivity_cache_path(db: Optional[Any], config: Optional[Any]) -> Path:
+    """Resolve file path for caching sensitivity lookup table."""
+    base = _resolve_ref_cache_path(db, config).parent
+    return base / "sensitivity_lookup.json"
 
 
 try:
@@ -120,11 +135,12 @@ def _simulate_batch1_worker(
     n_cond: Optional[int] = None,
     ref_outputs: Optional[List[torch.Tensor]] = None,
     is_reference: bool = False,
+    num_classes: int = 10,
 ) -> Dict[str, Any]:
     """Execute sequential batch size 1 inference passes on hardware device.
 
     Profiles individual sample latencies, peak memory, and computes numerical
-    trajectory error against golden reference outputs when available.
+    phase snapshot chordal RMS error against golden reference outputs when available.
     """
     device = torch.device(device_str)
 
@@ -138,8 +154,8 @@ def _simulate_batch1_worker(
     has_drive = (n_osc is not None and n_cond is not None and n_cond > 0)
     sample_latencies: List[float] = []
     recorded_outputs: List[torch.Tensor] = []
-    sample_rel_errors: List[float] = []
     sample_abs_errors: List[float] = []
+    sample_class_labels: List[int] = []
 
     with torch.inference_mode():
         # Warmup passes for Torch compiled model (fixed batch size 1 shape)
@@ -194,20 +210,27 @@ def _simulate_batch1_worker(
                             f"Numerical divergence: NaN/Inf detected in model output tuple at evaluation sample {s_idx}"
                         )
 
-            # Extract primary tensor output for trajectory comparison
+            # Extract primary tensor output for phase snapshot at T=1
             out_tensor = out[0] if isinstance(out, (tuple, list)) else out
+            if isinstance(out_tensor, torch.Tensor):
+                if out_tensor.ndim == 3 and out_tensor.shape[1] > 1:
+                    out_tensor = out_tensor[:, -1, :]
+                elif out_tensor.ndim == 2 and out_tensor.shape[0] > 1 and n_osc is not None and out_tensor.shape[1] == n_osc:
+                    out_tensor = out_tensor[-1, :]
 
             if is_reference:
                 recorded_outputs.append(out_tensor.detach().cpu())
             elif ref_outputs is not None and s_idx < len(ref_outputs):
                 ref_s = ref_outputs[s_idx].to(device=out_tensor.device, dtype=out_tensor.dtype)
-                diff = torch.abs(out_tensor - ref_s)
-                sample_abs = float(torch.mean(diff).item())
-                ref_norm = float(torch.norm(ref_s).item())
-                sample_rel = float((torch.norm(out_tensor - ref_s).item()) / max(ref_norm, 1e-8))
-                sample_abs_errors.append(sample_abs)
-                sample_rel_errors.append(sample_rel)
-                del ref_s, diff
+                if isinstance(ref_s, torch.Tensor):
+                    if ref_s.ndim == 3 and ref_s.shape[1] > 1:
+                        ref_s = ref_s[:, -1, :]
+                    elif ref_s.ndim == 2 and ref_s.shape[0] > 1 and n_osc is not None and ref_s.shape[1] == n_osc:
+                        ref_s = ref_s[-1, :]
+                sample_chordal = compute_sample_chordal_error(out_tensor, ref_s)
+                sample_abs_errors.append(sample_chordal)
+                sample_class_labels.append(s_idx % num_classes)
+                del ref_s
 
             # Explicitly delete intermediate tensors or sample tensors to avoid retaining memory across iterations
             del out, sample_in, sample_drive
@@ -226,13 +249,24 @@ def _simulate_batch1_worker(
 
     if is_reference:
         mean_relative_error = 0.0
-        mean_absolute_error = 0.0
-    elif sample_rel_errors:
-        mean_relative_error = float(sum(sample_rel_errors) / len(sample_rel_errors))
-        mean_absolute_error = float(sum(sample_abs_errors) / len(sample_abs_errors))
-    else:
+        pooled_mean_square = 0.0
+        pooled_rms = 0.0
+        abs_p90 = 0.0
+    elif sample_abs_errors:
+        agg = aggregate_class_errors(
+            sample_errors=sample_abs_errors,
+            class_labels=sample_class_labels,
+            all_classes=list(range(num_classes)),
+        )
+        pooled_mean_square = float(agg["pooled_mean_square"])
+        pooled_rms = float(agg["pooled_rms"])
+        abs_p90 = float(agg["p90"])
         mean_relative_error = None
-        mean_absolute_error = None
+    else:
+        pooled_mean_square = None
+        pooled_rms = None
+        abs_p90 = None
+        mean_relative_error = None
 
     return {
         "mean_latency_ms": round(mean_lat_ms, 4),
@@ -242,7 +276,9 @@ def _simulate_batch1_worker(
         "total_eval_time_s": total_eval_time_s,
         "evaluated_samples": num_eval_samples,
         "relative_error": round(mean_relative_error, 6) if mean_relative_error is not None else None,
-        "absolute_error": round(mean_absolute_error, 6) if mean_absolute_error is not None else None,
+        "absolute_error": round(pooled_mean_square, 6) if pooled_mean_square is not None else None,
+        "absolute_error_p90": round(abs_p90, 6) if abs_p90 is not None else None,
+        "pooled_rms": round(pooled_rms, 6) if pooled_rms is not None else None,
         "recorded_outputs": recorded_outputs if is_reference else None,
     }
 
@@ -363,6 +399,7 @@ def node6_phase1_simulate_profile(
         peak_memory_mb = 128.0 if is_ref else 142.5
         relative_error = 0.0 if is_ref else 0.015
         absolute_error = 0.0 if is_ref else 0.012
+        absolute_error_p90 = 0.0 if is_ref else 0.015
         accuracy_mean = 0.925 if is_ref else 0.900
         accuracy_std = 0.005 if is_ref else 0.012
         accuracy_ci95 = 0.001 if is_ref else 0.002
@@ -380,6 +417,7 @@ def node6_phase1_simulate_profile(
             "accuracy_fid": None,
             "relative_error": relative_error,
             "absolute_error": absolute_error,
+            "absolute_error_p90": absolute_error_p90,
             "wall_clock_s": wall_clock_s,
             "sample_count": sample_count,
             "dataset": dataset_name,
@@ -387,22 +425,40 @@ def node6_phase1_simulate_profile(
         }
 
         is_remote, is_readonly = _is_remote_or_readonly(db)
-        if result_db_tool is not None and not is_remote and not is_readonly:
+        if not is_remote and not is_readonly:
             try:
-                result_db_tool.mark_proposal_status(
-                    candidate_id=candidate_id,
-                    status="EVALUATING",
-                    latency_ms=latency_ms,
-                    accuracy_fid=None,
-                    relative_error=relative_error,
-                    absolute_error=absolute_error,
-                    wall_clock_s=wall_clock_s,
-                    worker_utilization=0.85,
-                )
-                result_db_tool.update_execution_status(
-                    candidate_id=candidate_id,
-                    simulation_status="SUCCESS",
-                )
+                if result_db_tool is not None:
+                    result_db_tool.mark_proposal_status(
+                        candidate_id=candidate_id,
+                        status="EVALUATING",
+                        latency_ms=latency_ms,
+                        accuracy_fid=None,
+                        relative_error=relative_error,
+                        absolute_error=absolute_error,
+                        absolute_error_p90=absolute_error_p90,
+                        wall_clock_s=wall_clock_s,
+                        worker_utilization=0.85,
+                    )
+                    result_db_tool.update_execution_status(
+                        candidate_id=candidate_id,
+                        simulation_status="SUCCESS",
+                    )
+                elif db is not None and hasattr(db, "mark_proposal_status"):
+                    db.mark_proposal_status(
+                        candidate_id=candidate_id,
+                        status="EVALUATING",
+                        latency_ms=latency_ms,
+                        accuracy_fid=None,
+                        relative_error=relative_error,
+                        absolute_error=absolute_error,
+                        absolute_error_p90=absolute_error_p90,
+                        wall_clock_s=wall_clock_s,
+                        worker_utilization=0.85,
+                    )
+                    db.update_execution_status(
+                        candidate_id=candidate_id,
+                        simulation_status="SUCCESS",
+                    )
             except Exception as e:
                 logger.debug("Node 6 test mode DB update skipped: %s", e)
         else:
@@ -526,6 +582,7 @@ def node6_phase1_simulate_profile(
             is_ray_active = False
 
         is_ref = bool(proposal.get("is_reference"))
+        num_classes = getattr(ref_design, "num_classes", 10) if ref_design else 10
         ref_outputs: Optional[List[torch.Tensor]] = None
         if not is_ref:
             global _CACHED_REF_OUTPUTS
@@ -533,13 +590,21 @@ def node6_phase1_simulate_profile(
                 ref_outputs = _CACHED_REF_OUTPUTS
             else:
                 cache_p = _resolve_ref_cache_path(db, config)
+                legacy_cache_p = cache_p.parent / "ref_trajectories.pt"
                 if cache_p.exists():
                     try:
                         ref_outputs = torch.load(cache_p, weights_only=True)
                         _CACHED_REF_OUTPUTS = ref_outputs
-                        logger.info("Node 6: Loaded %d reference trajectory outputs from %s", len(ref_outputs), cache_p)
+                        logger.info("Node 6: Loaded %d reference phase snapshot outputs from %s", len(ref_outputs), cache_p)
                     except Exception as load_err:
-                        logger.warning("Node 6: Failed to load reference trajectory cache: %s", load_err)
+                        logger.warning("Node 6: Failed to load reference snapshot cache: %s", load_err)
+                elif legacy_cache_p.exists():
+                    try:
+                        ref_outputs = torch.load(legacy_cache_p, weights_only=True)
+                        _CACHED_REF_OUTPUTS = ref_outputs
+                        logger.info("Node 6: Loaded %d reference legacy trajectory outputs from %s", len(ref_outputs), legacy_cache_p)
+                    except Exception as load_err:
+                        logger.warning("Node 6: Failed to load legacy reference trajectory cache: %s", load_err)
 
         # Node 6 is already executing on the target simulation worker node (sim_worker: 1).
         # Execute the batch 1 worker directly in-process to avoid deadlocks from nested resource acquisition.
@@ -552,17 +617,8 @@ def node6_phase1_simulate_profile(
             n_cond=n_cond,
             ref_outputs=ref_outputs,
             is_reference=is_ref,
+            num_classes=num_classes,
         )
-
-        if is_ref and worker_res.get("recorded_outputs"):
-            _CACHED_REF_OUTPUTS = worker_res["recorded_outputs"]
-            cache_p = _resolve_ref_cache_path(db, config)
-            try:
-                cache_p.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(_CACHED_REF_OUTPUTS, cache_p)
-                logger.info("Node 6: Persisted %d reference trajectory outputs to %s", len(_CACHED_REF_OUTPUTS), cache_p)
-            except Exception as save_err:
-                logger.debug("Node 6: Could not persist reference trajectory cache: %s", save_err)
 
         wall_clock_s = time.perf_counter() - start_wall_clock
 
@@ -574,16 +630,63 @@ def node6_phase1_simulate_profile(
         if is_ref:
             relative_error = 0.0
             absolute_error = 0.0
+            absolute_error_p90 = 0.0
             accuracy_mean = 1.0
+
+            if worker_res.get("recorded_outputs"):
+                _CACHED_REF_OUTPUTS = worker_res["recorded_outputs"]
+                cache_p = _resolve_ref_cache_path(db, config)
+                try:
+                    cache_p.parent.mkdir(parents=True, exist_ok=True)
+                    torch.save(_CACHED_REF_OUTPUTS, cache_p)
+                    logger.info("Node 6: Persisted %d reference phase snapshots to %s", len(_CACHED_REF_OUTPUTS), cache_p)
+                except Exception as save_err:
+                    logger.debug("Node 6: Could not persist reference snapshot cache: %s", save_err)
+
+                # Reference calibration sweep to build dynamic sensitivity lookup table
+                try:
+                    logger.info("Node 6: Calibrating dynamic sensitivity lookup table for reference '%s'", candidate_id)
+                    exp_name = getattr(config, "experiment_name", "first_run_trial_un0_analog_acceleration") if config else "first_run_trial_un0_analog_acceleration"
+                    sens_table = SensitivityLookupTable.calibrate_from_reference_snapshots(
+                        ref_snapshots=_CACHED_REF_OUTPUTS,
+                        num_classes=num_classes,
+                        reference_id=candidate_id,
+                        experiment_name=exp_name,
+                    )
+                    global _CACHED_SENSITIVITY_TABLE
+                    _CACHED_SENSITIVITY_TABLE = sens_table
+
+                    sens_cache_p = _resolve_sensitivity_cache_path(db, config)
+                    try:
+                        sens_table.save_to_file(sens_cache_p)
+                        logger.info("Node 6: Persisted sensitivity lookup table to %s", sens_cache_p)
+                    except Exception as f_err:
+                        logger.debug("Node 6: Could not save sensitivity lookup table to file: %s", f_err)
+
+                    is_remote, is_readonly = _is_remote_or_readonly(db)
+                    if not is_remote and not is_readonly:
+                        try:
+                            if result_db_tool is not None:
+                                result_db_tool.record_sensitivity_curve(
+                                    reference_id=candidate_id,
+                                    curve=sens_table.entries,
+                                    experiment_name=exp_name,
+                                )
+                            elif db is not None:
+                                sens_table.save_to_db(getattr(db, "_db", db))
+                            logger.info("Node 6: Recorded sensitivity curve to DB (%d entries)", len(sens_table))
+                        except Exception as db_err:
+                            logger.debug("Node 6: Could not record sensitivity curve to DB: %s", db_err)
+                except Exception as cal_err:
+                    logger.warning("Node 6: Failed to calibrate sensitivity lookup table: %s", cal_err)
         else:
-            relative_error = worker_res.get("relative_error")
             absolute_error = worker_res.get("absolute_error")
-            if relative_error is None or absolute_error is None:
+            absolute_error_p90 = worker_res.get("absolute_error_p90")
+            if absolute_error is None:
                 err_msg = (
-                    f"Node 6 simulation failed for candidate '{candidate_id}': reference trajectory "
-                    f"comparison could not be computed (relative_error={relative_error}, "
-                    f"absolute_error={absolute_error}). "
-                    "Ensure reference design ran and cached golden trajectory outputs."
+                    f"Node 6 simulation failed for candidate '{candidate_id}': reference snapshot "
+                    f"comparison could not be computed (absolute_error={absolute_error}). "
+                    "Ensure reference design ran and cached golden phase snapshots."
                 )
                 logger.error(err_msg)
                 is_remote, is_readonly = _is_remote_or_readonly(db)
@@ -604,7 +707,55 @@ def node6_phase1_simulate_profile(
                     "error_logs": err_msg,
                     "next_node": "node8_phase1_diagnostic_proposal",
                 }
+
+            # Retrieve sensitivity lookup table and interpolate dynamic sensitivity error
+            sens_table = _CACHED_SENSITIVITY_TABLE
+            if sens_table is None:
+                sens_cache_p = _resolve_sensitivity_cache_path(db, config)
+                if sens_cache_p.exists():
+                    try:
+                        sens_table = SensitivityLookupTable.load_from_file(sens_cache_p)
+                        _CACHED_SENSITIVITY_TABLE = sens_table
+                        logger.info("Node 6: Loaded sensitivity lookup table from %s", sens_cache_p)
+                    except Exception as load_err:
+                        logger.debug("Node 6: Could not load sensitivity lookup from file: %s", load_err)
+
+            if sens_table is None and db is not None:
+                try:
+                    underlying_db = getattr(db, "_db", db)
+                    exp_name = getattr(config, "experiment_name", "first_run_trial_un0_analog_acceleration") if config else "first_run_trial_un0_analog_acceleration"
+                    sens_table = SensitivityLookupTable.load_from_db(
+                        db=underlying_db,
+                        reference_id=proposal.get("reference_id") or None,
+                        experiment_name=exp_name,
+                    )
+                    if len(sens_table) > 0:
+                        _CACHED_SENSITIVITY_TABLE = sens_table
+                        logger.info("Node 6: Loaded sensitivity lookup table from DB (%d entries)", len(sens_table))
+                except Exception as db_err:
+                    logger.debug("Node 6: Could not load sensitivity lookup from DB: %s", db_err)
+
+            if sens_table is None and ref_outputs is not None:
+                try:
+                    logger.info("Node 6: Calibrating sensitivity lookup table on the fly for candidate interpolation")
+                    exp_name = getattr(config, "experiment_name", "first_run_trial_un0_analog_acceleration") if config else "first_run_trial_un0_analog_acceleration"
+                    sens_table = SensitivityLookupTable.calibrate_from_reference_snapshots(
+                        ref_snapshots=ref_outputs,
+                        num_classes=num_classes,
+                        reference_id=proposal.get("reference_id", ""),
+                        experiment_name=exp_name,
+                    )
+                    _CACHED_SENSITIVITY_TABLE = sens_table
+                except Exception as onfly_err:
+                    logger.warning("Node 6: On-the-fly sensitivity calibration failed: %s", onfly_err)
+
+            if sens_table is not None and len(sens_table) > 0:
+                relative_error = round(sens_table.interpolate(e_cand=absolute_error), 6)
+            else:
+                relative_error = round(absolute_error, 6)
+
             accuracy_mean = max(0.0, 1.0 - relative_error)
+
         accuracy_worst_pct = accuracy_mean - 2 * (latency_std / max(latency_ms, 1e-4) * 0.01)
         accuracy_ci95 = 0.002
 
@@ -620,6 +771,7 @@ def node6_phase1_simulate_profile(
             "accuracy_fid": None,
             "relative_error": relative_error,
             "absolute_error": absolute_error,
+            "absolute_error_p90": absolute_error_p90,
             "wall_clock_s": round(wall_clock_s, 4),
             "sample_count": sample_count,
             "dataset": dataset_name,
@@ -630,22 +782,40 @@ def node6_phase1_simulate_profile(
 
         # Store metrics in database proposal record via Chia Tool MCP API (driver will also sync)
         is_remote, is_readonly = _is_remote_or_readonly(db)
-        if result_db_tool is not None and not is_remote and not is_readonly:
+        if not is_remote and not is_readonly:
             try:
-                result_db_tool.mark_proposal_status(
-                    candidate_id=candidate_id,
-                    status="EVALUATING",
-                    latency_ms=latency_ms,
-                    accuracy_fid=None,
-                    relative_error=relative_error,
-                    absolute_error=absolute_error,
-                    wall_clock_s=wall_clock_s,
-                    worker_utilization=0.90,
-                )
-                result_db_tool.update_execution_status(
-                    candidate_id=candidate_id,
-                    simulation_status="SUCCESS",
-                )
+                if result_db_tool is not None:
+                    result_db_tool.mark_proposal_status(
+                        candidate_id=candidate_id,
+                        status="EVALUATING",
+                        latency_ms=latency_ms,
+                        accuracy_fid=None,
+                        relative_error=relative_error,
+                        absolute_error=absolute_error,
+                        absolute_error_p90=absolute_error_p90,
+                        wall_clock_s=wall_clock_s,
+                        worker_utilization=0.90,
+                    )
+                    result_db_tool.update_execution_status(
+                        candidate_id=candidate_id,
+                        simulation_status="SUCCESS",
+                    )
+                elif db is not None and hasattr(db, "mark_proposal_status"):
+                    db.mark_proposal_status(
+                        candidate_id=candidate_id,
+                        status="EVALUATING",
+                        latency_ms=latency_ms,
+                        accuracy_fid=None,
+                        relative_error=relative_error,
+                        absolute_error=absolute_error,
+                        absolute_error_p90=absolute_error_p90,
+                        wall_clock_s=wall_clock_s,
+                        worker_utilization=0.90,
+                    )
+                    db.update_execution_status(
+                        candidate_id=candidate_id,
+                        simulation_status="SUCCESS",
+                    )
             except Exception as e:
                 logger.debug("Node 6: Non-critical failure updating DB status (driver will sync): %s", e)
         else:

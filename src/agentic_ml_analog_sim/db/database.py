@@ -97,6 +97,7 @@ class ResultDatabase:
                 ("error_stage", "TEXT"),
                 ("error_message", "TEXT"),
                 ("absolute_error", "REAL"),
+                ("absolute_error_p90", "REAL"),
                 ("is_debug", "BOOLEAN DEFAULT 0"),
                 ("debug_parent_id", "TEXT"),
                 ("counter_1_compilation", "INT DEFAULT 0"),
@@ -188,6 +189,7 @@ class ResultDatabase:
         accuracy_fid: Optional[float] = None,
         relative_error: Optional[float] = None,
         absolute_error: Optional[float] = None,
+        absolute_error_p90: Optional[float] = None,
         latency_ms: Optional[float] = None,
         wall_clock_s: Optional[float] = None,
         worker_utilization: Optional[float] = None,
@@ -225,11 +227,11 @@ class ResultDatabase:
                     candidate_id, iteration, solver, noise_model,
                     sparsity_config, solver_params, noise_params,
                     status, is_reference, is_active_evaluation,
-                    accuracy_fid, relative_error, absolute_error, latency_ms, wall_clock_s,
+                    accuracy_fid, relative_error, absolute_error, absolute_error_p90, latency_ms, wall_clock_s,
                     worker_utilization, pareto_optimal, selection_reason, phase_1_prompt,
                     is_debug, debug_parent_id,
                     counter_1_compilation, counter_2_rewrite, counter_3_debug_gate, counter_4_debug_loop
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate_id,
@@ -245,6 +247,7 @@ class ResultDatabase:
                     accuracy_fid,
                     relative_error,
                     absolute_error,
+                    absolute_error_p90,
                     latency_ms,
                     wall_clock_s,
                     worker_utilization,
@@ -514,6 +517,7 @@ class ResultDatabase:
             "accuracy_fid",
             "relative_error",
             "absolute_error",
+            "absolute_error_p90",
             "latency_ms",
             "wall_clock_s",
             "worker_utilization",
@@ -1142,3 +1146,139 @@ class ResultDatabase:
             return dict(row) if row else None
         finally:
             conn.close()
+
+    def record_sensitivity_curve(
+        self,
+        reference_id: str,
+        curve: List[Tuple[float, float]],
+        experiment_name: str = "default",
+    ) -> int:
+        """Persist sensitivity curve tuples (epsilon_d, e_pert) for a reference design.
+
+        Args:
+            reference_id: The candidate_id of the reference design proposal.
+            curve: List of (epsilon_d, e_pert) float tuples.
+            experiment_name: Optional experiment tag/namespace.
+
+        Returns:
+            int: Total number of rows inserted/updated.
+        """
+        conn = self._get_connection()
+        try:
+            count = 0
+            for eps_d, e_p in curve:
+                conn.execute(
+                    """
+                    INSERT INTO sensitivity_lookup (experiment_name, reference_id, epsilon_d, e_pert)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(reference_id, epsilon_d) DO UPDATE SET
+                        e_pert = excluded.e_pert,
+                        experiment_name = excluded.experiment_name,
+                        created_at = CURRENT_TIMESTAMP
+                    """,
+                    (experiment_name, reference_id, float(eps_d), float(e_p)),
+                )
+                count += 1
+            conn.commit()
+            return count
+        finally:
+            conn.close()
+
+    def save_sensitivity_lookup(
+        self,
+        reference_id: str,
+        curve: List[Tuple[float, float]],
+        experiment_name: str = "default",
+    ) -> int:
+        """Alias for record_sensitivity_curve."""
+        return self.record_sensitivity_curve(reference_id=reference_id, curve=curve, experiment_name=experiment_name)
+
+    def get_sensitivity_curve(
+        self,
+        reference_id: Optional[str] = None,
+        experiment_name: Optional[str] = None,
+    ) -> List[Tuple[float, float]]:
+        """Retrieve sensitivity curve tuples sorted by e_pert ASC.
+
+        Args:
+            reference_id: Optional reference proposal candidate_id. If omitted,
+                          queries the most recent reference proposal.
+            experiment_name: Optional experiment name filter.
+
+        Returns:
+            List[Tuple[float, float]]: Sorted list of (epsilon_d, e_pert).
+        """
+        conn = self._get_connection()
+        try:
+            if reference_id is None:
+                ref = self.get_reference_proposal()
+                if ref is not None:
+                    reference_id = ref.get("candidate_id")
+
+            if reference_id is not None:
+                cur = conn.execute(
+                    """
+                    SELECT epsilon_d, e_pert FROM sensitivity_lookup
+                    WHERE reference_id = ?
+                    ORDER BY e_pert ASC, epsilon_d ASC
+                    """,
+                    (reference_id,),
+                )
+            elif experiment_name is not None:
+                cur = conn.execute(
+                    """
+                    SELECT epsilon_d, e_pert FROM sensitivity_lookup
+                    WHERE experiment_name = ?
+                    ORDER BY e_pert ASC, epsilon_d ASC
+                    """,
+                    (experiment_name,),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    SELECT epsilon_d, e_pert FROM sensitivity_lookup
+                    ORDER BY e_pert ASC, epsilon_d ASC
+                    """
+                )
+            rows = cur.fetchall()
+            return [(float(r["epsilon_d"]), float(r["e_pert"])) for r in rows]
+        finally:
+            conn.close()
+
+    def get_sensitivity_lookup(
+        self,
+        reference_id: Optional[str] = None,
+        experiment_name: Optional[str] = None,
+    ) -> List[Tuple[float, float]]:
+        """Alias for get_sensitivity_curve."""
+        return self.get_sensitivity_curve(reference_id=reference_id, experiment_name=experiment_name)
+
+    def clear_sensitivity_curve(
+        self,
+        reference_id: Optional[str] = None,
+        experiment_name: Optional[str] = None,
+    ) -> int:
+        """Delete sensitivity lookup records for a given reference_id or experiment.
+
+        Returns:
+            int: Number of rows deleted.
+        """
+        conn = self._get_connection()
+        try:
+            if reference_id is not None:
+                cur = conn.execute(
+                    "DELETE FROM sensitivity_lookup WHERE reference_id = ?",
+                    (reference_id,),
+                )
+            elif experiment_name is not None:
+                cur = conn.execute(
+                    "DELETE FROM sensitivity_lookup WHERE experiment_name = ?",
+                    (experiment_name,),
+                )
+            else:
+                cur = conn.execute("DELETE FROM sensitivity_lookup")
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+

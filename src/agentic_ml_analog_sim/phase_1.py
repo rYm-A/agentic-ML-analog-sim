@@ -624,6 +624,7 @@ def run_phase_1(
         metrics = profile_res.get("metrics", {})
         active_candidate["relative_error"] = metrics.get("relative_error")
         active_candidate["absolute_error"] = metrics.get("absolute_error")
+        active_candidate["absolute_error_p90"] = metrics.get("absolute_error_p90")
         # Sync Node 6 profiling metrics and status to local db
         try:
             if profile_res.get("status") == "SUCCESS":
@@ -633,6 +634,7 @@ def run_phase_1(
                     latency_ms=metrics.get("latency_ms"),
                     relative_error=metrics.get("relative_error"),
                     absolute_error=metrics.get("absolute_error"),
+                    absolute_error_p90=metrics.get("absolute_error_p90"),
                     accuracy_fid=metrics.get("accuracy_fid"),
                     wall_clock_s=metrics.get("wall_clock_s"),
                     worker_utilization=0.85,
