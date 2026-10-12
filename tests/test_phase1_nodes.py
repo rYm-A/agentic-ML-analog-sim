@@ -881,6 +881,7 @@ def test_node6_real_model_batch_size_1(tmp_db_and_config):
         candidate_id="cand_sim_real_bs1",
         solver="rk4",
         noise_model="none",
+        is_reference=True,
     )
 
     # Use a compiled PyTorch model (Inductor / aot_eager)

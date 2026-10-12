@@ -256,13 +256,16 @@ def _is_remote_or_readonly(db: Optional[Any] = None) -> tuple[bool, bool]:
             if curr_ip in ("127.0.0.1", "localhost"):
                 is_remote = False
             else:
-                ctx = ray.get_runtime_context()
-                gcs_addr = getattr(ctx, "gcs_address", None)
-                if gcs_addr:
-                    head_ip = gcs_addr.split(":")[0]
-                    is_remote = (curr_ip != head_ip)
-                else:
-                    is_remote = (curr_ip != "127.0.0.1")
+                try:
+                    ctx = ray.get_runtime_context()
+                    gcs_addr = getattr(ctx, "gcs_address", None)
+                    if gcs_addr:
+                        head_ip = gcs_addr.split(":")[0]
+                        is_remote = (curr_ip != head_ip)
+                    else:
+                        is_remote = (curr_ip != "127.0.0.1")
+                except Exception:
+                    is_remote = (curr_ip not in ("127.0.0.1", "localhost"))
         except Exception:
             is_remote = False
 
@@ -571,16 +574,37 @@ def node6_phase1_simulate_profile(
         if is_ref:
             relative_error = 0.0
             absolute_error = 0.0
+            accuracy_mean = 1.0
         else:
             relative_error = worker_res.get("relative_error")
             absolute_error = worker_res.get("absolute_error")
-            # Fallback to Node 5 verified differences if reference cache was absent
-            if relative_error is None:
-                relative_error = proposal.get("verify_max_rel_diff", 0.005)
-            if absolute_error is None:
-                absolute_error = proposal.get("verify_max_abs_diff", 0.005)
-
-        accuracy_mean = 0.95 if is_ref else max(0.0, 1.0 - relative_error)
+            if relative_error is None or absolute_error is None:
+                err_msg = (
+                    f"Node 6 simulation failed for candidate '{candidate_id}': reference trajectory "
+                    f"comparison could not be computed (relative_error={relative_error}, "
+                    f"absolute_error={absolute_error}). "
+                    "Ensure reference design ran and cached golden trajectory outputs."
+                )
+                logger.error(err_msg)
+                is_remote, is_readonly = _is_remote_or_readonly(db)
+                if result_db_tool is not None and not is_remote and not is_readonly:
+                    try:
+                        result_db_tool.update_execution_status(
+                            candidate_id=candidate_id,
+                            simulation_status="FAILED",
+                            error_stage="simulation",
+                            error_message=err_msg,
+                        )
+                    except Exception as e:
+                        logger.debug("Node 6: DB status update skipped: %s", e)
+                return {
+                    "candidate_id": candidate_id,
+                    "status": "FAILED",
+                    "error_message": err_msg,
+                    "error_logs": err_msg,
+                    "next_node": "node8_phase1_diagnostic_proposal",
+                }
+            accuracy_mean = max(0.0, 1.0 - relative_error)
         accuracy_worst_pct = accuracy_mean - 2 * (latency_std / max(latency_ms, 1e-4) * 0.01)
         accuracy_ci95 = 0.002
 

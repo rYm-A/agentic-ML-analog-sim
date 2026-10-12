@@ -151,3 +151,35 @@ def test_reference_and_candidate_trajectory_errors(tmp_db_and_cfg):
     # Euler with 5 steps should diverge more than RK4 with 10 steps
     assert rel_err_2 != rel_err, f"Expected distinct relative errors, got {rel_err_2} vs {rel_err}"
     assert abs_err_2 != abs_err, f"Expected distinct absolute errors, got {abs_err_2} vs {abs_err}"
+
+
+def test_candidate_fails_when_reference_cache_missing(tmp_db_and_cfg, monkeypatch):
+    """Test that candidate fails cleanly with status='FAILED' if golden reference cache is missing."""
+    import sys
+    n6_module = sys.modules["agentic_ml_analog_sim.nodes.node6_phase1_simulate_profile"]
+    monkeypatch.setattr(n6_module, "_CACHED_REF_OUTPUTS", None)
+
+    tmp_db, config = tmp_db_and_cfg
+    cand_id = tmp_db.insert_proposal(
+        candidate_id="cand_test_no_ref",
+        solver="rk4",
+        solver_params={"num_steps": 10},
+        is_reference=False,
+    )
+    base_cand = ConditionalKuramotoDynamics(n_oscillators=64, n_conditional_oscillators=2, num_classes=10)
+    cand_model = functionalize_kuramoto_model(base_cand, solver_name="rk4", num_steps=10, dt=0.1, use_hop=False)
+
+    res = node6_phase1_simulate_profile(
+        db=tmp_db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=cand_model,
+        target_device="cpu",
+        backend_mode="local",
+        num_profile_samples=5,
+    )
+
+    assert res["status"] == "FAILED"
+    assert "reference trajectory comparison could not be computed" in res["error_message"]
+    assert res["next_node"] == "node8_phase1_diagnostic_proposal"
+

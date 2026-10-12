@@ -95,13 +95,16 @@ def _is_remote_or_readonly(db: Optional[Any] = None) -> tuple[bool, bool]:
             if curr_ip in ("127.0.0.1", "localhost"):
                 is_remote = False
             else:
-                ctx = ray.get_runtime_context()
-                gcs_addr = getattr(ctx, "gcs_address", None)
-                if gcs_addr:
-                    head_ip = gcs_addr.split(":")[0]
-                    is_remote = (curr_ip != head_ip)
-                else:
-                    is_remote = (curr_ip != "127.0.0.1")
+                try:
+                    ctx = ray.get_runtime_context()
+                    gcs_addr = getattr(ctx, "gcs_address", None)
+                    if gcs_addr:
+                        head_ip = gcs_addr.split(":")[0]
+                        is_remote = (curr_ip != head_ip)
+                    else:
+                        is_remote = (curr_ip != "127.0.0.1")
+                except Exception:
+                    is_remote = (curr_ip not in ("127.0.0.1", "localhost"))
         except Exception:
             is_remote = False
 
@@ -120,6 +123,17 @@ def _is_remote_or_readonly(db: Optional[Any] = None) -> tuple[bool, bool]:
             except Exception:
                 pass
     return is_remote, is_readonly
+
+def _safe_ray_put(obj: Any) -> Any:
+    """Safely put object into Ray plasma store if Ray is initialized and connected."""
+    if obj is None:
+        return None
+    if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
+        try:
+            return ray.put(obj)
+        except Exception:
+            return obj
+    return obj
 
 
 @ChiaFunction(resources={"sim_worker": 1})
@@ -185,8 +199,8 @@ def node5_phase1_verify_correctness(
     def _handle_failure(
         error_stage: str,
         error_msg: str,
-        max_abs: float = 0.0,
-        max_rel: float = 0.0,
+        max_abs: Optional[float] = None,
+        max_rel: Optional[float] = None,
     ) -> Dict[str, Any]:
         is_remote, is_readonly = _is_remote_or_readonly(db)
         new_counter_1 = curr_counter_1 + 1
@@ -455,8 +469,8 @@ def node5_phase1_verify_correctness(
         return _handle_failure(
             error_stage="correctness_verification",
             error_msg=error_msg,
-            max_abs=0.0,
-            max_rel=0.0,
+            max_abs=None,
+            max_rel=None,
         )
 
     # Reset Counter ID 1 on success
@@ -489,9 +503,7 @@ def node5_phase1_verify_correctness(
         pass
 
     # Return ObjectRef if distributed to avoid pulling heavy compiled model back to head node
-    ret_compiled_model = orig_compiled_ref if orig_compiled_ref is not None else (
-        ray.put(compiled_model) if (ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized() and compiled_model is not None) else compiled_model
-    )
+    ret_compiled_model = orig_compiled_ref if orig_compiled_ref is not None else _safe_ray_put(compiled_model)
 
     return {
         "candidate_id": candidate_id,

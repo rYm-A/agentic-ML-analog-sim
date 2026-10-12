@@ -347,7 +347,7 @@ class Un0Context:
         total_matches = 0
         max_snippets = 20
 
-        py_files = sorted(search_dir.rglob("*.py"))
+        py_files = sorted(search_dir.rglob("*.py"), key=lambda p: (len(p.parts), p))
         for py_file in py_files:
             rel = py_file.relative_to(self.repo_root).as_posix()
             try:

@@ -78,13 +78,16 @@ def _is_remote_or_readonly(db: Optional[Any] = None) -> tuple[bool, bool]:
             if curr_ip in ("127.0.0.1", "localhost"):
                 is_remote = False
             else:
-                ctx = ray.get_runtime_context()
-                gcs_addr = getattr(ctx, "gcs_address", None)
-                if gcs_addr:
-                    head_ip = gcs_addr.split(":")[0]
-                    is_remote = (curr_ip != head_ip)
-                else:
-                    is_remote = (curr_ip != "127.0.0.1")
+                try:
+                    ctx = ray.get_runtime_context()
+                    gcs_addr = getattr(ctx, "gcs_address", None)
+                    if gcs_addr:
+                        head_ip = gcs_addr.split(":")[0]
+                        is_remote = (curr_ip != head_ip)
+                    else:
+                        is_remote = (curr_ip != "127.0.0.1")
+                except Exception:
+                    is_remote = (curr_ip not in ("127.0.0.1", "localhost"))
         except Exception:
             is_remote = False
 
@@ -103,6 +106,18 @@ def _is_remote_or_readonly(db: Optional[Any] = None) -> tuple[bool, bool]:
             except Exception:
                 pass
     return is_remote, is_readonly
+
+
+def _safe_ray_put(obj: Any) -> Any:
+    """Safely put object into Ray plasma store if Ray is initialized and connected."""
+    if obj is None:
+        return None
+    if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
+        try:
+            return ray.put(obj)
+        except Exception:
+            return obj
+    return obj
 
 
 @ChiaFunction(num_cpus=4, resources={"compile_worker": 1})
@@ -388,12 +403,8 @@ def node4_phase1_compilation_runner(
 
     # Node 4 UNCONDITIONALLY routes to Node 5 (Verify Correctness)
     if compilation_status == "SUCCESS":
-        if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
-            compiled_model_ref = ray.put(compiled_model)
-            eager_model_ref = ray.put(eager_baseline)
-        else:
-            compiled_model_ref = compiled_model
-            eager_model_ref = eager_baseline
+        compiled_model_ref = _safe_ray_put(compiled_model)
+        eager_model_ref = _safe_ray_put(eager_baseline)
         return {
             "candidate_id": candidate_id,
             "status": "SUCCESS",
@@ -406,10 +417,7 @@ def node4_phase1_compilation_runner(
             "next_node": "node5_phase1_verify_correctness",
         }
     else:
-        if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
-            eager_model_ref = ray.put(eager_baseline) if eager_baseline is not None else None
-        else:
-            eager_model_ref = eager_baseline
+        eager_model_ref = _safe_ray_put(eager_baseline)
         return {
             "candidate_id": candidate_id,
             "status": "FAILED",

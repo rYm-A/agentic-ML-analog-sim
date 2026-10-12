@@ -617,6 +617,7 @@ def run_phase_1(
             target_device=target_device,
             backend_mode=target_device,
             proposal=active_candidate,
+            test_mode=dry_run,
             timeout=600.0,
         )
 

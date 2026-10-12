@@ -62,6 +62,7 @@ def test_node6_simulate_profile_real_model(tmp_db_and_config):
         candidate_id="cand_test_n6_real",
         solver="rk4",
         noise_model="none",
+        is_reference=True,
     )
 
     model = DummyAnalogModel()
@@ -86,6 +87,7 @@ def test_node6_simulate_profile_remote_worker_returns_metrics_cleanly(tmp_db_and
         candidate_id="cand_test_n6_remote",
         solver="rk4",
         noise_model="none",
+        is_reference=True,
     )
 
     # Monkeypatch to simulate remote worker
@@ -118,6 +120,7 @@ def test_node6_simulate_profile_readonly_db_returns_metrics_cleanly(tmp_db_and_c
         candidate_id="cand_test_n6_readonly",
         solver="rk4",
         noise_model="none",
+        is_reference=True,
     )
 
     orig_access = os.access
