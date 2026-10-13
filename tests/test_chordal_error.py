@@ -89,9 +89,6 @@ def test_aggregate_class_errors():
 
 
 def test_aggregate_class_errors_empty():
-    """Empty errors list returns default zero dict."""
-    agg = aggregate_class_errors([], [])
-    assert agg["pooled_mean_square"] == 0.0
-    assert agg["pooled_rms"] == 0.0
-    assert agg["p90"] == 0.0
-    assert agg["class_mean_squares"] == {}
+    """Empty errors list raises ValueError."""
+    with pytest.raises(ValueError, match="Cannot aggregate class errors: sample_errors is empty."):
+        aggregate_class_errors([], [])

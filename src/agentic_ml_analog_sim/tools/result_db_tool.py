@@ -745,7 +745,7 @@ class ResultDBTool(ChiaTool):
             return json.dumps({
                 "status": "SUCCESS",
                 "e_pert": float(e_pert),
-                "epsilon_d": float(eps_d),
+                "epsilon_d": eps_d if isinstance(eps_d, str) else float(eps_d),
                 "reference_id": reference_id,
             })
         except Exception as e:

@@ -135,13 +135,23 @@ def _simulate_batch1_worker(
     n_cond: Optional[int] = None,
     ref_outputs: Optional[List[torch.Tensor]] = None,
     is_reference: bool = False,
-    num_classes: int = 10,
+    num_classes: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Execute sequential batch size 1 inference passes on hardware device.
 
     Profiles individual sample latencies, peak memory, and computes numerical
     phase snapshot chordal RMS error against golden reference outputs when available.
     """
+    if num_classes is None or num_classes <= 0:
+        raise ValueError(f"num_classes must be specified as a positive integer, got {num_classes}")
+
+    if not is_reference:
+        if ref_outputs is None or len(ref_outputs) < num_eval_samples:
+            raise ValueError(
+                f"Candidate evaluation requires at least {num_eval_samples} reference outputs, "
+                f"but got {len(ref_outputs) if ref_outputs is not None else 0}."
+            )
+
     device = torch.device(device_str)
 
     # Ensure model is set to evaluation mode if accessible
@@ -220,7 +230,7 @@ def _simulate_batch1_worker(
 
             if is_reference:
                 recorded_outputs.append(out_tensor.detach().cpu())
-            elif ref_outputs is not None and s_idx < len(ref_outputs):
+            else:
                 ref_s = ref_outputs[s_idx].to(device=out_tensor.device, dtype=out_tensor.dtype)
                 if isinstance(ref_s, torch.Tensor):
                     if ref_s.ndim == 3 and ref_s.shape[1] > 1:
@@ -252,7 +262,12 @@ def _simulate_batch1_worker(
         pooled_mean_square = 0.0
         pooled_rms = 0.0
         abs_p90 = 0.0
-    elif sample_abs_errors:
+    else:
+        if not sample_abs_errors:
+            raise ValueError(
+                f"Candidate evaluation produced no sample errors across {num_eval_samples} samples; "
+                "cannot aggregate class errors."
+            )
         agg = aggregate_class_errors(
             sample_errors=sample_abs_errors,
             class_labels=sample_class_labels,
@@ -261,11 +276,6 @@ def _simulate_batch1_worker(
         pooled_mean_square = float(agg["pooled_mean_square"])
         pooled_rms = float(agg["pooled_rms"])
         abs_p90 = float(agg["p90"])
-        mean_relative_error = None
-    else:
-        pooled_mean_square = None
-        pooled_rms = None
-        abs_p90 = None
         mean_relative_error = None
 
     return {
@@ -582,7 +592,24 @@ def node6_phase1_simulate_profile(
             is_ray_active = False
 
         is_ref = bool(proposal.get("is_reference"))
-        num_classes = getattr(ref_design, "num_classes", 10) if ref_design else 10
+        num_classes = None
+        if ref_design is not None and hasattr(ref_design, "num_classes") and ref_design.num_classes is not None:
+            num_classes = ref_design.num_classes
+        elif ref_design is not None and hasattr(ref_design, "family") and ref_design.family:
+            fam = str(ref_design.family).lower()
+            if "cifar100" in fam:
+                num_classes = 100
+            elif "cifar10" in fam or "cifar" in fam or "mnist" in fam:
+                num_classes = 10
+        elif config is not None and hasattr(config, "num_classes") and config.num_classes is not None:
+            num_classes = config.num_classes
+
+        if num_classes is None or num_classes <= 0:
+            raise ValueError(
+                f"Node 6 could not resolve a valid positive 'num_classes' from ref_design ({ref_design}) "
+                f"or config ({config}). Please specify 'num_classes' explicitly."
+            )
+
         ref_outputs: Optional[List[torch.Tensor]] = None
         if not is_ref:
             global _CACHED_REF_OUTPUTS
@@ -605,6 +632,31 @@ def node6_phase1_simulate_profile(
                         logger.info("Node 6: Loaded %d reference legacy trajectory outputs from %s", len(ref_outputs), legacy_cache_p)
                     except Exception as load_err:
                         logger.warning("Node 6: Failed to load legacy reference trajectory cache: %s", load_err)
+
+            if ref_outputs is None or len(ref_outputs) == 0:
+                err_msg = (
+                    f"Node 6 simulation failed for candidate '{candidate_id}': reference snapshot "
+                    "outputs are missing. Ensure reference design ran and cached golden phase snapshots."
+                )
+                logger.error(err_msg)
+                is_remote, is_readonly = _is_remote_or_readonly(db)
+                if result_db_tool is not None and not is_remote and not is_readonly:
+                    try:
+                        result_db_tool.update_execution_status(
+                            candidate_id=candidate_id,
+                            simulation_status="FAILED",
+                            error_stage="simulation",
+                            error_message=err_msg,
+                        )
+                    except Exception as e:
+                        logger.debug("Node 6: DB status update skipped: %s", e)
+                return {
+                    "candidate_id": candidate_id,
+                    "status": "FAILED",
+                    "error_message": err_msg,
+                    "error_logs": err_msg,
+                    "next_node": "node8_phase1_diagnostic_proposal",
+                }
 
         # Node 6 is already executing on the target simulation worker node (sim_worker: 1).
         # Execute the batch 1 worker directly in-process to avoid deadlocks from nested resource acquisition.
@@ -652,6 +704,7 @@ def node6_phase1_simulate_profile(
                         num_classes=num_classes,
                         reference_id=candidate_id,
                         experiment_name=exp_name,
+                        base_seed=1000,
                     )
                     global _CACHED_SENSITIVITY_TABLE
                     _CACHED_SENSITIVITY_TABLE = sens_table
@@ -735,26 +788,48 @@ def node6_phase1_simulate_profile(
                 except Exception as db_err:
                     logger.debug("Node 6: Could not load sensitivity lookup from DB: %s", db_err)
 
-            if sens_table is None and ref_outputs is not None:
-                try:
-                    logger.info("Node 6: Calibrating sensitivity lookup table on the fly for candidate interpolation")
-                    exp_name = getattr(config, "experiment_name", "first_run_trial_un0_analog_acceleration") if config else "first_run_trial_un0_analog_acceleration"
-                    sens_table = SensitivityLookupTable.calibrate_from_reference_snapshots(
-                        ref_snapshots=ref_outputs,
-                        num_classes=num_classes,
-                        reference_id=proposal.get("reference_id", ""),
-                        experiment_name=exp_name,
-                    )
-                    _CACHED_SENSITIVITY_TABLE = sens_table
-                except Exception as onfly_err:
-                    logger.warning("Node 6: On-the-fly sensitivity calibration failed: %s", onfly_err)
+            if sens_table is None or len(sens_table) == 0:
+                err_msg = (
+                    f"Node 6 simulation failed for candidate '{candidate_id}': sensitivity lookup table "
+                    "not found in cache or database. Dynamic sensitivity error cannot be interpolated without "
+                    "calibrated reference sensitivity curve."
+                )
+                logger.error(err_msg)
+                is_remote, is_readonly = _is_remote_or_readonly(db)
+                if result_db_tool is not None and not is_remote and not is_readonly:
+                    try:
+                        result_db_tool.update_execution_status(
+                            candidate_id=candidate_id,
+                            simulation_status="FAILED",
+                            error_stage="simulation",
+                            error_message=err_msg,
+                        )
+                    except Exception as e:
+                        logger.debug("Node 6: DB status update skipped: %s", e)
+                return {
+                    "candidate_id": candidate_id,
+                    "status": "FAILED",
+                    "error_message": err_msg,
+                    "error_logs": err_msg,
+                    "next_node": "node8_phase1_diagnostic_proposal",
+                }
 
-            if sens_table is not None and len(sens_table) > 0:
-                relative_error = round(sens_table.interpolate(e_cand=absolute_error), 6)
+            interp_res = sens_table.interpolate(e_cand=absolute_error)
+            if interp_res == "underflow":
+                # Special sentinel value -1.0 indicates dynamic sensitivity underflow (e_cand < min_e)
+                relative_error = -1.0
+            elif interp_res == "overflow":
+                relative_error = float("inf")
             else:
-                relative_error = round(absolute_error, 6)
+                relative_error = round(float(interp_res), 6)
 
-            accuracy_mean = max(0.0, 1.0 - relative_error)
+            if relative_error < 0.0 or (math.isinf(relative_error) and relative_error < 0):
+                # Underflow indicates error below calibrated baseline; accuracy is effectively 100%
+                accuracy_mean = 1.0
+            elif math.isinf(relative_error):
+                accuracy_mean = 0.0
+            else:
+                accuracy_mean = max(0.0, 1.0 - relative_error)
 
         accuracy_worst_pct = accuracy_mean - 2 * (latency_std / max(latency_ms, 1e-4) * 0.01)
         accuracy_ci95 = 0.002

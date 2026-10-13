@@ -64,11 +64,14 @@ def apply_normal_perturbations(
     Args:
         phases: Phase snapshot tensor of oscillators at T=1, shape (..., N).
         epsilon_d: Standard deviation of perturbation noise.
-        seed: Optional deterministic random seed.
+        seed: Deterministic random seed (required, cannot be None).
 
     Returns:
         torch.Tensor: Perturbed phases tensor of same shape and device.
     """
+    if seed is None:
+        raise ValueError("seed must be provided as an integer, cannot be None.")
+
     if isinstance(phases, np.ndarray):
         t_phases = torch.from_numpy(phases).float()
     else:
@@ -77,13 +80,10 @@ def apply_normal_perturbations(
     if abs(epsilon_d) < 1e-15:
         return t_phases.clone()
 
-    if seed is not None:
-        generator = torch.Generator(device="cpu").manual_seed(int(seed))
-        noise = torch.randn(t_phases.shape, generator=generator, dtype=t_phases.dtype)
-        if t_phases.is_cuda:
-            noise = noise.to(t_phases.device)
-    else:
-        noise = torch.randn_like(t_phases)
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    noise = torch.randn(t_phases.shape, generator=generator, dtype=t_phases.dtype)
+    if t_phases.is_cuda:
+        noise = noise.to(t_phases.device)
 
     return t_phases + (abs(float(epsilon_d)) * noise)
 
@@ -127,7 +127,7 @@ class SensitivityLookupTable:
     def __len__(self) -> int:
         return len(self._entries)
 
-    def interpolate(self, e_cand: float) -> float:
+    def interpolate(self, e_cand: float) -> Union[float, str]:
         """Linearly interpolate epsilon_d from measured candidate error e_cand.
 
         Inverts the mapping e_pert(epsilon_d) to find epsilon_d(e_cand).
@@ -136,32 +136,32 @@ class SensitivityLookupTable:
             e_cand: Candidate absolute chordal error (e.g. pooled mean square or RMS).
 
         Returns:
-            float: Interpolated dynamic sensitivity error epsilon_d.
+            Union[float, str]: Interpolated dynamic sensitivity error epsilon_d,
+            or "underflow" if e_cand < min_e, or "overflow" if e_cand > max_e.
         """
         if not self._entries:
-            return 0.0
+            raise ValueError("Cannot interpolate from an empty sensitivity lookup table.")
 
         if len(self._entries) == 1:
-            return self._entries[0][0]
+            return float(self._entries[0][0])
 
         target_e = float(e_cand)
         min_e = self._entries[0][1]
         max_e = self._entries[-1][1]
 
-        # Clamping at lower bound
-        if target_e <= min_e:
-            return self._entries[0][0]
+        # Underflow check: candidate error is strictly lower than minimum calibrated baseline
+        if target_e < min_e:
+            return "underflow"
 
-        # Linear extrapolation or clamping at upper bound
-        if target_e >= max_e:
-            eps_prev, e_prev = self._entries[-2]
-            eps_last, e_last = self._entries[-1]
-            denom = e_last - e_prev
-            if abs(denom) < 1e-12:
-                return eps_last
-            slope = (eps_last - eps_prev) / denom
-            extrapolated = eps_last + slope * (target_e - e_last)
-            return max(0.0, float(extrapolated))
+        # Overflow check: candidate error exceeds maximum calibrated perturbation
+        if target_e > max_e:
+            return "overflow"
+
+        # Exact match at bounds
+        if abs(target_e - min_e) < 1e-15:
+            return float(self._entries[0][0])
+        if abs(target_e - max_e) < 1e-15:
+            return float(self._entries[-1][0])
 
         # Standard piecewise linear interpolation
         for i in range(len(self._entries) - 1):
@@ -170,35 +170,44 @@ class SensitivityLookupTable:
             if e_i <= target_e <= e_next:
                 denom = e_next - e_i
                 if abs(denom) < 1e-12:
-                    return eps_i
+                    return float(eps_i)
                 t = (target_e - e_i) / denom
                 return float((1.0 - t) * eps_i + t * eps_next)
 
-        return self._entries[-1][0]
+        return float(self._entries[-1][0])
 
     @classmethod
     def calibrate_from_reference_snapshots(
         cls,
         ref_snapshots: List[torch.Tensor],
-        num_classes: int = 10,
+        num_classes: Optional[int] = None,
         scales: Optional[List[float]] = None,
         reference_id: str = "",
         experiment_name: str = "default",
-        base_seed: int = 1000,
+        base_seed: Optional[int] = None,
     ) -> SensitivityLookupTable:
         """Perform reference perturbation sweep and populate lookup table.
 
         Args:
             ref_snapshots: List of reference phase vectors at T=1, one per sample s.
-            num_classes: Number of dataset classes (used for s % num_classes).
+            num_classes: Number of dataset classes (required positive integer).
             scales: Optional list of epsilon_d perturbation scales.
             reference_id: Reference proposal candidate ID.
             experiment_name: Experiment namespace identifier.
-            base_seed: Base deterministic seed for reproducibility.
+            base_seed: Base deterministic seed for reproducibility (required integer).
 
         Returns:
             SensitivityLookupTable: Fully populated lookup table.
         """
+        if num_classes is None or num_classes <= 0:
+            raise ValueError(f"num_classes must be a positive integer, got {num_classes}")
+
+        if base_seed is None:
+            raise ValueError("base_seed must be provided as an integer, cannot be None.")
+
+        if not ref_snapshots:
+            raise ValueError("Cannot calibrate sensitivity table: ref_snapshots is empty.")
+
         if scales is None:
             scales = generate_perturbation_scales(min_scale=1e-5, max_scale=1.0, num_points=50, include_zero=True)
 
@@ -219,6 +228,9 @@ class SensitivityLookupTable:
                 pert_s = apply_normal_perturbations(ref_s, epsilon_d=eps_d, seed=sample_seed)
                 e_s = compute_sample_chordal_error(pert_s, ref_s)
                 sample_errors.append(e_s)
+
+            if not sample_errors:
+                raise ValueError("Cannot calibrate sensitivity table: no sample errors computed.")
 
             agg = aggregate_class_errors(sample_errors, class_labels, all_classes=all_classes)
             # Use pooled_mean_square as error metric e_pert per specification

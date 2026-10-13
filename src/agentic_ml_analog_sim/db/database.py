@@ -460,7 +460,9 @@ class ResultDatabase:
                 )
                 cost = item["latency_ms"] if item["latency_ms"] is not None else item["wall_clock_s"]
                 if err is not None and cost is not None:
-                    candidates_with_objs.append((item, float(err), float(cost)))
+                    # Treat negative relative_error (underflow sentinel like -1.0) as 0.0 for Pareto ranking
+                    effective_err = max(0.0, float(err))
+                    candidates_with_objs.append((item, effective_err, float(cost)))
 
             if not candidates_with_objs:
                 return []

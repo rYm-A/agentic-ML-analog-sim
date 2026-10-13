@@ -26,10 +26,15 @@ def test_generate_perturbation_scales():
 
 
 def test_apply_normal_perturbations():
-    """Verify deterministic normal noise application."""
+    """Verify deterministic normal noise application and seed requirement."""
     phases = torch.zeros(1000)
-    # With zero epsilon, return exact copy
-    p0 = apply_normal_perturbations(phases, 0.0)
+
+    # Seed is required
+    with pytest.raises(ValueError, match="seed must be provided"):
+        apply_normal_perturbations(phases, 0.0, seed=None)
+
+    # With zero epsilon and seed, return exact copy
+    p0 = apply_normal_perturbations(phases, 0.0, seed=42)
     assert torch.equal(p0, phases)
 
     # With non-zero epsilon and seed
@@ -42,7 +47,7 @@ def test_apply_normal_perturbations():
 
 
 def test_sensitivity_lookup_table_interpolation():
-    """Test 1D linear interpolation, lower bound clamping, and upper bound extrapolation."""
+    """Test 1D linear interpolation, lower bound underflow, and upper bound overflow."""
     # Table mapping epsilon_d -> e_pert
     # e.g.: (0.0, 0.0), (0.01, 0.02), (0.05, 0.10), (0.10, 0.20)
     entries = [
@@ -53,31 +58,55 @@ def test_sensitivity_lookup_table_interpolation():
     ]
     table = SensitivityLookupTable(entries=entries, reference_id="ref_0", experiment_name="exp_test")
 
-    # Lower bound clamping
-    assert table.interpolate(-0.01) == 0.0
+    # Lower bound underflow
+    assert table.interpolate(-0.01) == "underflow"
     assert table.interpolate(0.0) == 0.0
 
     # Exact points
     assert table.interpolate(0.02) == pytest.approx(0.01)
     assert table.interpolate(0.10) == pytest.approx(0.05)
+    assert table.interpolate(0.20) == pytest.approx(0.10)
 
     # In-between points (piecewise linear interpolation)
     # Between (0.01, 0.02) and (0.05, 0.10):
     # e_pert = 0.06 is halfway between 0.02 and 0.10 -> epsilon_d = 0.03
     assert table.interpolate(0.06) == pytest.approx(0.03)
 
-    # Upper bound extrapolation
-    # Above 0.20: slope from (0.05, 0.10) to (0.10, 0.20) is (0.10 - 0.05) / (0.20 - 0.10) = 0.05 / 0.10 = 0.5
-    # For e_cand = 0.30: eps = 0.10 + 0.5 * (0.30 - 0.20) = 0.15
-    assert table.interpolate(0.30) == pytest.approx(0.15)
+    # Upper bound overflow
+    assert table.interpolate(0.200001) == "overflow"
+    assert table.interpolate(0.30) == "overflow"
 
 
 def test_calibration_from_reference_snapshots():
-    """Verify calibration sweep generates monotonic (epsilon_d, e_pert) pairs."""
+    """Verify calibration sweep generates monotonic (epsilon_d, e_pert) pairs and validates inputs."""
     torch.manual_seed(123)
     # Create 5 synthetic reference phase snapshots of dimension 64
     ref_snapshots = [torch.randn(64) for _ in range(5)]
     scales = [0.0, 1e-4, 1e-3, 1e-2, 1e-1]
+
+    # Validate num_classes requirement
+    with pytest.raises(ValueError, match="num_classes must be a positive integer"):
+        SensitivityLookupTable.calibrate_from_reference_snapshots(
+            ref_snapshots=ref_snapshots,
+            num_classes=None,
+            base_seed=1000,
+        )
+
+    # Validate base_seed requirement
+    with pytest.raises(ValueError, match="base_seed must be provided"):
+        SensitivityLookupTable.calibrate_from_reference_snapshots(
+            ref_snapshots=ref_snapshots,
+            num_classes=2,
+            base_seed=None,
+        )
+
+    # Validate empty snapshots requirement
+    with pytest.raises(ValueError, match="ref_snapshots is empty"):
+        SensitivityLookupTable.calibrate_from_reference_snapshots(
+            ref_snapshots=[],
+            num_classes=2,
+            base_seed=1000,
+        )
 
     table = SensitivityLookupTable.calibrate_from_reference_snapshots(
         ref_snapshots=ref_snapshots,
@@ -85,6 +114,7 @@ def test_calibration_from_reference_snapshots():
         scales=scales,
         reference_id="ref_synth",
         experiment_name="synth_exp",
+        base_seed=1000,
     )
 
     assert len(table) == 5

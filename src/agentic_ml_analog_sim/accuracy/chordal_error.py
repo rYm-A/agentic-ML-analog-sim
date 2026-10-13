@@ -114,12 +114,7 @@ def aggregate_class_errors(
           - "class_mean_squares": Dict mapping class_id -> MS_c.
     """
     if not sample_errors:
-        return {
-            "pooled_mean_square": 0.0,
-            "pooled_rms": 0.0,
-            "p90": 0.0,
-            "class_mean_squares": {},
-        }
+        raise ValueError("Cannot aggregate class errors: sample_errors is empty.")
 
     if len(sample_errors) != len(class_labels):
         raise ValueError(
