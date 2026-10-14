@@ -43,3 +43,11 @@ session_*
 *.fdb_latexmk
 *.synctex.gz
 *.out
+
+# Simulation & reference cache artifacts
+sensitivity_lookup.json
+*sensitivity_lookup*.json
+ref_phases_T1.pt
+*ref_phases*.pt
+ref_trajectories.pt
+*ref_trajectories*.pt

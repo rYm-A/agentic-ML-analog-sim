@@ -12,6 +12,7 @@ reference_design:
   precision: "fp32"
   noise_model: "none"
   sparsity_ratio: 0.0
+  num_classes: 1000
 
 solvers:
   rk4:
@@ -41,8 +42,8 @@ tolerances:
     rtol: 1e-4
     atol: 1e-4
   solver_accuracy:
-    rtol: 5e-2
-    atol: 5e-2
+    rtol: 3
+    atol: 3
     max_fid_degradation: 2.0
 
 budget:

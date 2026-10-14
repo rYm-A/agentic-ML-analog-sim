@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from agentic_ml_analog_sim.config import (
     load_simulation_config,
     SimulationConfig,
+    ReferenceDesignConfig,
     CounterLimitsConfig,
     AgentModelConfig,
     AgentEffortsConfig,
@@ -390,3 +391,27 @@ def test_node_agent_efforts_execution_and_token_recording(
     node2_phase2_generate_final_report(db=temp_db, config=custom_cfg, output_dir=out_dir, compile_pdf=False)
     summary_p2 = temp_db.get_token_usage_summary(phase="phase_2")
     assert "gemini-2.5-flash" in summary_p2["by_model"]
+
+
+def test_reference_design_config_num_classes():
+    """Verify ReferenceDesignConfig num_classes validation and loading."""
+    # 1. Accepts valid num_classes
+    cfg1 = ReferenceDesignConfig(num_classes=10)
+    assert cfg1.num_classes == 10
+
+    cfg2 = ReferenceDesignConfig(num_classes=1000)
+    assert cfg2.num_classes == 1000
+
+    cfg_default = ReferenceDesignConfig()
+    assert cfg_default.num_classes is None
+
+    # 2. Rejects num_classes <= 0 with validation error
+    with pytest.raises(ValidationError):
+        ReferenceDesignConfig(num_classes=0)
+
+    with pytest.raises(ValidationError):
+        ReferenceDesignConfig(num_classes=-5)
+
+    # 3. SimulationConfig.load("config/simulation_config_local_debug.yaml") loads ref_design.num_classes == 1000
+    sim_cfg = SimulationConfig.load("config/simulation_config_local_debug.yaml")
+    assert sim_cfg.reference_design.num_classes == 1000

@@ -121,6 +121,7 @@ experiment_name: "un0_kuramoto_analog_acceleration"
 reference_design:
   name: "cifar10/n1024"
   family: "cifar10"
+  num_classes: 10
   n_oscillators: 1024
   n_conditional_oscillators: 8
   solver: "rk4"
@@ -207,6 +208,11 @@ agent_efforts:
 
 ### Reference Design (`reference_design`)
 The golden ground truth baseline. It is strictly dense (`sparsity_ratio: 0.0`), noise-free (`noise_model: "none"`), and integrated using high-precision 4th-order Runge-Kutta with 25 steps ($\Delta t = 0.04$). All candidate accuracy degradation, relative errors, and speedup multipliers ($1.00\times$) are measured relative to this design.
+
+- **`num_classes`**: Explicitly configures the target classification task output dimensionality (e.g., `10` for CIFAR-10, `1000` for ImageNet-64). This parameter is critical across the Phase 1 pipeline:
+  - **Node 3 (AOT Rewriter)** & **Node 4 (Compilation)**: Configures the target output projection head and dummy input dimensions required for ahead-of-time export.
+  - **Node 6 (Simulate & Profile)**: Determines class logit bounds and ground truth targets for accuracy and distribution fidelity measurements.
+  - **Validation & Terminal Failure Routing**: To prevent silent compilation corruption, silent fallback defaults have been removed. If `num_classes` is omitted or invalid (`<= 0`), Nodes 3, 4, and 6 immediately escalate to `node9_phase1_error_handler` with terminal status (`counter_name="configuration_error"`), bypassing Node 8 LLM diagnostic proposal loops because configuration defects cannot be repaired by code rewriting agents.
 
 ### Solvers & Discretization Steps (`solvers`)
 Defines the numerical ODE algorithms available to candidate proposals. For each solver, `steps` specifies the allowed integration step grid. The step size is computed as $\Delta t = \text{integration\_time} / \text{num\_steps}$. Lower steps reduce simulation and MAC operation counts at the expense of truncation error.

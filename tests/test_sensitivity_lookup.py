@@ -161,3 +161,145 @@ def test_serialization_and_db_persistence():
         for (eps_exp, e_exp), (eps_act, e_act) in zip(entries, loaded_db.entries):
             assert eps_act == pytest.approx(eps_exp)
             assert e_act == pytest.approx(e_exp)
+
+
+def test_calibration_from_reference_simulation_validation():
+    """Verify input validation in calibrate_from_reference_simulation."""
+    torch.manual_seed(42)
+    ref_inputs = [(torch.randn(1, 32), torch.randn(1, 32, 2)) for _ in range(4)]
+    ref_snapshots = [torch.randn(1, 32) for _ in range(4)]
+    model = lambda x, d=None: x
+
+    # num_classes validation
+    with pytest.raises(ValueError, match="num_classes must be a positive integer"):
+        SensitivityLookupTable.calibrate_from_reference_simulation(
+            model=model,
+            ref_inputs=ref_inputs,
+            ref_snapshots=ref_snapshots,
+            num_classes=None,
+            base_seed=1000,
+        )
+
+    with pytest.raises(ValueError, match="num_classes must be a positive integer"):
+        SensitivityLookupTable.calibrate_from_reference_simulation(
+            model=model,
+            ref_inputs=ref_inputs,
+            ref_snapshots=ref_snapshots,
+            num_classes=0,
+            base_seed=1000,
+        )
+
+    # base_seed validation
+    with pytest.raises(ValueError, match="base_seed must be provided"):
+        SensitivityLookupTable.calibrate_from_reference_simulation(
+            model=model,
+            ref_inputs=ref_inputs,
+            ref_snapshots=ref_snapshots,
+            num_classes=2,
+            base_seed=None,
+        )
+
+    # empty snapshots validation
+    with pytest.raises(ValueError, match="ref_snapshots is empty"):
+        SensitivityLookupTable.calibrate_from_reference_simulation(
+            model=model,
+            ref_inputs=ref_inputs,
+            ref_snapshots=[],
+            num_classes=2,
+            base_seed=1000,
+        )
+
+    # mismatched inputs length validation
+    with pytest.raises(ValueError, match="ref_inputs length.*must match ref_snapshots length"):
+        SensitivityLookupTable.calibrate_from_reference_simulation(
+            model=model,
+            ref_inputs=ref_inputs[:2],
+            ref_snapshots=ref_snapshots,
+            num_classes=2,
+            base_seed=1000,
+        )
+
+
+def test_calibration_from_reference_simulation_deterministic_and_monotonic():
+    """Verify deterministic reproducibility and monotonic error progression with a mock model."""
+    class MockModel(torch.nn.Module):
+        def forward(self, x, drive=None):
+            if drive is not None:
+                return x + 0.01 * torch.sum(drive, dim=-1)
+            return x
+
+    torch.manual_seed(42)
+    num_samples = 6
+    ref_inputs = [(torch.randn(1, 32), torch.randn(1, 32, 2)) for _ in range(num_samples)]
+    model = MockModel()
+    ref_snapshots = [model(inp[0], inp[1]) for inp in ref_inputs]
+
+    scales = [0.0, 1e-4, 1e-3, 1e-2, 1e-1, 0.5]
+
+    table1 = SensitivityLookupTable.calibrate_from_reference_simulation(
+        model=model,
+        ref_inputs=ref_inputs,
+        ref_snapshots=ref_snapshots,
+        num_classes=2,
+        scales=scales,
+        reference_id="ref_sim",
+        experiment_name="sim_exp",
+        base_seed=1000,
+    )
+
+    table2 = SensitivityLookupTable.calibrate_from_reference_simulation(
+        model=model,
+        ref_inputs=ref_inputs,
+        ref_snapshots=ref_snapshots,
+        num_classes=2,
+        scales=scales,
+        reference_id="ref_sim",
+        experiment_name="sim_exp",
+        base_seed=1000,
+    )
+
+    # Exact deterministic match
+    assert len(table1) == len(scales)
+    assert table1.entries == table2.entries
+
+    # Baseline zero perturbation produces zero error
+    entries = table1.entries
+    assert entries[0] == (0.0, 0.0)
+
+    # Monotonic error curve: error should not decrease as noise magnitude increases
+    for i in range(len(entries) - 1):
+        assert entries[i][1] <= entries[i + 1][1]
+        assert entries[i][0] <= entries[i + 1][0]
+
+    # Substantial error at high noise
+    assert entries[-1][1] > 0.1
+
+
+def test_calibration_from_reference_simulation_3d_trajectory_output():
+    """Verify snapshot extraction for 3D trajectory output (batch, steps, n_osc)."""
+    class MockTrajectoryModel(torch.nn.Module):
+        def forward(self, x, drive=None):
+            # Returns 3D trajectory tensor (1, 10, 32)
+            return torch.stack([x + i * 0.01 for i in range(10)], dim=1)
+
+    torch.manual_seed(42)
+    num_samples = 4
+    ref_inputs = [(torch.randn(1, 32), None) for _ in range(num_samples)]
+    model = MockTrajectoryModel()
+    # Unperturbed snapshot at T=1
+    ref_snapshots = [model(inp[0])[:, -1, :].clone() for inp in ref_inputs]
+
+    table = SensitivityLookupTable.calibrate_from_reference_simulation(
+        model=model,
+        ref_inputs=ref_inputs,
+        ref_snapshots=ref_snapshots,
+        num_classes=2,
+        scales=[0.0, 0.05, 0.2],
+        base_seed=1000,
+        n_osc=32,
+    )
+
+    assert len(table) == 3
+    assert table.entries[0] == (0.0, 0.0)
+    assert table.entries[1][1] <= table.entries[2][1]
+    assert table.entries[2][1] > 0.0

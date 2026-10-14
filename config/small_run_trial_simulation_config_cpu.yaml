@@ -12,6 +12,7 @@ reference_design:
   precision: "fp32"
   noise_model: "none"
   sparsity_ratio: 0.0
+  num_classes: 1000
 
 solvers:
   rk4:

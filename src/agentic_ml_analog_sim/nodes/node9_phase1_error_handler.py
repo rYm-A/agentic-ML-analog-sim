@@ -65,8 +65,12 @@ def node9_phase1_error_handler(
     Returns:
         Standardized loop termination dictionary.
     """
-    failure_reason = f"Counter '{counter_name}' exceeded maximum threshold ({current_count} > {max_count})"
-    error_msg = f"{failure_reason}. Stage: '{error_stage}'. Mode: '{execution_mode}'. Details: {details or 'None'}"
+    if counter_name == "configuration_error" or "config" in counter_name.lower() or max_count == 0:
+        failure_reason = f"Unrecoverable configuration error: {details or counter_name}"
+        error_msg = f"{failure_reason}. Stage: '{error_stage}'. Mode: '{execution_mode}'."
+    else:
+        failure_reason = f"Counter '{counter_name}' exceeded maximum threshold ({current_count} > {max_count})"
+        error_msg = f"{failure_reason}. Stage: '{error_stage}'. Mode: '{execution_mode}'. Details: {details or 'None'}"
 
     logger.error(
         "Node 9 Error Handler: Hard failure for candidate '%s' in mode '%s'. Reason: %s. Stage: '%s'. Details: %s",
@@ -194,9 +198,11 @@ def node9_phase1_error_handler(
         "db_snapshot": snapshot_path,
         "next_node": None,
         # Backward-compatibility / helper fields
-        "reason": f"{counter_name}_exceeded",
+        "reason": "configuration_error" if (counter_name == "configuration_error" or "config" in counter_name.lower() or max_count == 0) else f"{counter_name}_exceeded",
         "error_stage": error_stage,
         "details": details,
+        "error_message": error_msg,
+        "failure_reason": failure_reason,
     }
 
     if counter_name == "counter_1_compilation":

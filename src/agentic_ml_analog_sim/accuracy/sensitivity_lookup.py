@@ -177,6 +177,171 @@ class SensitivityLookupTable:
         return float(self._entries[-1][0])
 
     @classmethod
+    def calibrate_from_reference_simulation(
+        cls,
+        model: Any,
+        ref_inputs: List[Tuple[torch.Tensor, Optional[torch.Tensor]]],
+        ref_snapshots: List[torch.Tensor],
+        num_classes: Optional[int] = None,
+        scales: Optional[List[float]] = None,
+        reference_id: str = "",
+        experiment_name: str = "default",
+        base_seed: Optional[int] = 1000,
+        n_osc: Optional[int] = None,
+        device_str: Optional[str] = None,
+    ) -> SensitivityLookupTable:
+        """Perform perturbed reference simulations forward from T=0 to T=1 and populate lookup table.
+
+        For each scale eps_d, perturbs the initial phase vector at T=0, simulates forward
+        using the reference model to T=1, and measures chordal error against unperturbed
+        reference snapshots at T=1.
+
+        Args:
+            model: Reference simulation model or callable.
+            ref_inputs: List of initial input tuples (sample_in, sample_drive) at T=0, one per sample.
+            ref_snapshots: List of unperturbed reference phase vectors at T=1, one per sample.
+            num_classes: Number of dataset classes (required positive integer).
+            scales: Optional list of epsilon_d perturbation scales.
+            reference_id: Reference proposal candidate ID.
+            experiment_name: Experiment namespace identifier.
+            base_seed: Base deterministic seed for reproducibility (default 1000, required integer).
+            n_osc: Optional number of oscillators for phase snapshot extraction.
+            device_str: Optional execution device string ('cpu', 'mps', 'cuda').
+
+        Returns:
+            SensitivityLookupTable: Fully populated lookup table.
+        """
+        if num_classes is None or num_classes <= 0:
+            raise ValueError(f"num_classes must be a positive integer, got {num_classes}")
+
+        if base_seed is None:
+            raise ValueError("base_seed must be provided as an integer, cannot be None.")
+
+        if not ref_snapshots:
+            raise ValueError("Cannot calibrate sensitivity table: ref_snapshots is empty.")
+
+        if not ref_inputs or len(ref_inputs) != len(ref_snapshots):
+            raise ValueError(
+                f"Cannot calibrate sensitivity table: ref_inputs length ({len(ref_inputs) if ref_inputs else 0}) "
+                f"must match ref_snapshots length ({len(ref_snapshots)})."
+            )
+
+        if scales is None:
+            scales = generate_perturbation_scales(min_scale=1e-5, max_scale=1.0, num_points=50, include_zero=True)
+
+        if device_str is not None:
+            device = torch.device(device_str)
+        else:
+            raw_m = getattr(model, "_orig_mod", model)
+            if hasattr(raw_m, "parameters"):
+                try:
+                    p = next(raw_m.parameters(), None)
+                    device = p.device if p is not None else torch.device("cpu")
+                except Exception:
+                    device = torch.device("cpu")
+            elif hasattr(model, "parameters"):
+                try:
+                    p = next(model.parameters(), None)
+                    device = p.device if p is not None else torch.device("cpu")
+                except Exception:
+                    device = torch.device("cpu")
+            else:
+                device = torch.device("cpu")
+
+        raw_m = getattr(model, "_orig_mod", model)
+        if hasattr(raw_m, "eval") and callable(getattr(raw_m, "eval")):
+            raw_m.eval()
+        elif hasattr(model, "eval") and callable(getattr(model, "eval")):
+            model.eval()
+
+        num_samples = len(ref_snapshots)
+        class_labels = [s % num_classes for s in range(num_samples)]
+        all_classes = list(range(num_classes))
+
+        entries: List[Tuple[float, float]] = []
+
+        logger.info(
+            "Populating table: Starting reference sensitivity calibration sweep across %d perturbation scales for %d samples...",
+            len(scales),
+            num_samples,
+        )
+
+        with torch.inference_mode():
+            for scale_idx, eps_d in enumerate(scales):
+                if abs(eps_d) < 1e-15:
+                    entries.append((0.0, 0.0))
+                    logger.info(
+                        "Populating table: Scale %d/%d (eps_d=%.6e) -> simulated e_pert=%.6e",
+                        scale_idx + 1,
+                        len(scales),
+                        eps_d,
+                        0.0,
+                    )
+                    continue
+
+                # TODO: Potential parallelization of perturbed reference simulations across scales/samples (e.g. using torch.vmap, Ray, or ProcessPoolExecutor).
+                sample_errors: List[float] = []
+                for s_idx, (sample_in, sample_drive) in enumerate(ref_inputs):
+                    pert_seed = base_seed + scale_idx * 10000 + s_idx
+                    pert_in = apply_normal_perturbations(sample_in, epsilon_d=eps_d, seed=pert_seed)
+
+                    pert_in_dev = pert_in.to(device)
+                    if sample_drive is not None:
+                        sample_drive_dev = sample_drive.to(device)
+                        try:
+                            pert_out = model(pert_in_dev, sample_drive_dev)
+                        except TypeError:
+                            pert_out = model(pert_in_dev)
+                    else:
+                        pert_out = model(pert_in_dev)
+
+                    pert_snapshot = pert_out[0] if isinstance(pert_out, (tuple, list)) else pert_out
+                    if isinstance(pert_snapshot, torch.Tensor):
+                        if pert_snapshot.ndim == 3 and pert_snapshot.shape[1] > 1:
+                            pert_snapshot = pert_snapshot[:, -1, :]
+                        elif pert_snapshot.ndim == 2 and pert_snapshot.shape[0] > 1 and n_osc is not None and pert_snapshot.shape[1] == n_osc:
+                            pert_snapshot = pert_snapshot[-1, :]
+
+                    ref_s = ref_snapshots[s_idx]
+                    if isinstance(ref_s, torch.Tensor):
+                        if ref_s.ndim == 3 and ref_s.shape[1] > 1:
+                            ref_s = ref_s[:, -1, :]
+                        elif ref_s.ndim == 2 and ref_s.shape[0] > 1 and n_osc is not None and ref_s.shape[1] == n_osc:
+                            ref_s = ref_s[-1, :]
+                        if isinstance(pert_snapshot, torch.Tensor):
+                            ref_s = ref_s.to(device=pert_snapshot.device, dtype=pert_snapshot.dtype)
+
+                    e_s = compute_sample_chordal_error(pert_snapshot, ref_s)
+                    sample_errors.append(e_s)
+
+                if not sample_errors:
+                    raise ValueError("Cannot calibrate sensitivity table: no sample errors computed.")
+
+                agg = aggregate_class_errors(sample_errors, class_labels, all_classes=all_classes)
+                e_pert = float(agg["pooled_mean_square"])
+                entries.append((float(eps_d), e_pert))
+                logger.info(
+                    "Populating table: Scale %d/%d (eps_d=%.6e) -> simulated e_pert=%.6e",
+                    scale_idx + 1,
+                    len(scales),
+                    eps_d,
+                    e_pert,
+                )
+
+        if entries:
+            logger.info(
+                "Populating table: Completed. Generated %d entries (epsilon_d range: [%.2e, %.2e], e_pert range: [%.2e, %.2e])",
+                len(entries),
+                entries[0][0],
+                entries[-1][0],
+                entries[0][1],
+                entries[-1][1],
+            )
+
+        table = cls(entries=entries, reference_id=reference_id, experiment_name=experiment_name)
+        return table
+
+    @classmethod
     def calibrate_from_reference_snapshots(
         cls,
         ref_snapshots: List[torch.Tensor],

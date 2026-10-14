@@ -22,6 +22,11 @@ class ReferenceDesignConfig(BaseModel):
     precision: str = "fp32"
     noise_model: str = "none"
     sparsity_ratio: float = 0.0
+    num_classes: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Optional number of output classes for classification architectures."
+    )
 
 
 class SolverConfig(BaseModel):
@@ -224,6 +229,11 @@ class SimulationConfig(BaseModel):
                     if isinstance(data.get("budget"), dict):
                         data["budget"]["max_node_retries"] = c2
         return data
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> SimulationConfig:
+        """Load and validate a simulation configuration from a YAML file."""
+        return load_simulation_config(path)
 
 
 def load_simulation_config(path: Union[str, Path]) -> SimulationConfig:

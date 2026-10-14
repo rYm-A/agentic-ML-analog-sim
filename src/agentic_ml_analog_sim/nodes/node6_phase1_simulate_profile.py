@@ -12,7 +12,7 @@ import math
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -164,6 +164,7 @@ def _simulate_batch1_worker(
     has_drive = (n_osc is not None and n_cond is not None and n_cond > 0)
     sample_latencies: List[float] = []
     recorded_outputs: List[torch.Tensor] = []
+    recorded_inputs: List[Tuple[torch.Tensor, Optional[torch.Tensor]]] = []
     sample_abs_errors: List[float] = []
     sample_class_labels: List[int] = []
 
@@ -184,9 +185,17 @@ def _simulate_batch1_worker(
         _sync_device(device_str)
 
         # Sequential batch size 1 profiling with deterministic seed per sample
+        logger.info(
+            "Worker: Running simulation on device %s for %d samples (mode=%s, state_dim=%d)...",
+            device_str,
+            num_eval_samples,
+            "reference" if is_reference else "candidate",
+            state_dim,
+        )
         t_start = time.perf_counter()
 
         for s_idx in range(num_eval_samples):
+            logger.info("Worker: Simulating sample %d/%d...", s_idx + 1, num_eval_samples)
             gen = torch.Generator(device=device)
             gen.manual_seed(1000 + s_idx)
             sample_in = torch.randn(1, state_dim, generator=gen, device=device)
@@ -206,6 +215,7 @@ def _simulate_batch1_worker(
             _sync_device(device_str)
             sample_lat_ms = (time.perf_counter() - t0) * 1000.0
             sample_latencies.append(sample_lat_ms)
+            logger.info("Worker: Completed sample %d/%d in %.2f ms", s_idx + 1, num_eval_samples, sample_lat_ms)
 
             # Check for numerical explosion / NaN / Inf
             if isinstance(out, torch.Tensor):
@@ -230,6 +240,7 @@ def _simulate_batch1_worker(
 
             if is_reference:
                 recorded_outputs.append(out_tensor.detach().cpu())
+                recorded_inputs.append((sample_in.detach().cpu(), sample_drive.detach().cpu() if sample_drive is not None else None))
             else:
                 ref_s = ref_outputs[s_idx].to(device=out_tensor.device, dtype=out_tensor.dtype)
                 if isinstance(ref_s, torch.Tensor):
@@ -247,6 +258,12 @@ def _simulate_batch1_worker(
 
     total_eval_time_s = time.perf_counter() - t_start
     mean_lat_ms = float(sum(sample_latencies) / max(len(sample_latencies), 1))
+    logger.info(
+        "Worker: Simulation completed: %d samples in %.2f s (mean latency: %.2f ms/sample)",
+        num_eval_samples,
+        total_eval_time_s,
+        mean_lat_ms,
+    )
 
     if len(sample_latencies) > 1:
         variance = sum((x - mean_lat_ms) ** 2 for x in sample_latencies) / (len(sample_latencies) - 1)
@@ -290,6 +307,7 @@ def _simulate_batch1_worker(
         "absolute_error_p90": round(abs_p90, 6) if abs_p90 is not None else None,
         "pooled_rms": round(pooled_rms, 6) if pooled_rms is not None else None,
         "recorded_outputs": recorded_outputs if is_reference else None,
+        "recorded_inputs": recorded_inputs if is_reference else None,
     }
 
 
@@ -384,6 +402,25 @@ def node6_phase1_simulate_profile(
 
     if not proposal:
         raise KeyError(f"Proposal '{candidate_id}' not found in database.")
+
+    is_ref = bool(proposal.get("is_reference"))
+    solver = proposal.get("solver")
+    solver_params = proposal.get("solver_params", {}) or {}
+    if isinstance(solver_params, str):
+        try:
+            solver_params = json.loads(solver_params)
+        except Exception:
+            solver_params = {}
+    steps = proposal.get("num_steps") or (solver_params.get("num_steps") if isinstance(solver_params, dict) else None) or proposal.get("steps")
+
+    logger.info(
+        "Node 6: Running simulation for candidate '%s' (is_reference=%s, solver=%s, steps=%s, num_profile_samples=%d)",
+        candidate_id,
+        is_ref,
+        solver,
+        steps,
+        num_profile_samples,
+    )
 
     # Determine dataset sample count based on backend mode and config
     ref_design = getattr(config, "reference_design", None)
@@ -489,11 +526,13 @@ def node6_phase1_simulate_profile(
         except Exception:
             pass
 
+        next_node = "node7_phase1_evaluation_gate"
+        logger.info("Node 6: Simulation and profiling successful for candidate '%s'. Next node: %s", candidate_id, next_node)
         return {
             "candidate_id": candidate_id,
             "status": "SUCCESS",
             "metrics": metrics,
-            "next_node": "node7_phase1_evaluation_gate",
+            "next_node": next_node,
         }
 
     # -------------------------------------------------------------------------
@@ -605,9 +644,18 @@ def node6_phase1_simulate_profile(
             num_classes = config.num_classes
 
         if num_classes is None or num_classes <= 0:
-            raise ValueError(
-                f"Node 6 could not resolve a valid positive 'num_classes' from ref_design ({ref_design}) "
-                f"or config ({config}). Please specify 'num_classes' explicitly."
+            mode = "reference" if is_ref else "standard"
+            from agentic_ml_analog_sim.nodes.node9_phase1_error_handler import node9_phase1_error_handler
+            return node9_phase1_error_handler(
+                db=db,
+                config=config,
+                candidate_id=candidate_id,
+                counter_name="configuration_error",
+                current_count=1,
+                max_count=0,
+                execution_mode=mode,
+                error_stage="node6_phase1_simulate_profile",
+                details=f"Node 6 could not resolve a valid positive 'num_classes' from ref_design ({ref_design}) or config ({config}). Please specify 'num_classes' explicitly in reference_design.",
             )
 
         ref_outputs: Optional[List[torch.Tensor]] = None
@@ -660,6 +708,8 @@ def node6_phase1_simulate_profile(
 
         # Node 6 is already executing on the target simulation worker node (sim_worker: 1).
         # Execute the batch 1 worker directly in-process to avoid deadlocks from nested resource acquisition.
+        if not is_ref and ref_outputs is not None:
+            logger.info("Node 6: Evaluating candidate '%s' against %d reference phase snapshots at T=1...", candidate_id, len(ref_outputs))
         worker_res = _simulate_batch1_worker(
             compiled_model=compiled_model,
             num_eval_samples=num_profile_samples,
@@ -699,13 +749,28 @@ def node6_phase1_simulate_profile(
                 try:
                     logger.info("Node 6: Calibrating dynamic sensitivity lookup table for reference '%s'", candidate_id)
                     exp_name = getattr(config, "experiment_name", "first_run_trial_un0_analog_acceleration") if config else "first_run_trial_un0_analog_acceleration"
-                    sens_table = SensitivityLookupTable.calibrate_from_reference_snapshots(
-                        ref_snapshots=_CACHED_REF_OUTPUTS,
-                        num_classes=num_classes,
-                        reference_id=candidate_id,
-                        experiment_name=exp_name,
-                        base_seed=1000,
-                    )
+                    recorded_inputs = worker_res.get("recorded_inputs")
+                    if recorded_inputs is not None:
+                        logger.info("Node 6: Populating sensitivity table from reference T=0 simulations (%d samples)...", len(recorded_inputs))
+                        sens_table = SensitivityLookupTable.calibrate_from_reference_simulation(
+                            model=compiled_model,
+                            ref_inputs=recorded_inputs,
+                            ref_snapshots=_CACHED_REF_OUTPUTS,
+                            num_classes=num_classes,
+                            reference_id=candidate_id,
+                            experiment_name=exp_name,
+                            base_seed=1000,
+                            n_osc=n_osc,
+                            device_str=device,
+                        )
+                    else:
+                        sens_table = SensitivityLookupTable.calibrate_from_reference_snapshots(
+                            ref_snapshots=_CACHED_REF_OUTPUTS,
+                            num_classes=num_classes,
+                            reference_id=candidate_id,
+                            experiment_name=exp_name,
+                            base_seed=1000,
+                        )
                     global _CACHED_SENSITIVITY_TABLE
                     _CACHED_SENSITIVITY_TABLE = sens_table
 
@@ -761,6 +826,13 @@ def node6_phase1_simulate_profile(
                     "next_node": "node8_phase1_diagnostic_proposal",
                 }
 
+            logger.info(
+                "Node 6: Candidate '%s' absolute error computed: pooled_mean_square=%.6e, p90=%.6e",
+                candidate_id,
+                absolute_error,
+                absolute_error_p90,
+            )
+
             # Retrieve sensitivity lookup table and interpolate dynamic sensitivity error
             sens_table = _CACHED_SENSITIVITY_TABLE
             if sens_table is None:
@@ -814,6 +886,11 @@ def node6_phase1_simulate_profile(
                     "next_node": "node8_phase1_diagnostic_proposal",
                 }
 
+            logger.info(
+                "Node 6: Querying sensitivity lookup table with e_pert=%.6e for candidate '%s'...",
+                absolute_error,
+                candidate_id,
+            )
             interp_res = sens_table.interpolate(e_cand=absolute_error)
             if interp_res == "underflow":
                 # Special sentinel value -1.0 indicates dynamic sensitivity underflow (e_cand < min_e)
@@ -830,6 +907,14 @@ def node6_phase1_simulate_profile(
                 accuracy_mean = 0.0
             else:
                 accuracy_mean = max(0.0, 1.0 - relative_error)
+
+            logger.info(
+                "Node 6: Sensitivity table interpolation result for candidate '%s': relative_error=%.6e (status=%s, accuracy_mean=%.6e)",
+                candidate_id,
+                relative_error,
+                interp_res if isinstance(interp_res, str) else "interpolated",
+                accuracy_mean,
+            )
 
         accuracy_worst_pct = accuracy_mean - 2 * (latency_std / max(latency_ms, 1e-4) * 0.01)
         accuracy_ci95 = 0.002
@@ -913,11 +998,13 @@ def node6_phase1_simulate_profile(
         except Exception:
             pass
 
+        next_node = "node7_phase1_evaluation_gate"
+        logger.info("Node 6: Simulation and profiling successful for candidate '%s'. Next node: %s", candidate_id, next_node)
         return {
             "candidate_id": candidate_id,
             "status": "SUCCESS",
             "metrics": metrics,
-            "next_node": "node7_phase1_evaluation_gate",
+            "next_node": next_node,
         }
 
     except Exception as exc:
