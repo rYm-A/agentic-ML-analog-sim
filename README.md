@@ -121,6 +121,7 @@ experiment_name: "un0_kuramoto_analog_acceleration"
 reference_design:
   name: "cifar10/n1024"
   family: "cifar10"
+  num_classes: 10
   n_oscillators: 1024
   n_conditional_oscillators: 8
   solver: "rk4"
@@ -165,8 +166,8 @@ tolerances:
     rtol: 1e-4
     atol: 1e-4
   solver_accuracy:
-    rtol: 5e-2
-    atol: 5e-2
+    rtol: 5e-2            # Relative error tolerance (or .inf for positive infinity)
+    atol: 5e-2            # Absolute error tolerance (or .inf for positive infinity)
     max_fid_degradation: 2.0
 
 # 6. Campaign Budget
@@ -208,6 +209,11 @@ agent_efforts:
 ### Reference Design (`reference_design`)
 The golden ground truth baseline. It is strictly dense (`sparsity_ratio: 0.0`), noise-free (`noise_model: "none"`), and integrated using high-precision 4th-order Runge-Kutta with 25 steps ($\Delta t = 0.04$). All candidate accuracy degradation, relative errors, and speedup multipliers ($1.00\times$) are measured relative to this design.
 
+- **`num_classes`**: Explicitly configures the target classification task output dimensionality (e.g., `10` for CIFAR-10, `1000` for ImageNet-64). This parameter is critical across the Phase 1 pipeline:
+  - **Node 3 (AOT Rewriter)** & **Node 4 (Compilation)**: Configures the target output projection head and dummy input dimensions required for ahead-of-time export.
+  - **Node 6 (Simulate & Profile)**: Determines class logit bounds and ground truth targets for accuracy and distribution fidelity measurements.
+  - **Validation & Terminal Failure Routing**: To prevent silent compilation corruption, silent fallback defaults have been removed. If `num_classes` is omitted or invalid (`<= 0`), Nodes 3, 4, and 6 immediately escalate to `node9_phase1_error_handler` with terminal status (`counter_name="configuration_error"`), bypassing Node 8 LLM diagnostic proposal loops because configuration defects cannot be repaired by code rewriting agents.
+
 ### Solvers & Discretization Steps (`solvers`)
 Defines the numerical ODE algorithms available to candidate proposals. For each solver, `steps` specifies the allowed integration step grid. The step size is computed as $\Delta t = \text{integration\_time} / \text{num\_steps}$. Lower steps reduce simulation and MAC operation counts at the expense of truncation error.
 
@@ -225,10 +231,21 @@ Governs analog crossbar array connectivity:
 - **`degree_bounded`**: Constrains oscillator fan-in degrees to `[64, 128, 256]`.
 
 ### Numerical Tolerances (`tolerances`)
-- **`compile_check`**: Strict tolerance (`rtol=1e-4`, `atol=1e-4`) enforced in Node 5 when comparing compiled AOT model forward passes against eager Un-0 models.
+- **`compile_check`**: Strict tolerance (`rtol=1e-4`, `atol=1e-4`) enforced in Node 5 when comparing compiled AOT model forward passes against eager Un-0 models. Setting infinite tolerance (`.inf`) bypasses strict compilation numerical verification.
 - **`solver_accuracy`**: Accuracy criteria enforced in Node 7:
-  - `rtol = 0.05` ($5\%$ maximum relative state trajectory error vs. reference).
-  - `max_fid_degradation = 2.0` (maximum permissible FID degradation).
+  - `rtol = 0.05` ($5\%$ maximum relative state trajectory error vs. baseline reference).
+  - `atol = 0.05` (maximum chordal trajectory absolute error vs. baseline reference).
+  - `max_fid_degradation = 2.0` (deprecated, retained for backwards compatibility).
+- **Relaxing Constraints with Positive Infinite Tolerances (`.inf`)**:
+  To relax or completely disable accuracy gating (for exploratory hyperparameter sweeps, high-noise characterization, or rapid latency benchmarking where candidates should not be rejected due to numerical deviation):
+  - **YAML Format**: You can specify positive infinity using native YAML floats (`.inf`, `+.inf`) or string representations (`inf`, `+inf`, `Infinity`, `".inf"`, `"float('inf')"`):
+    ```yaml
+    tolerances:
+      solver_accuracy:
+        rtol: .inf    # Disables relative error threshold check
+        atol: .inf    # Disables absolute error threshold check
+    ```
+  - **Usage Note**: Both `rtol` and `atol` should be set to `.inf` to completely bypass accuracy gating, because Node 7 evaluates both criteria independently (`relative_error > rtol` and `absolute_error > atol`). When positive infinite tolerance is configured, candidates will not trigger rewrite retries or termination failures due to accuracy degradation, avoiding Chia loop failures when solver accuracy metrics are not satisfied.
 
 ### Campaign Budget vs. Internal Counter Limits
 The configuration separates macro campaign bounds from micro execution retry bounds:

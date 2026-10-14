@@ -97,8 +97,9 @@ def generate_pareto_plot(
     for c in candidates:
         if c.get("status") == "COMPLETED" and c["candidate_id"] not in pareto_cids:
             lat = c.get("latency_ms")
-            err = c.get("relative_error") if c.get("relative_error") is not None else c.get("absolute_error", 0.0)
-            if lat is not None and err is not None:
+            raw_err = c.get("relative_error") if c.get("relative_error") is not None else c.get("absolute_error", 0.0)
+            if lat is not None and raw_err is not None:
+                err = max(0.0, float(raw_err))
                 other_x.append(lat)
                 other_y.append(err)
 
@@ -118,8 +119,9 @@ def generate_pareto_plot(
     pareto_pts: List[Tuple[float, float, Dict[str, Any]]] = []
     for p in pareto_front:
         lat = p.get("latency_ms")
-        err = p.get("relative_error") if p.get("relative_error") is not None else p.get("absolute_error", 0.0)
-        if lat is not None and err is not None:
+        raw_err = p.get("relative_error") if p.get("relative_error") is not None else p.get("absolute_error", 0.0)
+        if lat is not None and raw_err is not None:
+            err = max(0.0, float(raw_err))
             pareto_pts.append((lat, err, p))
 
     pareto_pts.sort(key=lambda item: item[0])  # Sort by latency ascending
@@ -246,8 +248,9 @@ def generate_consolidated_pareto_plot(
     for c in all_candidates:
         if c.get("status") == "COMPLETED":
             lat = c.get("latency_ms")
-            err = c.get("relative_error") if c.get("relative_error") is not None else c.get("absolute_error", 0.0)
-            if lat is not None and err is not None:
+            raw_err = c.get("relative_error") if c.get("relative_error") is not None else c.get("absolute_error", 0.0)
+            if lat is not None and raw_err is not None:
+                err = max(0.0, float(raw_err))
                 other_x.append(lat)
                 other_y.append(err)
 
@@ -274,8 +277,9 @@ def generate_consolidated_pareto_plot(
         pareto_pts = []
         for p in nm_pareto:
             lat = p.get("latency_ms")
-            err = p.get("relative_error") if p.get("relative_error") is not None else p.get("absolute_error", 0.0)
-            if lat is not None and err is not None:
+            raw_err = p.get("relative_error") if p.get("relative_error") is not None else p.get("absolute_error", 0.0)
+            if lat is not None and raw_err is not None:
+                err = max(0.0, float(raw_err))
                 pareto_pts.append((lat, err, p))
 
         pareto_pts.sort(key=lambda item: item[0])

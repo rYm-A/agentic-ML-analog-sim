@@ -8,6 +8,7 @@ Uses ChiaFunction for cluster worker orchestration and hardware device schedulin
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, Optional
 
 import torch
@@ -95,13 +96,16 @@ def _is_remote_or_readonly(db: Optional[Any] = None) -> tuple[bool, bool]:
             if curr_ip in ("127.0.0.1", "localhost"):
                 is_remote = False
             else:
-                ctx = ray.get_runtime_context()
-                gcs_addr = getattr(ctx, "gcs_address", None)
-                if gcs_addr:
-                    head_ip = gcs_addr.split(":")[0]
-                    is_remote = (curr_ip != head_ip)
-                else:
-                    is_remote = (curr_ip != "127.0.0.1")
+                try:
+                    ctx = ray.get_runtime_context()
+                    gcs_addr = getattr(ctx, "gcs_address", None)
+                    if gcs_addr:
+                        head_ip = gcs_addr.split(":")[0]
+                        is_remote = (curr_ip != head_ip)
+                    else:
+                        is_remote = (curr_ip != "127.0.0.1")
+                except Exception:
+                    is_remote = (curr_ip not in ("127.0.0.1", "localhost"))
         except Exception:
             is_remote = False
 
@@ -120,6 +124,17 @@ def _is_remote_or_readonly(db: Optional[Any] = None) -> tuple[bool, bool]:
             except Exception:
                 pass
     return is_remote, is_readonly
+
+def _safe_ray_put(obj: Any) -> Any:
+    """Safely put object into Ray plasma store if Ray is initialized and connected."""
+    if obj is None:
+        return None
+    if ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized():
+        try:
+            return ray.put(obj)
+        except Exception:
+            return obj
+    return obj
 
 
 @ChiaFunction(resources={"sim_worker": 1})
@@ -185,8 +200,8 @@ def node5_phase1_verify_correctness(
     def _handle_failure(
         error_stage: str,
         error_msg: str,
-        max_abs: float = 0.0,
-        max_rel: float = 0.0,
+        max_abs: Optional[float] = None,
+        max_rel: Optional[float] = None,
     ) -> Dict[str, Any]:
         is_remote, is_readonly = _is_remote_or_readonly(db)
         new_counter_1 = curr_counter_1 + 1
@@ -432,7 +447,14 @@ def node5_phase1_verify_correctness(
             max_rel_diff = float(torch.max(rel_diff).item())
 
             # Canonical PyTorch numerical verification: |a - b| <= atol + rtol * |b|
-            if not torch.allclose(out_compiled, out_eager, rtol=rtol, atol=atol):
+            # When positive infinite tolerance is specified, bypass strict allclose comparison
+            # to avoid IEEE floating point NaN where float('inf') * 0.0 = NaN.
+            if math.isinf(rtol) or math.isinf(atol):
+                is_close = True
+            else:
+                is_close = bool(torch.allclose(out_compiled, out_eager, rtol=rtol, atol=atol))
+
+            if not is_close:
                 error_msg = f"Numerical tolerance exceeded (torch.allclose=False): max_abs_diff={max_abs_diff:.6e} vs atol={atol}, max_rel_diff={max_rel_diff:.6e} vs rtol={rtol}"
                 return _handle_failure(
                     error_stage="correctness_verification",
@@ -455,8 +477,8 @@ def node5_phase1_verify_correctness(
         return _handle_failure(
             error_stage="correctness_verification",
             error_msg=error_msg,
-            max_abs=0.0,
-            max_rel=0.0,
+            max_abs=None,
+            max_rel=None,
         )
 
     # Reset Counter ID 1 on success
@@ -489,9 +511,7 @@ def node5_phase1_verify_correctness(
         pass
 
     # Return ObjectRef if distributed to avoid pulling heavy compiled model back to head node
-    ret_compiled_model = orig_compiled_ref if orig_compiled_ref is not None else (
-        ray.put(compiled_model) if (ray is not None and hasattr(ray, "is_initialized") and ray.is_initialized() and compiled_model is not None) else compiled_model
-    )
+    ret_compiled_model = orig_compiled_ref if orig_compiled_ref is not None else _safe_ray_put(compiled_model)
 
     return {
         "candidate_id": candidate_id,

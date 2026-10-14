@@ -80,12 +80,14 @@ def test_reference_and_candidate_trajectory_errors(tmp_db_and_cfg):
     assert ref_res["status"] == "SUCCESS"
     assert ref_res["metrics"]["relative_error"] == 0.0
     assert ref_res["metrics"]["absolute_error"] == 0.0
+    assert ref_res["metrics"]["absolute_error_p90"] == 0.0
 
     ref_prop = tmp_db.get_proposal(ref_id)
     assert ref_prop["relative_error"] == 0.0
     assert ref_prop["absolute_error"] == 0.0
+    assert ref_prop["absolute_error_p90"] == 0.0
 
-    # Insert candidate with L0 noise
+    # Insert candidate with L0 noise based on reference model
     cand_id = tmp_db.insert_proposal(
         candidate_id="cand_test_l0",
         solver="rk4",
@@ -94,8 +96,7 @@ def test_reference_and_candidate_trajectory_errors(tmp_db_and_cfg):
         is_reference=False,
     )
 
-    base_cand = ConditionalKuramotoDynamics(n_oscillators=64, n_conditional_oscillators=2, num_classes=10)
-    l0_cand = L0StaticMismatchNoise(base_cand, sigma=0.05)
+    l0_cand = L0StaticMismatchNoise(base_ref, sigma=0.05)
     cand_model = functionalize_kuramoto_model(l0_cand, solver_name="rk4", num_steps=10, dt=0.1, use_hop=False)
 
     cand_res = node6_phase1_simulate_profile(
@@ -111,13 +112,16 @@ def test_reference_and_candidate_trajectory_errors(tmp_db_and_cfg):
     assert cand_res["status"] == "SUCCESS"
     rel_err = cand_res["metrics"]["relative_error"]
     abs_err = cand_res["metrics"]["absolute_error"]
+    abs_p90 = cand_res["metrics"]["absolute_error_p90"]
 
     assert rel_err > 0.0, f"Expected non-zero relative error, got {rel_err}"
     assert abs_err > 0.0, f"Expected non-zero absolute error, got {abs_err}"
+    assert abs_p90 > 0.0, f"Expected non-zero p90 error, got {abs_p90}"
 
     cand_prop = tmp_db.get_proposal(cand_id)
     assert cand_prop["relative_error"] == rel_err
     assert cand_prop["absolute_error"] == abs_err
+    assert cand_prop["absolute_error_p90"] == abs_p90
 
     # Insert second candidate with Euler and coarser steps to verify dynamic divergence
     cand2_id = tmp_db.insert_proposal(
@@ -128,8 +132,7 @@ def test_reference_and_candidate_trajectory_errors(tmp_db_and_cfg):
         is_reference=False,
     )
 
-    base_cand2 = ConditionalKuramotoDynamics(n_oscillators=64, n_conditional_oscillators=2, num_classes=10)
-    l0_cand2 = L0StaticMismatchNoise(base_cand2, sigma=0.05)
+    l0_cand2 = L0StaticMismatchNoise(base_ref, sigma=0.05)
     cand2_model = functionalize_kuramoto_model(l0_cand2, solver_name="euler", num_steps=5, dt=0.2, use_hop=False)
 
     cand2_res = node6_phase1_simulate_profile(
@@ -145,9 +148,98 @@ def test_reference_and_candidate_trajectory_errors(tmp_db_and_cfg):
     assert cand2_res["status"] == "SUCCESS"
     rel_err_2 = cand2_res["metrics"]["relative_error"]
     abs_err_2 = cand2_res["metrics"]["absolute_error"]
+    abs_p90_2 = cand2_res["metrics"]["absolute_error_p90"]
 
     assert rel_err_2 > 0.0
     assert abs_err_2 > 0.0
+    assert abs_p90_2 > 0.0
     # Euler with 5 steps should diverge more than RK4 with 10 steps
     assert rel_err_2 != rel_err, f"Expected distinct relative errors, got {rel_err_2} vs {rel_err}"
     assert abs_err_2 != abs_err, f"Expected distinct absolute errors, got {abs_err_2} vs {abs_err}"
+
+
+def test_candidate_fails_when_reference_cache_missing(tmp_db_and_cfg, monkeypatch):
+    """Test that candidate fails cleanly with status='FAILED' if golden reference cache is missing."""
+    import sys
+    n6_module = sys.modules["agentic_ml_analog_sim.nodes.node6_phase1_simulate_profile"]
+    monkeypatch.setattr(n6_module, "_CACHED_REF_OUTPUTS", None)
+
+    tmp_db, config = tmp_db_and_cfg
+    cand_id = tmp_db.insert_proposal(
+        candidate_id="cand_test_no_ref",
+        solver="rk4",
+        solver_params={"num_steps": 10},
+        is_reference=False,
+    )
+    base_cand = ConditionalKuramotoDynamics(n_oscillators=64, n_conditional_oscillators=2, num_classes=10)
+    cand_model = functionalize_kuramoto_model(base_cand, solver_name="rk4", num_steps=10, dt=0.1, use_hop=False)
+
+    res = node6_phase1_simulate_profile(
+        db=tmp_db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=cand_model,
+        target_device="cpu",
+        backend_mode="local",
+        num_profile_samples=5,
+    )
+
+    assert res["status"] == "FAILED"
+    assert "reference" in res["error_message"].lower()
+    assert res["next_node"] == "node8_phase1_diagnostic_proposal"
+
+
+def test_candidate_sensitivity_underflow_sets_negative_one(tmp_db_and_cfg, monkeypatch):
+    """Verify that sensitivity underflow sets relative_error=-1.0 and accuracy_mean=1.0."""
+    import sys
+    from agentic_ml_analog_sim.accuracy.sensitivity_lookup import SensitivityLookupTable
+    n6_module = sys.modules["agentic_ml_analog_sim.nodes.node6_phase1_simulate_profile"]
+    tmp_db, config = tmp_db_and_cfg
+
+    # First profile reference proposal to establish golden outputs
+    ref_id = tmp_db.insert_proposal(
+        candidate_id="ref_underflow_test",
+        solver="rk4",
+        solver_params={"num_steps": 10},
+        is_reference=True,
+    )
+    base_ref = ConditionalKuramotoDynamics(n_oscillators=64, n_conditional_oscillators=2, num_classes=10)
+    ref_model = functionalize_kuramoto_model(base_ref, solver_name="rk4", num_steps=10, dt=0.1, use_hop=False)
+
+    ref_res = node6_phase1_simulate_profile(
+        db=tmp_db,
+        config=config,
+        candidate_id=ref_id,
+        compiled_model=ref_model,
+        target_device="cpu",
+        backend_mode="local",
+        num_profile_samples=5,
+    )
+    assert ref_res["status"] == "SUCCESS"
+
+    # Now mock lookup table with min_e = 0.05 so candidate error (0.0) triggers underflow
+    mock_table = SensitivityLookupTable(entries=[(0.01, 0.05), (0.05, 0.10)])
+    monkeypatch.setattr(n6_module, "_CACHED_SENSITIVITY_TABLE", mock_table)
+
+    cand_id = tmp_db.insert_proposal(
+        candidate_id="cand_underflow_test",
+        solver="rk4",
+        solver_params={"num_steps": 10},
+        is_reference=False,
+    )
+
+    res = node6_phase1_simulate_profile(
+        db=tmp_db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=ref_model,
+        target_device="cpu",
+        backend_mode="local",
+        num_profile_samples=5,
+    )
+
+    assert res["status"] == "SUCCESS"
+    assert res["metrics"]["relative_error"] == -1.0
+    assert res["metrics"]["accuracy_mean"] == 1.0
+
+

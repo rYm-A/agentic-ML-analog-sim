@@ -299,7 +299,21 @@ def node3_phase1_compiler_rewriter(
     elif hasattr(config, "num_classes") and config.num_classes is not None:
         num_classes = config.num_classes
     else:
-        num_classes = 10
+        num_classes = None
+
+    if num_classes is None or num_classes <= 0:
+        from agentic_ml_analog_sim.nodes.node9_phase1_error_handler import node9_phase1_error_handler
+        return node9_phase1_error_handler(
+            db=db,
+            config=config,
+            candidate_id=candidate_id,
+            counter_name="configuration_error",
+            current_count=1,
+            max_count=0,
+            execution_mode="standard",
+            error_stage="node3_phase1_compiler_rewriter",
+            details="Node 3 could not resolve a valid positive 'num_classes' from ref_design or config.",
+        )
 
     solver_params = proposal.get("solver_params", {}) or {}
     if isinstance(solver_params, str):

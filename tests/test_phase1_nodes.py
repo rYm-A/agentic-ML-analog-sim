@@ -246,6 +246,17 @@ def test_node1_and_node2_rewriters(tmp_db_and_config):
     assert summary_det["overall"]["total_calls"] == 0
 
     # Test Agentic Path with unregistered solver and noise
+    try:
+        from un0.solver import SOLVER_REGISTRY
+        SOLVER_REGISTRY.pop("unregistered_custom_euler_v2", None)
+    except Exception:
+        pass
+    try:
+        from un0.noise import NOISE_REGISTRY
+        NOISE_REGISTRY.pop("unregistered_custom_drift_v2", None)
+    except Exception:
+        pass
+
     agentic_id = db.insert_proposal(
         candidate_id="cand_agentic_rw_02",
         solver="unregistered_custom_euler_v2",
@@ -881,6 +892,7 @@ def test_node6_real_model_batch_size_1(tmp_db_and_config):
         candidate_id="cand_sim_real_bs1",
         solver="rk4",
         noise_model="none",
+        is_reference=True,
     )
 
     # Use a compiled PyTorch model (Inductor / aot_eager)

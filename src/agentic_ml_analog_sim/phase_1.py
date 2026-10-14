@@ -399,6 +399,17 @@ def run_phase_1(
                 logger.error("Node 3 encountered exception: %s. Routing to Node 9 error handler / Node 8 diagnostic recovery.", err)
                 node3_res = {"status": "FAILED", "error": str(err)}
 
+            if node3_res.get("status") == "TERMINATED_MAX_CYCLES" or node3_res.get("next_node") == "node9_phase1_error_handler":
+                return Phase1Result(
+                    action="TERMINATED_MAX_CYCLES",
+                    candidate_id=active_candidate_id,
+                    is_reference=is_reference,
+                    execution_mode=execution_mode,
+                    metrics={},
+                    cycle_count=cycle_count,
+                    details=f"Node 3 terminated via Node 9: {node3_res.get('details') or node3_res.get('error_message') or 'Configuration error'}",
+                )
+
             if node3_res.get("status") == "FAILED":
                 node3_err = node3_res.get("error", "Unknown Node 3 failure")
                 logger.warning("Node 3 compiler rewriter failed: %s", node3_err)
@@ -514,6 +525,17 @@ def run_phase_1(
             proposal=active_candidate,
         )
 
+        if comp_res.get("status") == "TERMINATED_MAX_CYCLES" or comp_res.get("next_node") == "node9_phase1_error_handler":
+            return Phase1Result(
+                action="TERMINATED_MAX_CYCLES",
+                candidate_id=active_candidate_id,
+                is_reference=is_reference,
+                execution_mode=execution_mode,
+                metrics={},
+                cycle_count=cycle_count,
+                details=f"Node 4 terminated via Node 9: {comp_res.get('details') or comp_res.get('error_message') or 'Configuration error'}",
+            )
+
         compiled_model = comp_res.get("compiled_model")
         eager_model = comp_res.get("eager_model")
         compilation_status = comp_res.get("status", "SUCCESS")
@@ -602,6 +624,7 @@ def run_phase_1(
             continue
 
         # STEP 5: Node 6 Simulate and Profile
+        logger.info("Phase 1: Starting Node 6 simulation and profiling for candidate '%s'...", active_candidate_id)
         logger.info("Executing Node 6 (Simulate & Profile) for '%s'", active_candidate_id)
         if verify_res.get("max_rel_diff") is not None:
             active_candidate["verify_max_rel_diff"] = verify_res.get("max_rel_diff")
@@ -617,12 +640,25 @@ def run_phase_1(
             target_device=target_device,
             backend_mode=target_device,
             proposal=active_candidate,
-            timeout=600.0,
+            test_mode=dry_run,
+            timeout=5400.0,
         )
+
+        if profile_res.get("status") == "TERMINATED_MAX_CYCLES" or profile_res.get("next_node") == "node9_phase1_error_handler":
+            return Phase1Result(
+                action="TERMINATED_MAX_CYCLES",
+                candidate_id=active_candidate_id,
+                is_reference=is_reference,
+                execution_mode=execution_mode,
+                metrics={},
+                cycle_count=cycle_count,
+                details=f"Node 6 terminated via Node 9: {profile_res.get('details') or profile_res.get('error_message') or 'Configuration error'}",
+            )
 
         metrics = profile_res.get("metrics", {})
         active_candidate["relative_error"] = metrics.get("relative_error")
         active_candidate["absolute_error"] = metrics.get("absolute_error")
+        active_candidate["absolute_error_p90"] = metrics.get("absolute_error_p90")
         # Sync Node 6 profiling metrics and status to local db
         try:
             if profile_res.get("status") == "SUCCESS":
@@ -632,6 +668,7 @@ def run_phase_1(
                     latency_ms=metrics.get("latency_ms"),
                     relative_error=metrics.get("relative_error"),
                     absolute_error=metrics.get("absolute_error"),
+                    absolute_error_p90=metrics.get("absolute_error_p90"),
                     accuracy_fid=metrics.get("accuracy_fid"),
                     wall_clock_s=metrics.get("wall_clock_s"),
                     worker_utilization=0.85,
@@ -674,6 +711,7 @@ def run_phase_1(
             continue
 
         # STEP 6: Node 7 Evaluation Gate
+        logger.info("Phase 1: Node 6 finished for candidate '%s' (status=%s). Transitioning to Node 7...", active_candidate_id, profile_res.get("status"))
         logger.info("Executing Node 7 (Evaluation Gate) for '%s'", active_candidate_id)
         eval_res = _dispatch_node(
             node7_phase1_evaluation_gate,

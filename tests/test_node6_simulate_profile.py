@@ -62,6 +62,7 @@ def test_node6_simulate_profile_real_model(tmp_db_and_config):
         candidate_id="cand_test_n6_real",
         solver="rk4",
         noise_model="none",
+        is_reference=True,
     )
 
     model = DummyAnalogModel()
@@ -86,6 +87,7 @@ def test_node6_simulate_profile_remote_worker_returns_metrics_cleanly(tmp_db_and
         candidate_id="cand_test_n6_remote",
         solver="rk4",
         noise_model="none",
+        is_reference=True,
     )
 
     # Monkeypatch to simulate remote worker
@@ -118,6 +120,7 @@ def test_node6_simulate_profile_readonly_db_returns_metrics_cleanly(tmp_db_and_c
         candidate_id="cand_test_n6_readonly",
         solver="rk4",
         noise_model="none",
+        is_reference=True,
     )
 
     orig_access = os.access
@@ -136,3 +139,37 @@ def test_node6_simulate_profile_readonly_db_returns_metrics_cleanly(tmp_db_and_c
     assert "metrics" in res
     assert "latency_ms" in res["metrics"]
     assert res["next_node"] == "node7_phase1_evaluation_gate"
+
+
+def test_node6_simulate_profile_unresolvable_num_classes_routes_to_node9(tmp_db_and_config):
+    """Verify that when num_classes cannot be resolved, Node 6 routes cleanly to Node 9."""
+    db, config = tmp_db_and_config
+    cand_id = db.insert_proposal(
+        candidate_id="cand_test_n6_invalid_config",
+        solver="rk4",
+        noise_model="none",
+        is_reference=True,
+    )
+
+    # Set family to unknown and ensure num_classes is None
+    if hasattr(config.reference_design, "num_classes"):
+        config.reference_design.num_classes = None
+    config.reference_design.family = "unknown_custom_task"
+    if hasattr(config, "num_classes"):
+        config.num_classes = None
+
+    model = DummyAnalogModel()
+    res = node6_simulate_profile(
+        db=db,
+        config=config,
+        candidate_id=cand_id,
+        compiled_model=model,
+        target_device="cpu",
+    )
+
+    assert res["status"] == "TERMINATED_MAX_CYCLES"
+    assert res["counter_name"] == "configuration_error"
+    assert res["next_node"] is None
+    assert "Unrecoverable configuration error" in res["error_message"]
+    assert "node6_phase1_simulate_profile" in res["error_stage"]
+

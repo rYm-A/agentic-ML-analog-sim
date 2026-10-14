@@ -8,6 +8,7 @@ Enforces Debug Mode invariants and blocks invalid transition to Phase 2.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, Optional
 
 from agentic_ml_analog_sim.config import SimulationConfig
@@ -234,7 +235,13 @@ def node7_phase1_evaluation_gate(
     abs_error = proposal.get("absolute_error")
     if abs_error is None:
         abs_error = proposal.get("abs_error")
+    abs_error_p90 = proposal.get("absolute_error_p90")
     sim_status = proposal.get("simulation_status")
+
+    logger.info(
+        "Node 7: Candidate %s errors: absolute=%s (p90=%s), relative=%s vs tolerances (atol=%s, rtol=%s)",
+        candidate_id, abs_error, abs_error_p90, rel_error, atol, rtol
+    )
 
     # Evaluate metric tolerance bounds
     within_tolerance = True
@@ -250,11 +257,11 @@ def node7_phase1_evaluation_gate(
         within_tolerance = False
         reasons.append("Missing required simulation metrics: relative_error and absolute_error are both None")
 
-    if rel_error is not None and rel_error > rtol:
+    if rel_error is not None and not math.isinf(rtol) and rel_error > rtol:
         within_tolerance = False
         reasons.append(f"relative_error ({rel_error:.4f}) > rtol ({rtol:.4f})")
 
-    if abs_error is not None and abs_error > atol:
+    if abs_error is not None and not math.isinf(atol) and abs_error > atol:
         within_tolerance = False
         reasons.append(f"absolute_error ({abs_error:.4f}) > atol ({atol:.4f})")
 

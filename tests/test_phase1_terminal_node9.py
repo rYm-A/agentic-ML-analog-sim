@@ -135,3 +135,105 @@ def test_phase1_driver_invokes_node9_on_node5_terminated():
         assert n9_kwargs["counter_name"] == "counter_1_compilation"
         assert n9_kwargs["current_count"] == 4
         assert n9_kwargs["error_stage"] == "compilation"
+
+
+def test_node3_and_node4_unresolvable_num_classes_route_to_node9():
+    """Verify that node3 and node4 invoke node9 directly on unresolvable num_classes."""
+    from agentic_ml_analog_sim.nodes.node3_phase1_compiler_rewriter import node3_phase1_compiler_rewriter
+    from agentic_ml_analog_sim.nodes.node4_phase1_compilation_runner import node4_phase1_compilation_runner
+
+    mock_db = MagicMock(spec=ResultDatabase)
+    mock_db.get_proposal.return_value = {
+        "candidate_id": "cand_cfg_err",
+        "solver": "euler",
+        "noise_model": "none",
+    }
+
+    mock_config = MagicMock()
+    mock_config.reference_design.n_oscillators = 1024
+    mock_config.reference_design.n_conditional_oscillators = 100
+    mock_config.reference_design.family = "custom_unknown_family"
+    mock_config.reference_design.num_classes = None
+    mock_config.num_classes = None
+
+    # Test Node 3
+    res3 = node3_phase1_compiler_rewriter(
+        db=mock_db,
+        config=mock_config,
+        candidate_id="cand_cfg_err",
+        target_device="cpu",
+    )
+    assert res3["status"] == "TERMINATED_MAX_CYCLES"
+    assert res3["counter_name"] == "configuration_error"
+    assert "node3_phase1_compiler_rewriter" in res3["error_stage"]
+    assert "Unrecoverable configuration error" in res3["error_message"]
+
+    # Test Node 4
+    res4 = node4_phase1_compilation_runner(
+        db=mock_db,
+        config=mock_config,
+        candidate_id="cand_cfg_err",
+        target_device="cpu",
+    )
+    assert res4["status"] == "TERMINATED_MAX_CYCLES"
+    assert res4["counter_name"] == "configuration_error"
+    assert "node4_phase1_compilation_runner" in res4["error_stage"]
+    assert "Unrecoverable configuration error" in res4["error_message"]
+
+
+def test_phase1_driver_terminates_on_node6_configuration_error():
+    """Verify phase 1 driver stops immediately on Node 6 TERMINATED_MAX_CYCLES and does NOT call Node 8."""
+    mock_db = MagicMock(spec=ResultDatabase)
+    mock_db.get_proposal.return_value = {
+        "candidate_id": "cand_n6_term",
+        "solver": "rk4",
+        "noise_model": "none",
+        "is_reference": 0,
+    }
+
+    mock_config = MagicMock()
+    mock_config.budget.max_loop_cycles = 5
+    mock_config.counter_limits.max_counter_1_compilation = 3
+    mock_config.device = "cpu"
+
+    invoked_nodes = []
+
+    def fake_dispatch(node_fn, *args, **kwargs):
+        name = getattr(node_fn, "__name__", str(node_fn))
+        invoked_nodes.append(name)
+        if "node0" in name:
+            return {
+                "status": "SUCCESS",
+                "mode": "standard",
+                "candidate_id": "cand_n6_term",
+                "nodes_to_run": [3],
+            }
+        elif "node3" in name:
+            return {"status": "SUCCESS"}
+        elif "node4" in name:
+            return {"status": "SUCCESS", "compiled_model": MagicMock()}
+        elif "node5" in name:
+            return {"status": "PASSED"}
+        elif "node6" in name:
+            return {
+                "status": "TERMINATED_MAX_CYCLES",
+                "counter_name": "configuration_error",
+                "details": "Node 6 could not resolve a valid positive 'num_classes'",
+                "next_node": None,
+            }
+        return {"status": "SUCCESS"}
+
+    with (
+        patch("agentic_ml_analog_sim.phase_1.load_simulation_config", return_value=mock_config),
+        patch("agentic_ml_analog_sim.phase_1._dispatch_node", side_effect=fake_dispatch),
+    ):
+        res = run_phase_1(
+            config_path="mock/path/config.yaml",
+            db_path=mock_db,
+            candidate_id="cand_n6_term",
+        )
+
+        assert res.action == "TERMINATED_MAX_CYCLES"
+        assert "Node 6 terminated via Node 9" in res.details
+        assert not any("node8" in n for n in invoked_nodes), "Node 8 should NOT have been invoked!"
+
