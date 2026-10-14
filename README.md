@@ -166,8 +166,8 @@ tolerances:
     rtol: 1e-4
     atol: 1e-4
   solver_accuracy:
-    rtol: 5e-2
-    atol: 5e-2
+    rtol: 5e-2            # Relative error tolerance (or .inf for positive infinity)
+    atol: 5e-2            # Absolute error tolerance (or .inf for positive infinity)
     max_fid_degradation: 2.0
 
 # 6. Campaign Budget
@@ -231,10 +231,21 @@ Governs analog crossbar array connectivity:
 - **`degree_bounded`**: Constrains oscillator fan-in degrees to `[64, 128, 256]`.
 
 ### Numerical Tolerances (`tolerances`)
-- **`compile_check`**: Strict tolerance (`rtol=1e-4`, `atol=1e-4`) enforced in Node 5 when comparing compiled AOT model forward passes against eager Un-0 models.
+- **`compile_check`**: Strict tolerance (`rtol=1e-4`, `atol=1e-4`) enforced in Node 5 when comparing compiled AOT model forward passes against eager Un-0 models. Setting infinite tolerance (`.inf`) bypasses strict compilation numerical verification.
 - **`solver_accuracy`**: Accuracy criteria enforced in Node 7:
-  - `rtol = 0.05` ($5\%$ maximum relative state trajectory error vs. reference).
-  - `max_fid_degradation = 2.0` (maximum permissible FID degradation).
+  - `rtol = 0.05` ($5\%$ maximum relative state trajectory error vs. baseline reference).
+  - `atol = 0.05` (maximum chordal trajectory absolute error vs. baseline reference).
+  - `max_fid_degradation = 2.0` (deprecated, retained for backwards compatibility).
+- **Relaxing Constraints with Positive Infinite Tolerances (`.inf`)**:
+  To relax or completely disable accuracy gating (for exploratory hyperparameter sweeps, high-noise characterization, or rapid latency benchmarking where candidates should not be rejected due to numerical deviation):
+  - **YAML Format**: You can specify positive infinity using native YAML floats (`.inf`, `+.inf`) or string representations (`inf`, `+inf`, `Infinity`, `".inf"`, `"float('inf')"`):
+    ```yaml
+    tolerances:
+      solver_accuracy:
+        rtol: .inf    # Disables relative error threshold check
+        atol: .inf    # Disables absolute error threshold check
+    ```
+  - **Usage Note**: Both `rtol` and `atol` should be set to `.inf` to completely bypass accuracy gating, because Node 7 evaluates both criteria independently (`relative_error > rtol` and `absolute_error > atol`). When positive infinite tolerance is configured, candidates will not trigger rewrite retries or termination failures due to accuracy degradation, avoiding Chia loop failures when solver accuracy metrics are not satisfied.
 
 ### Campaign Budget vs. Internal Counter Limits
 The configuration separates macro campaign bounds from micro execution retry bounds:

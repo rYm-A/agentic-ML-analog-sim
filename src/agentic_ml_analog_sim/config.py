@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ReferenceDesignConfig(BaseModel):
@@ -66,12 +67,39 @@ class SparsityConfigs(BaseModel):
     degree_bounded: DegreeBoundedSparsityConfig
 
 
+def _parse_tolerance_value(v: Any) -> float:
+    """Parse and validate numeric or positive infinite tolerance value."""
+    if isinstance(v, str):
+        clean = v.strip().lower()
+        if clean in (
+            ".inf", "+.inf", "inf", "+inf", "infinity", "+infinity",
+            "float('inf')", 'float("inf")', "math.inf",
+        ):
+            return float("inf")
+        try:
+            v = float(clean)
+        except ValueError:
+            raise ValueError(f"Invalid numeric tolerance string: {v!r}")
+    if isinstance(v, (int, float)):
+        if math.isnan(v):
+            raise ValueError("Tolerance cannot be NaN")
+        if v < 0.0:
+            raise ValueError(f"Tolerance must be non-negative or positive infinity, got {v}")
+        return float(v)
+    raise TypeError(f"Tolerance must be numeric or valid infinity string, got {type(v)}")
+
+
 class CompileCheckTolerance(BaseModel):
     """Tolerances for fast compile/sanity checks against reference."""
     model_config = ConfigDict(extra="forbid")
 
     rtol: float = 1e-4
     atol: float = 1e-4
+
+    @field_validator("rtol", "atol", mode="before")
+    @classmethod
+    def _validate_tolerance(cls, v: Any) -> float:
+        return _parse_tolerance_value(v)
 
 
 class SolverAccuracyTolerance(BaseModel):
@@ -91,6 +119,11 @@ class SolverAccuracyTolerance(BaseModel):
         default=2.0,
         description="Deprecated: FID is no longer used for evaluation gating. Retained for backward compatibility.",
     )
+
+    @field_validator("rtol", "atol", mode="before")
+    @classmethod
+    def _validate_tolerance(cls, v: Any) -> float:
+        return _parse_tolerance_value(v)
 
 
 class TolerancesConfig(BaseModel):

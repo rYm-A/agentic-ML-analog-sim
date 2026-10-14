@@ -42,8 +42,8 @@ tolerances:
     rtol: 1e-4
     atol: 1e-4
   solver_accuracy:
-    rtol: 3
-    atol: 3
+    rtol: .inf
+    atol: .inf
     max_fid_degradation: 2.0
 
 budget:

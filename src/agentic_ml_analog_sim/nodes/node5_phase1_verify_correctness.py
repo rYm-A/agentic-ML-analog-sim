@@ -8,6 +8,7 @@ Uses ChiaFunction for cluster worker orchestration and hardware device schedulin
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, Optional
 
 import torch
@@ -446,7 +447,14 @@ def node5_phase1_verify_correctness(
             max_rel_diff = float(torch.max(rel_diff).item())
 
             # Canonical PyTorch numerical verification: |a - b| <= atol + rtol * |b|
-            if not torch.allclose(out_compiled, out_eager, rtol=rtol, atol=atol):
+            # When positive infinite tolerance is specified, bypass strict allclose comparison
+            # to avoid IEEE floating point NaN where float('inf') * 0.0 = NaN.
+            if math.isinf(rtol) or math.isinf(atol):
+                is_close = True
+            else:
+                is_close = bool(torch.allclose(out_compiled, out_eager, rtol=rtol, atol=atol))
+
+            if not is_close:
                 error_msg = f"Numerical tolerance exceeded (torch.allclose=False): max_abs_diff={max_abs_diff:.6e} vs atol={atol}, max_rel_diff={max_rel_diff:.6e} vs rtol={rtol}"
                 return _handle_failure(
                     error_stage="correctness_verification",

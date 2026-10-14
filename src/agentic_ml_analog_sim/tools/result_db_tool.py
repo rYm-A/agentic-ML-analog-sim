@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import ray
 from chia.base.tools.ChiaTool import ChiaTool
@@ -653,15 +653,17 @@ class ResultDBTool(ChiaTool):
     def record_sensitivity_curve(
         self,
         reference_id: str,
-        curve_json: str,
+        curve_json: Optional[Union[str, List[Any]]] = None,
         experiment_name: str = "default",
+        curve: Optional[List[Any]] = None,
     ) -> str:
         """Record calibrated (epsilon_d, e_pert) points in the sensitivity lookup table.
 
         Args:
             reference_id: Candidate ID of the reference design.
-            curve_json: JSON string of list of [epsilon_d, e_pert] pairs.
+            curve_json: Optional JSON string or list of [epsilon_d, e_pert] pairs.
             experiment_name: Optional experiment identifier.
+            curve: Optional list of [epsilon_d, e_pert] pairs (convenience parameter).
 
         Returns:
             JSON string confirming recording count.
@@ -669,11 +671,14 @@ class ResultDBTool(ChiaTool):
         if self.read_only:
             raise PermissionError("ResultDBReadOnlyTool provides read-only access. Recording sensitivity curves is not permitted.")
         try:
-            raw_curve = json.loads(curve_json) if isinstance(curve_json, str) else curve_json
-            curve = [(float(p[0]), float(p[1])) for p in raw_curve]
+            raw = curve if curve is not None else curve_json
+            if raw is None:
+                return json.dumps({"status": "ERROR", "message": "Neither curve nor curve_json was provided"})
+            raw_curve = json.loads(raw) if isinstance(raw, str) else raw
+            curve_tuples = [(float(p[0]), float(p[1])) for p in raw_curve]
             count = self.db.record_sensitivity_curve(
                 reference_id=reference_id,
-                curve=curve,
+                curve=curve_tuples,
                 experiment_name=experiment_name,
             )
             return json.dumps({

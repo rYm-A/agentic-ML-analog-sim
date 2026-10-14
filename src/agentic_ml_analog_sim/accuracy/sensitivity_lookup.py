@@ -266,6 +266,8 @@ class SensitivityLookupTable:
             num_samples,
         )
 
+        scales = list(reversed(scales))
+
         with torch.inference_mode():
             for scale_idx, eps_d in enumerate(scales):
                 if abs(eps_d) < 1e-15:

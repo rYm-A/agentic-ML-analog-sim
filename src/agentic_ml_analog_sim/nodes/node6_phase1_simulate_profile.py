@@ -794,7 +794,7 @@ def node6_phase1_simulate_profile(
                                 sens_table.save_to_db(getattr(db, "_db", db))
                             logger.info("Node 6: Recorded sensitivity curve to DB (%d entries)", len(sens_table))
                         except Exception as db_err:
-                            logger.debug("Node 6: Could not record sensitivity curve to DB: %s", db_err)
+                            logger.warning("Node 6: Could not record sensitivity curve to DB: %s", db_err)
                 except Exception as cal_err:
                     logger.warning("Node 6: Failed to calibrate sensitivity lookup table: %s", cal_err)
         else:

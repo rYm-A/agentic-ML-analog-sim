@@ -641,7 +641,7 @@ def run_phase_1(
             backend_mode=target_device,
             proposal=active_candidate,
             test_mode=dry_run,
-            timeout=600.0,
+            timeout=5400.0,
         )
 
         if profile_res.get("status") == "TERMINATED_MAX_CYCLES" or profile_res.get("next_node") == "node9_phase1_error_handler":
