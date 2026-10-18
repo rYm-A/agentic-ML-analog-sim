@@ -45,47 +45,7 @@ This repository implements an autonomous **agentic hardware/software co-design l
 
 The autonomous loop is organized into three synchronized phases governed by SQLite telemetry and standardized node contracts:
 
-```
-+----------------------------------------------------------------------------------------------------+
-|                                      PHASE 0: CANDIDATE EXPLORATION                                |
-|                                                                                                    |
-|  [Node 1: Check Reference] ---> [Node 2: Propose Candidate (LLM)] ---> [Node 3: Validate Proposal]   |
-|         | (missing reference)                       ^                              | (passed)      |
-|         v                                           +------ (retry if rejected) <--+               |
-|  Route Reference to Phase 1                                                        v               |
-+-----------------------------------------------------------------------------+----------------------+
-                                                                              |
-+-----------------------------------------------------------------------------v----------------------+
-|                                 PHASE 1: REWRITE, COMPILE & SIMULATE                               |
-|                                                                                                    |
-|  [Node 0: Gate & Debug] ---> [Node 1: Solver Rewriter] ---> [Node 2: Noise Rewriter]               |
-|           ^                                                                |                       |
-|           |                                                                v                       |
-|           |                 [Node 4: Compilation Runner] <--- [Node 3: Compiler Rewriter]          |
-|           |                                |                                                       |
-|           |                                v                                                       |
-|           |                 [Node 5: Verify Correctness] (Counter 1 check)                         |
-|           |                                |                                                       |
-|           |                                v                                                       |
-|           |                 [Node 6: Simulate & Profile (MPS/CUDA)]                                |
-|           |                                |                                                       |
-|           |                                v                                                       |
-|  [Node 8: Diagnostic] <--- [Node 7: Evaluation Gate] ---> [Passed]                                |
-|  (Reruns / Debug Mode)      (Counter 2 & 4 checks)           |                                     |
-|           |                            |                     |                                     |
-|           v                            v (max cycles hit)    |                                     |
-|  [Node 9: Error Handler & SQLite Live Snapshot]              |                                     |
-+--------------------------------------------------------------|-------------------------------------+
-                                                               |
-+--------------------------------------------------------------v-------------------------------------+
-|                                 PHASE 2: AUDITING & REPORTING                                      |
-|                                                                                                    |
-|  [Node 1: Check Limits] ---> (Target reached?) ---> [Node 2: Generate Final LaTeX/PDF Report]      |
-|         | (continue loop)                                    |                                     |
-|         v                                                    v                                     |
-|  Return to Phase 0                                   [Interactive Consultant Session REPL]        |
-+----------------------------------------------------------------------------------------------------+
-```
+![loop_architecture](docs/images/entire_loop_v7.png)
 
 ### Phase 0: Candidate Exploration & Gatekeeping
 - **Deterministic Noise Quota Scheduling**: Programmatically schedules target noise models across `config.noise_models`, ensuring that `budget.max_experiments` proposals are executed for EACH configured noise model (regardless of whether individual candidate compilations/simulations succeed or fail). When all noise model quotas are satisfied, Phase 0 terminates with `TERMINATED_MAX_CYCLES`.
