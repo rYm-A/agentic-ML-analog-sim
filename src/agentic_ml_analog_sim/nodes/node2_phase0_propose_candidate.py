@@ -43,18 +43,20 @@ Based on the physical-neural-network-hardware-noise-modeling literature:
 - L3 (Correlated Drift): Spatial process gradients and 1/f aging with power-law decay theta(t) = theta(t0) * (t/t0)^(-nu).
 - Coupling Sparsity: Threshold pruning (|K_ij| < tau) or bounded oscillator degree to reduce crossbar capacitive load and digital GEMV latency.
 
-### FP32 Tolerance Bounds & Mathematical Precision Verification:
+### Numerical Discretization & Mathematical Precision:
 - Single-precision float (fp32) has machine epsilon eps ~= 1.19e-7.
-- Solvers with step size h accumulate local truncation error: Euler is O(h), RK4 is O(h^4).
+- Solvers accumulate truncation error depending on order and step size h.
+- Higher step counts improve accuracy but increase simulation latency; parallel-in-time, implicit, or adaptive formulations offer distinct latency-accuracy trade-offs.
 - Verify that configuration tolerances (compile_check rtol/atol >= 1e-4, solver_accuracy rtol/atol >= 0.05) are mathematically attainable.
 
 ### Candidate Proposal Guidelines:
 1. QUERY PRIOR PROPOSALS: Call `read_prior_proposals` or `get_candidate_history_summary` to inspect all proposals that have already been made.
 2. AVOID REPEATED PROPOSALS: Never propose a combination of (solver, num_steps, noise_model, sparsity_config) that has already been proposed or evaluated in the database. Node 3 will automatically REJECT duplicate proposals.
-3. If the database has no non-reference proposals, propose a fast baseline strictly conforming to the exploration config (e.g. Euler with 5 or 10 steps, L0 static mismatch sigma=0.01, dense connectivity).
+3. If the database has no non-reference proposals, propose an initial baseline strictly conforming to any solver from the configured solvers list.
 4. If prior evaluations exist, balance exploration of new parameters with exploitation near the Pareto frontier.
 5. If a prior proposal was rejected, avoid repeating the rejected parameter configuration.
 6. Provide a clear rationale explaining expected latency reduction and accuracy impact.
+7. SOLVER DIVERSITY: Actively explore and cover all solvers listed in the configuration across iterations. Do not restrict proposals to a single solver family.
 
 ### Response Format:
 Respond with a valid JSON object matching this schema:
@@ -100,6 +102,46 @@ def _get_allowed_solvers(config: Any) -> list[str]:
                 if name:
                     allowed.append(name)
     return allowed
+
+
+def _format_solver_options_table(config: Any) -> str:
+    """Format configured solvers and their allowed step counts as a markdown table."""
+    solvers_dict = _get_val(config, "solvers", {})
+    rows: list[str] = [
+        "### Available Solvers & Allowed Steps (from Configuration):",
+        "| Solver Name | Allowed Step Counts | Approximate dt range |",
+        "|---|---|---|",
+    ]
+    has_solvers = False
+
+    if isinstance(solvers_dict, Mapping):
+        for s_name, s_cfg in solvers_dict.items():
+            steps = _get_val(s_cfg, "steps") or _get_val(s_cfg, "allowed_steps") or [5, 10, 20]
+            step_strs = [str(st) for st in steps]
+            dts = [f"{round(1.0 / int(st), 4):.4f}" for st in steps if int(st) > 0]
+            rows.append(f"| {s_name} | [{', '.join(step_strs)}] | [{', '.join(dts)}] |")
+            has_solvers = True
+    elif isinstance(solvers_dict, (list, tuple)):
+        for s_entry in solvers_dict:
+            if isinstance(s_entry, str):
+                s_name = s_entry
+                steps = [5, 10, 20]
+            else:
+                s_name = _get_val(s_entry, "name", "euler")
+                steps = _get_val(s_entry, "steps") or _get_val(s_entry, "allowed_steps") or [5, 10, 20]
+            step_strs = [str(st) for st in steps]
+            dts = [f"{round(1.0 / int(st), 4):.4f}" for st in steps if int(st) > 0]
+            rows.append(f"| {s_name} | [{', '.join(step_strs)}] | [{', '.join(dts)}] |")
+            has_solvers = True
+
+    if not has_solvers:
+        return ""
+
+    rows.append(
+        "\nCRITICAL REQUIREMENT: You MUST select `solver` from the table above, "
+        "and `num_steps` MUST be chosen from that solver's allowed steps."
+    )
+    return "\n".join(rows)
 
 
 def _parse_llm_json_response(
@@ -670,11 +712,15 @@ def node2_phase0_propose_candidate(
             "the (solver, steps, dt, noise, sparsity) tuples listed above. Proposing a duplicate will cause automatic rejection."
         )
 
+    solver_table = _format_solver_options_table(config)
+
     user_prompt_lines = [
         "Please propose the next simulation design candidate for Un-0 analog ML accelerator.",
         f"Exploration configuration: {json.dumps(config_summary, default=str)}",
         f"Current iteration: {iteration}",
     ]
+    if solver_table:
+        user_prompt_lines.append(f"\n{solver_table}")
     if target_noise_model:
         user_prompt_lines.append(
             f"CRITICAL REQUIREMENT: You MUST set noise_model to '{target_noise_model}'. Do NOT propose any other noise model."

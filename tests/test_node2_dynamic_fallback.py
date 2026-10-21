@@ -183,3 +183,43 @@ def test_prompt_history_capped_to_10_proposals(rk4_only_config, tmp_path):
     # Proposals cand_hist_15 to cand_hist_24 (the last 10) MUST be in the history table
     for i in range(15, 25):
         assert f"cand_hist_{i:02d}" in user_prompt
+
+
+def test_format_solver_options_table_and_prompt_injection(rk4_only_config, tmp_path):
+    from agentic_ml_analog_sim.nodes.node2_phase0_propose_candidate import _format_solver_options_table
+
+    table = _format_solver_options_table(rk4_only_config)
+    assert "| rk4 | [15, 25] |" in table
+    assert "| euler_backward | [10, 20] |" in table
+    assert "CRITICAL REQUIREMENT: You MUST select `solver` from the table above" in table
+
+    db = ResultDatabase(db_path=tmp_path / "test.db")
+    mock_llm = MagicMock()
+    mock_llm.prompt.return_value = json.dumps({
+        "candidate_id": "cand_dyn_test",
+        "solver": "rk4",
+        "num_steps": 15,
+        "solver_params": {"num_steps": 15, "dt": 0.0667},
+        "noise_model": "none",
+        "noise_params": {},
+        "sparsity_config": {"type": "dense", "sparsity_ratio": 0.0},
+    })
+
+    node2_phase0_propose_candidate(
+        db=db,
+        config=rk4_only_config,
+        llm=mock_llm,
+        iteration=1,
+    )
+    user_prompt = mock_llm.prompt.call_args.kwargs.get("user_message", "")
+    assert "### Available Solvers & Allowed Steps (from Configuration):" in user_prompt
+    assert "| rk4 | [15, 25] |" in user_prompt
+    assert "| euler_backward | [10, 20] |" in user_prompt
+
+
+def test_system_prompt_does_not_bias_euler():
+    from agentic_ml_analog_sim.nodes.node2_phase0_propose_candidate import NODE2_SYSTEM_INSTRUCTIONS
+    assert "Euler is O(h), RK4 is O(h^4)" not in NODE2_SYSTEM_INSTRUCTIONS
+    assert "e.g. Euler with 5 or 10 steps" not in NODE2_SYSTEM_INSTRUCTIONS
+    assert "SOLVER DIVERSITY" in NODE2_SYSTEM_INSTRUCTIONS
+

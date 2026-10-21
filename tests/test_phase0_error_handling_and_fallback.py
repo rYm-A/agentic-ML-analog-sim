@@ -132,8 +132,9 @@ def test_node2_prompt_history_capping(temp_db):
     last_prompt = mock_llm.last_prompt
     assert last_prompt is not None
 
+    history_section = last_prompt.split("### Prohibited Configurations")[-1]
     table_data_rows = [
-        line for line in last_prompt.splitlines()
+        line for line in history_section.splitlines()
         if line.strip().startswith("|")
         and not line.strip().startswith("| Candidate ID")
         and not line.strip().startswith("|---")
