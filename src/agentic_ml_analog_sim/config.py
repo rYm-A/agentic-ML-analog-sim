@@ -28,6 +28,18 @@ class ReferenceDesignConfig(BaseModel):
         gt=0,
         description="Optional number of output classes for classification architectures."
     )
+    checkpoint_path: Optional[str] = Field(
+        default=None,
+        description="Optional path to pretrained weights file. If None, auto-resolved from huggingface cache or model registry."
+    )
+    require_pretrained_weights: bool = Field(
+        default=True,
+        description="If True, missing or invalid pretrained weights will raise an error before Phase 1."
+    )
+    parameterization: Optional[str] = Field(
+        default=None,
+        description="Optional parameterization ('standard' or 'mup'). If None, inferred from checkpoint configuration."
+    )
 
 
 class SolverConfig(BaseModel):

@@ -246,12 +246,51 @@ def node4_phase1_compilation_runner(
         try:
             from un0.model import ConditionalKuramotoDynamics
             from un0.noise import get_noise_model
+            from agentic_ml_analog_sim.utils.checkpoint_loader import (
+                resolve_un0_checkpoint,
+                load_un0_dynamics_state_dict,
+                apply_dynamics_weights,
+                get_checkpoint_parameterization,
+                get_config_attr,
+            )
+
+            # Determine parameterization ('standard' or 'mup') from config or pretrained checkpoint
+            ckpt_path_cfg = get_config_attr(ref_design, "checkpoint_path", None)
+            ref_name = get_config_attr(ref_design, "name", None)
+            ref_family = get_config_attr(ref_design, "family", None)
+            param_override = get_config_attr(ref_design, "parameterization", None)
+
+            parameterization = param_override or get_checkpoint_parameterization(
+                checkpoint_path=ckpt_path_cfg,
+                name=ref_name,
+                family=ref_family,
+                n_oscillators=n_osc,
+            )
+            logger.info("Node 4: Instantiating fallback base_dynamics with '%s' parameterization", parameterization)
 
             base_dynamics = ConditionalKuramotoDynamics(
                 n_oscillators=n_osc,
                 n_conditional_oscillators=n_cond,
                 num_classes=num_classes,
+                parameterization=parameterization,
             )
+
+            # Load official pretrained weights
+            try:
+                resolved_ckpt = resolve_un0_checkpoint(
+                    checkpoint_path=ckpt_path_cfg,
+                    name=ref_name,
+                    family=ref_family,
+                    n_oscillators=n_osc,
+                )
+                sd = load_un0_dynamics_state_dict(resolved_ckpt, device="cpu")
+                apply_dynamics_weights(base_dynamics, sd)
+                logger.info("Node 4: Loaded pretrained Un-0 weights from '%s' into fallback base_dynamics", resolved_ckpt)
+            except Exception as ckpt_err:
+                error_msg = f"Node 4: Pretrained weights could not be loaded for fallback base_dynamics: {ckpt_err}"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg) from ckpt_err
+
             noise_name = proposal.get("noise_model")
             if noise_name is None:
                 noise_name = getattr(ref_design, "noise_model", "none")

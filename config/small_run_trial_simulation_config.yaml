@@ -5,7 +5,7 @@ reference_design:
   name: "imagenet64/n6656"
   family: "imagenet64"
   n_oscillators: 6656
-  n_conditional_oscillators: 8
+  n_conditional_oscillators: 1
   solver: "rk4"
   num_steps: 45
   integration_time: 1.0

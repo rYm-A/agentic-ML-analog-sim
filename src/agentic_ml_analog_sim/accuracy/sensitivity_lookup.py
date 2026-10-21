@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 def generate_perturbation_scales(
     min_scale: float = 1e-5,
-    max_scale: float = 1.0,
+    max_scale: float = 1,
     num_points: int = 50,
     include_zero: bool = True,
 ) -> List[float]:
@@ -39,7 +39,7 @@ def generate_perturbation_scales(
 
     Args:
         min_scale: Lower bound (default 1e-5).
-        max_scale: Upper bound (default 1.0).
+        max_scale: Upper bound (default 2.9).
         num_points: Number of log-spaced points.
         include_zero: If True, prepends 0.0 as baseline.
 
@@ -227,7 +227,7 @@ class SensitivityLookupTable:
             )
 
         if scales is None:
-            scales = generate_perturbation_scales(min_scale=1e-5, max_scale=1.0, num_points=50, include_zero=True)
+            scales = generate_perturbation_scales(min_scale=1e-5, max_scale=1, num_points=50, include_zero=True)
 
         if device_str is not None:
             device = torch.device(device_str)
@@ -376,7 +376,7 @@ class SensitivityLookupTable:
             raise ValueError("Cannot calibrate sensitivity table: ref_snapshots is empty.")
 
         if scales is None:
-            scales = generate_perturbation_scales(min_scale=1e-5, max_scale=1.0, num_points=50, include_zero=True)
+            scales = generate_perturbation_scales(min_scale=1e-5, max_scale=1, num_points=50, include_zero=True)
 
         num_samples = len(ref_snapshots)
         class_labels = [s % num_classes for s in range(num_samples)]

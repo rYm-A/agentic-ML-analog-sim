@@ -138,6 +138,21 @@ def run_phase_0(
         config: SimulationConfig = load_simulation_config(cfg_path)
         logger.info("Loaded simulation configuration for experiment '%s'", config.experiment_name)
 
+        # Pre-Flight Validation: Verify pretrained Un-0 weights
+        from agentic_ml_analog_sim.utils.checkpoint_loader import validate_checkpoint_for_design
+        try:
+            validate_checkpoint_for_design(config)
+        except Exception as ckpt_err:
+            logger.error("Phase 0: Pretrained weights validation failed: %s", ckpt_err)
+            return Phase0Result(
+                action="ERROR",
+                candidate_id=None,
+                phase_1_instructions=None,
+                cycle_count=0,
+                details=f"Pretrained weights validation failed: {ckpt_err}",
+            )
+
+
         # 2. Initialize Result Database
         database = ResultDatabase(db_path=db_path)
         logger.info("Initialized ResultDatabase at %s", db_path)

@@ -110,8 +110,12 @@ def node1_phase0_check_reference(db: Any, config: Any) -> bool:
         bool: True if reference design data is complete and valid (proceed to Node 2).
               False if reference data is missing or incomplete (route to Phase 1).
     """
+    from agentic_ml_analog_sim.utils.checkpoint_loader import validate_checkpoint_for_design
+    validate_checkpoint_for_design(config)
+
     entry = _find_reference_entry(db, config)
     if entry is None:
+
         logger.info("Node 1: Reference design data not found in DB. Routing to Phase 1.")
         return False
 

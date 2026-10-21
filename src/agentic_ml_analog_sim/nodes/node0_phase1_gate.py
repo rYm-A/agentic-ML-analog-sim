@@ -68,6 +68,15 @@ def node0_gate(
         logger.info("Node 0: Entering Phase 1 from Phase 0 for candidate '%s'. Resetting all 4 counters to 0.", proposal_id)
         db.reset_counters(proposal_id)
 
+        # Enforce pretrained checkpoint validation before entering Phase 1
+        from agentic_ml_analog_sim.utils.checkpoint_loader import validate_checkpoint_for_design
+        try:
+            validate_checkpoint_for_design(config)
+        except Exception as ckpt_err:
+            logger.error("Node 0 Gate: Pretrained weights validation failed before Phase 1: %s", ckpt_err)
+            raise
+
+
         # Transition active candidate to EVALUATING state
         if hasattr(db, "mark_proposal_status") and callable(db.mark_proposal_status):
             try:

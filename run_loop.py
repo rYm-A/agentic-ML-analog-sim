@@ -316,8 +316,22 @@ def execute_loop(
     else:
         logger.info("Ray automatic verification bypassed by user request (auto_init_ray=False).")
 
+    reports_base = Path(reports_base).resolve()
     config = load_simulation_config(config_path)
+
+    # -------------------------------------------------------------------------
+    # Pre-Flight Validation: Verify pretrained Un-0 weights before entering loop
+    # -------------------------------------------------------------------------
+    from agentic_ml_analog_sim.utils.checkpoint_loader import validate_checkpoint_for_design
+    try:
+        validated_ckpt = validate_checkpoint_for_design(config)
+        logger.info("Pre-flight check: Pretrained Un-0 weights verified at '%s'", validated_ckpt)
+    except Exception as exc:
+        logger.error("Pre-flight check failed: Pretrained weights validation failed: %s", exc)
+        raise
+
     experiment_dir, db_path = setup_experiment_storage(
+
         config=config,
         reports_base=reports_base,
         custom_db_path=custom_db_path,

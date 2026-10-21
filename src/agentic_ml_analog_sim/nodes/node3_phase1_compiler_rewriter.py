@@ -339,12 +339,65 @@ def node3_phase1_compiler_rewriter(
     # 2. Instantiate eager baseline model with requested noise model
     from un0.model import ConditionalKuramotoDynamics
     from un0.noise import get_noise_model
+    from agentic_ml_analog_sim.utils.checkpoint_loader import (
+        resolve_un0_checkpoint,
+        load_un0_dynamics_state_dict,
+        apply_dynamics_weights,
+        get_checkpoint_parameterization,
+        get_config_attr,
+    )
+
+    # Determine parameterization ('standard' or 'mup') from config or pretrained checkpoint
+    ckpt_path_cfg = get_config_attr(ref_design, "checkpoint_path", None)
+    ref_name = get_config_attr(ref_design, "name", None)
+    ref_family = get_config_attr(ref_design, "family", None)
+    param_override = get_config_attr(ref_design, "parameterization", None)
+
+    parameterization = param_override or get_checkpoint_parameterization(
+        checkpoint_path=ckpt_path_cfg,
+        name=ref_name,
+        family=ref_family,
+        n_oscillators=n_osc,
+    )
+    logger.info(
+        "Node 3: Instantiating base_dynamics with '%s' parameterization for candidate '%s'",
+        parameterization,
+        candidate_id,
+    )
 
     base_dynamics = ConditionalKuramotoDynamics(
         n_oscillators=n_osc,
         n_conditional_oscillators=n_cond,
         num_classes=num_classes,
+        parameterization=parameterization,
     )
+
+    # Load official pretrained weights so reference and candidates share identical ground-truth weights
+    try:
+        resolved_ckpt = resolve_un0_checkpoint(
+            checkpoint_path=ckpt_path_cfg,
+            name=ref_name,
+            family=ref_family,
+            n_oscillators=n_osc,
+        )
+        sd = load_un0_dynamics_state_dict(resolved_ckpt, device="cpu")
+        apply_dynamics_weights(base_dynamics, sd)
+        logger.info(
+            "Node 3: Successfully loaded pretrained Un-0 weights from '%s' into base_dynamics for '%s'",
+            resolved_ckpt,
+            candidate_id,
+        )
+    except Exception as ckpt_err:
+        error_msg = f"Node 3: Pretrained weights could not be loaded for candidate '{candidate_id}': {ckpt_err}"
+        logger.error(error_msg)
+        db.update_execution_status(
+            candidate_id,
+            rewrite_compiler_status="FAILED",
+            error_stage="node3_phase1_compiler_rewriter",
+            error_message=error_msg,
+        )
+        raise RuntimeError(error_msg) from ckpt_err
+
 
     noise_name = proposal.get("noise_model")
     if noise_name is None:
