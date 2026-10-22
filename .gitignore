@@ -43,6 +43,7 @@ session_*
 *.fdb_latexmk
 *.synctex.gz
 *.out
+reports/*
 
 # Simulation & reference cache artifacts
 sensitivity_lookup.json

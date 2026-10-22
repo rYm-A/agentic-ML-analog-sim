@@ -16,26 +16,25 @@ reference_design:
 
 solvers:
   rk4:
-    steps: [5, 10, 15, 25]
+    steps: [5, 10, 15, 25, 35]
   euler_backward:
-    steps: [2, 5, 10]
+    steps: [2, 5, 10, 25, 35]
   parareal:
-    steps: [10, 20]
+    steps: [2, 10, 20, 25, 35]
   par_ode:
-    steps: [10, 25]
+    steps: [2, 10, 20, 25, 35]
 
 noise_models:
   - "L0_static_mismatch"
   - "L1_stochastic_parameter_noise"
-  - "L2_functional_interface"
 
 sparsity_configs:
   dense:
     sparsity_ratio: 0.0
   threshold_pruned:
-    allowed_sparsity_ratios: [0.2, 0.4, 0.6, 0.8]
+    allowed_sparsity_ratios: [0.0]
   degree_bounded:
-    max_degree: [64, 128, 256]
+    max_degree: [64]
 
 tolerances:
   compile_check:
@@ -47,8 +46,8 @@ tolerances:
     max_fid_degradation: 2.0
 
 budget:
-  max_experiments: 5
-  max_iterations: 15
+  max_experiments: 7
+  max_iterations: 22
   max_node_retries: 3
   timeout_seconds_per_eval: 300
 
@@ -56,7 +55,7 @@ counter_limits:
   max_counter_1_compilation: 3
   max_counter_2_rewrite: 3
   max_counter_3_debug_gate: 3
-  max_counter_4_debug_loop: 5
+  max_counter_4_debug_loop: 4
 
 agent_efforts:
   node2_phase0_propose_candidate:
