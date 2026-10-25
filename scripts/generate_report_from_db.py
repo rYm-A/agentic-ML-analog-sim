@@ -136,6 +136,14 @@ def main():
     if not out_dir.is_absolute():
         out_dir = REPO_ROOT / out_dir
 
+    # Sync experiment_name if out_dir targets a specific experiment subfolder
+    if out_dir.name and out_dir.name not in ("reports", "embellished_validation"):
+        target_exp = out_dir.name
+        if isinstance(cfg, dict):
+            cfg["experiment_name"] = target_exp
+        elif hasattr(cfg, "model_copy"):
+            cfg = cfg.model_copy(update={"experiment_name": target_exp})
+
     logger.info("Executing Phase 2 reporting node with output directory: %s", out_dir)
     result = node2_phase2_generate_final_report(
         db=db,
