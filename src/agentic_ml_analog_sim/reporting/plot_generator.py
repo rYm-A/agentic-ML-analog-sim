@@ -201,20 +201,27 @@ def generate_pareto_plot(
 
         # Annotate candidate Pareto configurations with step count and anti-collision offsets
         cand_pts = [pt for pt in pareto_pts if not pt[2].get("is_reference") and pt[2].get("candidate_id") not in ref_ids]
-        offset_cycle = [(12, 14), (12, -24), (-95, 14), (-95, -24), (15, 26), (15, -36)]
         annotated_positions: List[Tuple[float, float]] = []
+
+        # Distinct directional offsets for frontier points (ordered by increasing latency / decreasing error):
+        # 1st point (fastest, highest error): slightly right and up, avoiding top spine
+        # 2nd point: up and to the right into clear space above frontier
+        # 3rd point: down and to the right into clear space below frontier
+        offset_sequence = [
+            (24, 10),
+            (32, 34),
+            (45, -28),
+            (35, 30),
+            (45, -32),
+            (28, 14),
+        ]
 
         for idx, (x, y, p) in enumerate(cand_pts[:6]):
             solver = p.get("solver", "solver")
             steps = _extract_steps(p)
             label_text = f"{solver} ({steps} steps)" if steps is not None else f"{solver}"
 
-            # Anti-collision offset selection
-            collides = any(
-                abs(x - prev_x) < 40.0 and abs(y - prev_y) < 0.04
-                for prev_x, prev_y in annotated_positions
-            )
-            chosen_offset = offset_cycle[(idx + (1 if collides else 0)) % len(offset_cycle)]
+            chosen_offset = offset_sequence[idx % len(offset_sequence)]
             annotated_positions.append((x, y))
 
             ax.annotate(
@@ -229,6 +236,16 @@ def generate_pareto_plot(
                 arrowprops=dict(arrowstyle="->", color="#059669", lw=0.8, alpha=0.7),
                 zorder=6,
             )
+
+    # Set axes limits with comfortable padding so labels do not clip
+    all_x = [pt[0] for pt in pareto_pts] + other_x
+    all_y = [pt[1] for pt in pareto_pts] + other_y
+    if all_x:
+        x_min, x_max = min(all_x), max(all_x)
+        ax.set_xlim(left=max(0.0, x_min * 0.4), right=x_max * 1.06)
+    if all_y:
+        y_max = max(all_y)
+        ax.set_ylim(bottom=-0.04 * y_max if y_max > 0 else -0.04, top=y_max * 1.20 if y_max > 0 else 1.0)
 
     # 3. Plot reference design strictly ONCE as a yellow circle (no star, no duplicate green circle)
     for r in ref_proposals:
