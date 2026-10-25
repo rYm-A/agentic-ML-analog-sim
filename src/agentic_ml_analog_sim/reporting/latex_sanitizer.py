@@ -99,6 +99,35 @@ UNICODE_LATEX_MAP: Dict[str, str] = {
 }
 
 
+def is_character_diagram(text: str) -> bool:
+    """Detect whether a text snippet contains a character-made diagram or ASCII art plot."""
+    if not text:
+        return False
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if not lines:
+        return False
+
+    # Check for axis patterns: e.g. +---, |--> , 1800 +, | , [Cluster A...], etc.
+    axis_line_count = sum(
+        1 for l in lines
+        if re.search(r"\+[-=]{2,}|[-=]{2,}>|^\d+\s*[+|]|\b(?:Latency|Error|Throughput|Time)\s*\([a-zA-Z]+\)\s*$", l, re.IGNORECASE)
+        or re.match(r"^\s*[|^]", l)
+    )
+    # Check for box drawing or diagram characters
+    box_char_count = sum(len(re.findall(r"[+|┌┐└┘├┤┬┴┼│─^]", l)) for l in lines)
+    total_chars = sum(len(l) for l in lines)
+
+    if axis_line_count >= 2:
+        return True
+    if box_char_count >= 12 and (box_char_count / max(total_chars, 1)) > 0.03:
+        return True
+    if any(re.search(r"\+[-]{3,}\+[-]{3,}", l) for l in lines):
+        return True
+    if any(re.search(r"\+[-=]{5,}>", l) for l in lines):
+        return True
+    return False
+
+
 def _is_table_row(line: str) -> bool:
     s = line.strip()
     return bool(s and "|" in s and not s.startswith(r"\documentclass") and not s.startswith(r"\begin"))
@@ -205,7 +234,7 @@ def _sanitize_table_cell(cell: str, is_header: bool = False) -> str:
     return res
 
 
-def convert_markdown_tables_to_latex(text: str) -> str:
+def convert_markdown_tables_to_latex(text: str, wrap_table: bool = False) -> str:
     """Automatically detect Markdown tables (| ... |) and convert them into native LaTeX tabular environments with booktabs.
 
     Handles column alignment (:---, :---:, ---:), header formatting (\\textbf),
@@ -213,6 +242,7 @@ def convert_markdown_tables_to_latex(text: str) -> str:
 
     Args:
         text: Input string containing Markdown tables.
+        wrap_table: Whether to wrap tabular in table/table* environment with resizebox and arraystretch.
 
     Returns:
         String with Markdown tables converted to native LaTeX tabular environments.
@@ -262,7 +292,32 @@ def convert_markdown_tables_to_latex(text: str) -> str:
             tabular_lines.extend(body_rows)
             tabular_lines.append(r"\bottomrule")
             tabular_lines.append(r"\end{tabular}")
-            out_lines.extend(tabular_lines)
+
+            if wrap_table:
+                tabular_str = "\n".join(tabular_lines)
+                if num_cols >= 5:
+                    table_wrapper = [
+                        r"\begin{table*}[t]",
+                        r"\centering",
+                        r"\renewcommand{\arraystretch}{1.15}",
+                        r"\resizebox{\textwidth}{!}{%",
+                        tabular_str,
+                        r"}",
+                        r"\end{table*}",
+                    ]
+                else:
+                    table_wrapper = [
+                        r"\begin{table}[htbp]",
+                        r"\centering",
+                        r"\renewcommand{\arraystretch}{1.15}",
+                        r"\resizebox{\columnwidth}{!}{%",
+                        tabular_str,
+                        r"}",
+                        r"\end{table}",
+                    ]
+                out_lines.extend(table_wrapper)
+            else:
+                out_lines.extend(tabular_lines)
             i = j
         else:
             out_lines.append(lines[i])
@@ -271,17 +326,19 @@ def convert_markdown_tables_to_latex(text: str) -> str:
     return "\n".join(out_lines)
 
 
-def sanitize_ascii_art(text: str, strip: bool = False) -> str:
+def sanitize_ascii_art(text: str, strip: bool = False, strip_character_diagrams: bool = False) -> str:
     """Sanitize or strip triple-backtick ASCII diagrams, progress bars, and code blocks.
 
     If strip is True, triple-backtick blocks are removed.
-    If strip is False, triple-backtick blocks are converted into clean LaTeX verbatim environments.
+    If strip is False, triple-backtick blocks are converted into clean LaTeX verbatim environments,
+    unless strip_character_diagrams is True and the block is a character-made diagram.
     If a triple-backtick block contains a Markdown table, it is unwrapped so it can be
     converted by convert_markdown_tables_to_latex.
 
     Args:
         text: Input text containing triple backtick blocks.
         strip: Whether to completely strip ASCII art instead of transforming to verbatim.
+        strip_character_diagrams: Whether to specifically strip character-made diagrams.
 
     Returns:
         Sanitized text with clean LaTeX environments.
@@ -301,7 +358,7 @@ def sanitize_ascii_art(text: str, strip: bool = False) -> str:
         if any(_is_separator_row(l) for l in block_lines):
             return "\n" + content.strip() + "\n"
 
-        if strip:
+        if strip or (strip_character_diagrams and is_character_diagram(content)):
             return ""
 
         # Clean previously escaped LaTeX specials for clean verbatim presentation
@@ -363,7 +420,9 @@ def sanitize_latex(text: Any, strip_ascii: bool = False) -> str:
     s = re.sub(r"\*\*(.+?)\*\*", r"\\textbf{\1}", s)
     s = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\\textit{\1}", s)
 
-    # 6. Currency dollars: replace isolated currency $ followed by numbers BEFORE introducing math $...$
+    # 6. Currency dollars: clean double-dollar currency like $$7.78$ or $$7.78 -> \$7.78
+    s = re.sub(r"(?<!\\)\${2}\s*(\d+(?:\.\d+)?)\$?", r"\$\1", s)
+    # Currency dollars: replace isolated currency $ followed by numbers BEFORE introducing math $...$
     s = re.sub(r"(?<!\\)\$(?=\s*\d)", r"\$", s)
 
     # 7. Percentages: 16.67% -> 16.67\%
@@ -436,12 +495,77 @@ def sanitize_latex_text(text: Any) -> str:
     return sanitize_latex(text)
 
 
+def _ensure_tables_fit(doc_str: str) -> str:
+    """Ensure all tabular environments fit within columns with proper row height."""
+    pattern = re.compile(r"(\\begin\{tabular\}\{[^}]+\}.*?\\end\{tabular\})", re.DOTALL)
+
+    def _replace_tab(match: re.Match) -> str:
+        tab_code = match.group(1)
+        start_idx = match.start()
+        preceding = doc_str[max(0, start_idx - 300):start_idx]
+
+        # Already inside a resizebox?
+        if r"\resizebox{" in preceding:
+            return tab_code
+
+        # Count number of columns
+        col_match = re.search(r"\\begin\{tabular\}\{([^}]+)\}", tab_code)
+        num_cols = 5
+        if col_match:
+            spec = re.sub(r"[@{}|*0-9]", "", col_match.group(1))
+            num_cols = len(spec) if spec else 5
+
+        # Check if inside \begin{table*} or \begin{table}
+        is_table_star = r"\begin{table*}" in preceding and r"\end{table*}" not in preceding
+        is_table = r"\begin{table}" in preceding and r"\end{table}" not in preceding
+
+        if is_table_star:
+            return (
+                "\\renewcommand{\\arraystretch}{1.15}\n"
+                "\\resizebox{\\textwidth}{!}{%\n"
+                + tab_code +
+                "\n}%"
+            )
+        elif is_table:
+            return (
+                "\\renewcommand{\\arraystretch}{1.15}\n"
+                "\\resizebox{\\columnwidth}{!}{%\n"
+                + tab_code +
+                "\n}%"
+            )
+        else:
+            # Tabular outside of any table environment
+            if num_cols >= 5:
+                return (
+                    "\\begin{table*}[htbp]\n"
+                    "\\centering\n"
+                    "\\renewcommand{\\arraystretch}{1.15}\n"
+                    "\\resizebox{\\textwidth}{!}{%\n"
+                    + tab_code +
+                    "\n}%\n"
+                    "\\end{table*}"
+                )
+            else:
+                return (
+                    "\\begin{table}[htbp]\n"
+                    "\\centering\n"
+                    "\\renewcommand{\\arraystretch}{1.15}\n"
+                    "\\resizebox{\\columnwidth}{!}{%\n"
+                    + tab_code +
+                    "\n}%\n"
+                    "\\end{table}"
+                )
+
+    return pattern.sub(_replace_tab, doc_str)
+
+
 def sanitize_latex_document(doc_str: str) -> str:
     """Sanitize an entire LaTeX document or existing .tex file.
 
     Preserves document structure (preamble, tables, figures, environments)
     while sanitizing narrative paragraphs, itemized points, and unescaped table texts.
-    Converts embedded Markdown tables and ASCII art blocks.
+    Converts embedded Markdown tables, strips character-made diagrams, and ensures
+    all tables fit page columns.
 
     Args:
         doc_str: Raw LaTeX document content.
@@ -449,9 +573,21 @@ def sanitize_latex_document(doc_str: str) -> str:
     Returns:
         Fully sanitized LaTeX document string that compiles cleanly with pdflatex.
     """
-    # Pre-process document to convert Markdown tables and ASCII blocks
-    doc_str = sanitize_ascii_art(doc_str)
+    # 1. Strip verbatim environments that contain character-made diagrams
+    def _strip_verbatim_diagrams(m: re.Match) -> str:
+        inner = m.group(1)
+        if is_character_diagram(inner):
+            return "% [Character-made diagram omitted in favor of Matplotlib figures]\n"
+        return m.group(0)
+
+    doc_str = re.sub(r"\\begin\{verbatim\}(.*?)\\end\{verbatim\}", _strip_verbatim_diagrams, doc_str, flags=re.DOTALL)
+
+    # 2. Pre-process document to convert Markdown tables and ASCII blocks
+    doc_str = sanitize_ascii_art(doc_str, strip_character_diagrams=True)
     doc_str = convert_markdown_tables_to_latex(doc_str)
+
+    # 3. Ensure all tabular environments fit within columns with adjusted row height
+    doc_str = _ensure_tables_fit(doc_str)
 
     lines = doc_str.splitlines()
     sanitized_lines: List[str] = []
@@ -464,6 +600,7 @@ def sanitize_latex_document(doc_str: str) -> str:
         r"\IEEE", r"\begin", r"\end", r"\maketitle", r"\caption", r"\label",
         r"\includegraphics", r"\toprule", r"\midrule", r"\bottomrule", r"\centering",
         r"\section", r"\subsection", r"\subsubsection",
+        r"\resizebox", r"\renewcommand", r"%", r"\vspace", r"\hspace",
     )
 
     for line in lines:
@@ -513,7 +650,7 @@ def sanitize_latex_document(doc_str: str) -> str:
             continue
 
         # Preserve structural LaTeX commands without escaping backslashes or command names
-        if any(stripped.startswith(p) for p in cmd_prefixes):
+        if any(stripped.startswith(p) for p in cmd_prefixes) or stripped in ("}%", "}", "{%", "{"):
             sanitized_lines.append(line)
             continue
 
