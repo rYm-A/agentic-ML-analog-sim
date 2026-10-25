@@ -189,3 +189,31 @@ def test_plot_tool_mcp(populated_db: ResultDatabase, tmp_path: Path):
     for plot_type, files in data["plots"].items():
         assert Path(files["pdf"]).exists()
         assert Path(files["png"]).exists()
+
+
+def test_generate_pareto_absolute_error_and_geometry_plot(populated_db: ResultDatabase, tmp_path: Path):
+    from agentic_ml_analog_sim.reporting.plot_generator import (
+        generate_consolidated_pareto_plot,
+        generate_frontier_geometry_plot,
+        generate_multi_noise_pareto_plots,
+    )
+
+    out_dir = tmp_path / "figures_abs"
+
+    # Test absolute error Pareto plot
+    res_abs = generate_pareto_plot(populated_db, out_dir, "test_pareto_abs", metric="absolute_error")
+    assert Path(res_abs["pdf"]).exists()
+    assert Path(res_abs["png"]).exists()
+
+    # Test multi-noise plots with absolute error
+    res_multi = generate_multi_noise_pareto_plots(
+        populated_db, out_dir, ["none", "L0_static_mismatch"], prefix="pareto_abs", metric="absolute_error"
+    )
+    assert "all" in res_multi
+    assert Path(res_multi["all"]["pdf"]).exists()
+
+    # Test frontier geometry plot (Section II.B replacement)
+    res_geom = generate_frontier_geometry_plot(populated_db, out_dir, "test_clusters")
+    assert Path(res_geom["pdf"]).exists()
+    assert Path(res_geom["png"]).exists()
+    assert Path(res_geom["pdf"]).stat().st_size > 1000

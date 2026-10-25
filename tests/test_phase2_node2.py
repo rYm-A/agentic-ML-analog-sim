@@ -103,8 +103,19 @@ def test_phase2_generate_final_report_tex_and_figures(populated_report_db: Resul
     assert "\\section{Pipeline Execution Reliability}" in tex_text
     assert "\\section{Swarm Resource and Token Auditing}" in tex_text
     assert "figures/pareto_frontier.pdf" in tex_text
+    assert "figures/pareto_frontier_abs.pdf" in tex_text
+    assert "figures/pareto_clusters.pdf" in tex_text
     assert "figures/execution_breakdown.pdf" in tex_text
     assert "figures/token_cost_summary.pdf" in tex_text
+
+    # Verify baseline marker description is yellow circle, not star
+    assert "Golden baseline is marked with a yellow circle" in tex_text
+    assert "marked with a star" not in tex_text
+
+    # Verify table column fitting and arraystretch
+    assert "\\resizebox{\\textwidth}{!}" in tex_text
+    assert "\\resizebox{\\columnwidth}{!}" in tex_text
+    assert "\\renewcommand{\\arraystretch}{1.15}" in tex_text
 
     # Verify experiment subfolder routing
     exp_out_dir = Path(res["output_dir"])
@@ -113,6 +124,8 @@ def test_phase2_generate_final_report_tex_and_figures(populated_report_db: Resul
 
     # Verify figures exist on disk in experiment subfolder
     assert (exp_out_dir / "figures" / "pareto_frontier.pdf").exists()
+    assert (exp_out_dir / "figures" / "pareto_frontier_abs.pdf").exists()
+    assert (exp_out_dir / "figures" / "pareto_clusters.pdf").exists()
     assert (exp_out_dir / "figures" / "execution_breakdown.pdf").exists()
     assert (exp_out_dir / "figures" / "token_cost_summary.pdf").exists()
 

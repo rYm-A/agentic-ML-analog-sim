@@ -101,3 +101,72 @@ def test_sanitize_and_compile_original_final_report_tex(tmp_path: Path):
     pdf_file = out_dir / "sanitized_final_report.pdf"
     assert pdf_file.exists()
     assert pdf_file.stat().st_size > 1000
+
+
+def test_is_character_diagram_and_stripping():
+    ascii_art = """
+Latency (ms)
+    1800 +  [ref_rk4_60steps] (1703 ms, Err=0.000)
+    1600 |
+    1400 |
+     200 |                   [Cluster B: ParODE / RK4, 10 steps] (~281-283 ms, Err~0.4255)
+       0 +-------------------+-------------------+--> Relative Error
+        0.0                 0.15                0.30
+"""
+    from agentic_ml_analog_sim.reporting.latex_sanitizer import (
+        is_character_diagram,
+        sanitize_ascii_art,
+    )
+
+    assert is_character_diagram(ascii_art) is True
+    assert is_character_diagram("This is regular narrative text with no diagrams.") is False
+
+    # sanitize_ascii_art with strip_character_diagrams=True should strip blocks that are character diagrams
+    raw_markdown = f"Here is the text:\n```{ascii_art}```\nAfter text."
+    sanitized = sanitize_ascii_art(raw_markdown, strip_character_diagrams=True)
+    assert "[ref_rk4_60steps]" not in sanitized
+    assert "Relative Error" not in sanitized
+
+    # sanitize_latex_document should strip verbatim containing character diagrams
+    doc_with_verbatim = (
+        r"\documentclass{article}\begin{document}"
+        f"\n\\begin{{verbatim}}{ascii_art}\\end{{verbatim}}\n"
+        r"Some text.\end{document}"
+    )
+    doc_sanitized = sanitize_latex_document(doc_with_verbatim)
+    assert r"\begin{verbatim}" not in doc_sanitized
+    assert "Character-made diagram omitted" in doc_sanitized
+
+
+def test_table_fitting_and_arraystretch():
+    from agentic_ml_analog_sim.reporting.latex_sanitizer import convert_markdown_tables_to_latex
+
+    md_table = """
+| Col1 | Col2 | Col3 | Col4 | Col5 | Col6 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| A    | B    | C    | D    | E    | F    |
+"""
+    latex_table = convert_markdown_tables_to_latex(md_table, wrap_table=True)
+    assert r"\resizebox{\textwidth}{!}" in latex_table
+    assert r"\renewcommand{\arraystretch}{1.15}" in latex_table
+    assert r"\begin{table*}" in latex_table
+
+    raw_doc = (
+        r"\documentclass{article}\begin{document}"
+        r"\begin{table}[htbp]"
+        r"\begin{tabular}{llcccrr}"
+        r"A & B & C & D & E & F & G \\"
+        r"\end{tabular}"
+        r"\end{table}\end{document}"
+    )
+    doc_sanitized = sanitize_latex_document(raw_doc)
+    assert r"\resizebox{\columnwidth}{!}" in doc_sanitized
+    assert r"\renewcommand{\arraystretch}{1.15}" in doc_sanitized
+
+
+def test_currency_double_dollar_sanitization():
+    raw_text = "Expenditure was $$7.78$ and cost was $$12.50 across all phases."
+    sanitized = sanitize_latex_text(raw_text)
+    assert r"\$7.78" in sanitized
+    assert r"\$12.50" in sanitized
+    assert "$$" not in sanitized
